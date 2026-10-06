@@ -688,9 +688,9 @@ function decide () {
   // saplings on hand and room for them in the orchard (empty spots, or fewer trees than the build still needs)
   {
     const saps = orchard.saplingCount(bot) + inv.count(bot, 'dark_oak_sapling') + Object.entries(base.bankCounts()).filter(([n]) => orchard.ANY_SAP_RE.test(n)).reduce((a, [, c]) => a + c, 0)
-    const spruceSaps = Math.max(...['spruce_sapling', 'dark_oak_sapling'].map(n => inv.count(bot, n) + base.bankCount(n))) // (the squares' saplings)
+    const sc = orchard.sapCounts(bot, base.bankCounts()) // (the saplings to hand, the bank's included: the planter's own rule)
     const o = orchard.orchard()
-    if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, spruceSaps, saps, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots, ${demandTrees} trees wanted)` }
+    if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, sc, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots; ${demandTrees.squares} squares and ${demandTrees.singles} singles wanted)` }
   }
   // the sheep pen: built while the build wants wool, then stocked and bred (pen.work: the one rule for this and the task)
   // (a gap in a stocked pen's fence is the gate's errand - the flock walks out; audit)
@@ -1184,7 +1184,7 @@ const TASKS = {
   async pen () { const w = pen.work(bot, penArgs()); return w ? pen.run(bot, w.kind, { shouldStop: dayStop }) : true },
   async plant () {
     for (const [n, c] of Object.entries(base.bankCounts())) if (orchard.ANY_SAP_RE.test(n) && c > 0) await base.withdraw(bot, n, c).catch(() => 0)
-    return (await orchard.plant(bot, { demandTrees, shouldStop: dayStop })) > 0
+    return (await orchard.plant(bot, { demand: demandTrees, shouldStop: dayStop })) > 0
   },
   async tools () {
     // (room first: a full pack takes nothing from the chest and keeps no craft's result - "the server did not hand over the
@@ -1392,7 +1392,7 @@ function tripRoom () { return Math.max(1, inv.freeSlots(bot) - 2) * 64 }
 // Trees the build still needs: its logs and its fuel as charcoal (8/7 logs a unit), over the logs a tree gives (what the
 // orchard's own harvests have given, 5 - the wild oaks round Notre-Dame - until it has any). Updated whenever the
 // materials plan is made at home; the orchard grows to it and no further.
-let demandTrees = 0
+let demandTrees = { squares: 0, singles: 0 } // (orchard.demandFor: the squares and the singles the build's wood still wants)
 // Wool the build still needs (its plan's raw wool), with demandTrees: the sheep pen is built for it.
 let demandWool = 0
 const cellCost = new Map() // item -> { raws, c }: one cell's raw cost by its recipe (stock-free) - pickRaw's order
@@ -1405,11 +1405,10 @@ function penArgs () {
   const bedWool = mem.get().bed || shelter.hasBedItem(bot) ? 0 : 3
   return { woolWanted: demandWool + bedWool, wheat: Math.max(0, wheat - (breadStock() < BREAD_WANTED ? 9 : 0)) }
 }
-function treesFor (tot) {
-  const logs = (tot.raw.log || 0) + Math.ceil((tot.raw.fuel || 0) * 8 / 7)
-  const per = (mem.get().orchard && mem.get().orchard.perTree) || 5
-  return Math.ceil(logs / per)
-}
+// (every log the orchard can grow, the class and each species - an exact-wood build asks for spruce_log and oak_log, never
+//  'log': the castle 1000 spruce logs short sized its orchard to 23 trees, 2026-10-06. In squares and singles apart, each by
+//  its own yield: orchard.demandFor)
+function treesFor (tot) { return orchard.demandFor(tot.raw) }
 const WINDOW_LAYERS = 4 // the layers above the lowest unfinished one the builder works in (build.nextNeeds)
 
 function stock (name) { return inv.count(bot, name) + base.bankCount(name) }
@@ -1947,10 +1946,12 @@ async function gatherForInner (raw, short) {
     case 'cobblestone': return mining.mineFor(bot, 'cobblestone', inv.count(bot, 'cobblestone') + batch, ctx)
     case 'log': {
       // the orchard's grown trees first (a short walk, and the spot replanted); then wild wood
-      if (await orchard.harvest(bot, { logs: batch, demandTrees, shouldStop: dayStop }) >= Math.min(batch, 16)) return true
+      // (never the build's own species here - the class takes any wood, and a mega spruce cut for campfires is the castle's
+      //  spruce gone to the class: mats.isReservedWood)
+      if (await orchard.harvest(bot, { logs: batch, demand: demandTrees, shouldStop: dayStop, skip: n => mats.isReservedWood(bot, n) }) >= Math.min(batch, 16)) return true
       // whatever wood grows nearest (every wood cell and wooden form takes local wood)
       const w = nearestWood() + '_log'
-      return craft.ensure(bot, w, inv.count(bot, w) + batch, Object.assign({ noWithdraw: true, leaves: orchard.wantSaplings(bot, demandTrees) > 0 }, ctx))
+      return craft.ensure(bot, w, inv.count(bot, w) + batch, Object.assign({ noWithdraw: true, leaves: orchard.wantSaplings(bot, demandTrees, w) > 0 }, ctx))
     }
     case 'fuel': {
       // LAVA BEFORE COAL: a lava bucket is a hundred smelts, a coal eight - and the coal trips brought five a go while the
@@ -2024,16 +2025,17 @@ async function gatherForInner (raw, short) {
       }
       log('dir', `short of ${short} fuel for the furnaces - cutting logs for charcoal`)
       // the orchard's grown trees first: they burn as well as any
-      const fromOrchard = await orchard.harvest(bot, { logs: Math.ceil(short * 8 / 7), demandTrees, shouldStop: dayStop })
+      // (never the build's own species: a mega spruce burnt to charcoal is a hundred of the castle's logs - mats.isReservedWood)
+      const fromOrchard = await orchard.harvest(bot, { logs: Math.ceil(short * 8 / 7), demand: demandTrees, shouldStop: dayStop, skip: n => mats.isReservedWood(bot, n) })
       if (fromOrchard >= 8) {
         const r0 = await base.goHome(bot, { shouldStop: dayStop })
         // (only what the orchard just gave - the build's own logs in the pack are not fuel)
-        if (r0.ok) { let left = fromOrchard; let burnt = 0; for (const [n, c] of Object.entries(inv.counts(bot))) { if (left <= 0) break; if (mats.LOG_ANY.test(n) && c > 0) { const k = Math.min(c, left); left -= k; burnt += await smelt.burnForCharcoal(bot, n, k) } } if (burnt > 0) return true }
+        if (r0.ok) { let left = fromOrchard; let burnt = 0; for (const [n, c] of Object.entries(inv.counts(bot))) { if (left <= 0) break; if (mats.LOG_ANY.test(n) && !mats.isReservedWood(bot, n) && c > 0) { const k = Math.min(c, left); left -= k; burnt += await smelt.burnForCharcoal(bot, n, k) } } if (burnt > 0) return true }
       }
       const w = nearestWood() + '_log'
       const before = inv.count(bot, w)
       // (a log's charcoal smelts 8 and burning it costs an eighth: 8/7 logs a unit of fuel)
-      const ok = await craft.ensure(bot, w, before + Math.min(tripRoom(), Math.max(8, Math.ceil(short * 8 / 7))), Object.assign({ noWithdraw: true, leaves: orchard.wantSaplings(bot, demandTrees) > 0 }, ctx))
+      const ok = await craft.ensure(bot, w, before + Math.min(tripRoom(), Math.max(8, Math.ceil(short * 8 / 7))), Object.assign({ noWithdraw: true, leaves: orchard.wantSaplings(bot, demandTrees, w) > 0 }, ctx))
       const cut = inv.count(bot, w) - before
       // these logs are the fuel: straight into the furnaces as charcoal (never into the build's wood pool)
       if (cut >= 2) { const r = await base.goHome(bot, { shouldStop: dayStop }); if (r.ok) return (await smelt.burnForCharcoal(bot, w, cut)) > 0 }
@@ -2045,7 +2047,7 @@ async function gatherForInner (raw, short) {
       // A SPECIES' LOGS (an exact-wood build asks for spruce_log, not 'log'): the orchard's grown trees of THAT species first
       // - a mega spruce is 30-60 logs twenty blocks from home. Routed straight to the wild chop, the spruce trip cut one
       // tree and explored 176-208 blocks out past two grown mega spruces in the orchard, 2026-09-29
-      if (/_log$/.test(raw) && raw !== 'log') { const got = await orchard.harvest(bot, { logs: batch, demandTrees, species: raw, shouldStop: dayStop }); if (got >= Math.min(batch, 16)) return true }
+      if (/_log$/.test(raw) && raw !== 'log') { const got = await orchard.harvest(bot, { logs: batch, demand: demandTrees, species: raw, shouldStop: dayStop }); if (got >= Math.min(batch, 16)) return true }
       // forage skills: one gatherer each; a source searched out round home is marked (its cells wait, another is used)
       if (forage.handles(raw)) return forage.gather(bot, raw, batch, ctx)
       // sand, dirt, gravel, raw iron: the generic route (surface digging, the mine)

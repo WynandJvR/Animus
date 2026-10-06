@@ -154,14 +154,8 @@ function installDigGuard () {
     const eye = bot._getBlockAtEyeLevel && bot._getBlockAtEyeLevel()
     if (eye && /water/.test(eye.name)) t *= 5
     // off the ground: physics' onGround flickers on stairs/slab edges; a solid block right under
-    // the feet counts as ground
-    let grounded = bot.entity.onGround
-    if (!grounded) {
-      const p = bot.entity.position
-      const under = bot.blockAt(p.offset(0, -0.05, 0))
-      grounded = !!(under && under.boundingBox === 'block' && p.y - Math.floor(p.y) < 0.05)
-    }
-    if (!grounded) t *= 5
+    // the feet counts as ground (act.grounded: the one rule - act.dig waits for it before a dig)
+    if (!require('./lib/act').grounded(bot)) t *= 5
     return Math.ceil(t * 20) * 50
   }
 }

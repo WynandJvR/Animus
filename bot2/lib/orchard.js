@@ -23,6 +23,10 @@ const ANY_SAP_RE = /^(oak|spruce|birch|jungle|acacia|cherry|dark_oak)_sapling$/
 // THE SQUARES' SPECIES: four saplings of one in a 2x2 - dark oak (it grows no other way) before spruce (a single will do
 // for it). A dark oak plot at home turns a 420-block walk each way into a few steps, renewable (audit 2026-09-29)
 const QUAD_SAPS = ['dark_oak_sapling', 'spruce_sapling']
+// THE SINGLES' SPECIES: never a square's. A spruce sapling in a square is a quarter of a 90-100 log tree that grows when
+// the first of its four does; alone it is a 6-log tree (the orchard's own count: 6.4 a tree) at a quarter of the pace -
+// the orchard put 45 spruce saplings in single spots, 2026-10-06
+const SINGLE_SAP_RE = /^(oak|birch|jungle|acacia|cherry)_sapling$/
 function quadSap (bot) { return QUAD_SAPS.find(n => inv.count(bot, n) >= 4) || null }
 function quadCount (bot) { return Math.max(...QUAD_SAPS.map(n => inv.count(bot, n))) }
 const SOIL_RE = /^(grass_block|dirt|podzol|coarse_dirt|rooted_dirt|moss_block)$/
@@ -92,40 +96,110 @@ function newSpots (bot, n, { quad = false } = {}) {
   return out
 }
 
-// Grown: a log where the sapling was.
+// THE TREE IN A SPOT: a single's log where the sapling was; a square's lowest upright trunk log anywhere in its four
+// columns - a felling that stopped part way leaves our pillar in one column and the rest of the tree standing over it
+// (66-75 logs in each of four squares read as no tree, never cut and never replanted, 2026-09-29..10-06). Upright only: a
+// neighbour's branch log lies across.
+// (from the ground only - within the first four levels, where a stand beside it or a climb walled by its own trunks starts:
+//  a square whose logs all hang higher is no harvest - the climb to them is a 1-wide pillar through open air; audit)
+const SQUARE_FOOT = 3
+function trunkLog (bot, s) {
+  if (!s.quad) { const b = world.at(bot, s.x, s.y, s.z); return b && world.LOG_RE.test(b.name) ? b : null }
+  for (let dy = 0; dy <= SQUARE_FOOT; dy++) {
+    for (const c of cellsOf(s)) {
+      const b = world.at(bot, c.x, c.y + dy, c.z)
+      if (!b || !world.LOG_RE.test(b.name)) continue
+      let axis = 'y'; try { axis = b.getProperties().axis || 'y' } catch {}
+      if (axis === 'y') return b
+    }
+  }
+  return null
+}
 function grown (bot) {
   const o = orchard()
   if (!o) return []
-  return o.spots.filter(s => { const b = world.at(bot, s.x, s.y, s.z); return b && world.LOG_RE.test(b.name) })
+  return o.spots.filter(s => !!trunkLog(bot, s))
 }
+// A spot to plant: every cell free - a square's cells free or holding its saplings already, one free at least (a square
+// planted part way was never "empty" and its last saplings never went in)
 function empty (bot) {
   const o = orchard()
   if (!o) return []
-  return o.spots.filter(s => cellsOf(s).every(c => free(world.at(bot, c.x, c.y, c.z))) && spotOK(bot, s))
+  return o.spots.filter(s => {
+    const bs = cellsOf(s).map(c => world.at(bot, c.x, c.y, c.z))
+    if (!bs.every(b => free(b) || (s.quad && b && ANY_SAP_RE.test(b.name))) || !bs.some(b => free(b))) return false
+    return spotOK(bot, s)
+  })
 }
 function saplings (bot) { return inv.items(bot).filter(i => SAPLING_RE.test(i.name)) }
 function saplingCount (bot) { return saplings(bot).reduce((a, i) => a + i.count, 0) }
-
-// Saplings wanted: spots to fill now, up to the demand. The fell loop breaks leaves only while this is > 0.
-function wantSaplings (bot, demandTrees) {
-  const o = orchard()
-  const spots = o ? o.spots.length : 0
-  const room = Math.max(0, Math.min(demandTrees, 400) - spots) + empty(bot).length
-  return Math.max(0, room - saplingCount(bot))
+// The saplings to hand: `n(name)` - pack and, with the bank's counts, the chests; `singleN` the singles' species.
+function sapCounts (bot, bank = null) {
+  const n = name => inv.count(bot, name) + (bank ? (bank[name] || 0) : 0)
+  const names = new Set(inv.items(bot).map(i => i.name).concat(bank ? Object.keys(bank) : []))
+  let singleN = 0; for (const name of names) if (SINGLE_SAP_RE.test(name)) singleN += n(name)
+  return { n, singleN }
 }
 
-// Whether plant() would put a sapling in the ground with `spruceN` spruce and `totalN` saplings of all kinds to hand -
-// the director's trigger and the planter's plan one rule. Spruce goes in whole squares of four: with three and an empty
-// square the planter rightly plants nothing, and a trigger on "any sapling, any empty spot" picked plant again and again
-// for nothing (4 in a row, 2026-09-28).
-function plantable (bot, spruceN, totalN, demandTrees) {
-  const o = orchard(); const spots = o ? o.spots.length : 0
-  const fill = empty(bot); const fq = fill.filter(q => q.quad).length; const fs = fill.length - fq
-  if (fs > 0 && totalN > 0) return true // (an empty single spot takes any sapling)
-  if (fq > 0 && spruceN >= 4) return true // (an empty square, whole)
-  const freshQuads = Math.max(0, Math.min(Math.floor(Math.max(0, spruceN - 4 * fq) / 4), demandTrees - spots))
-  if (freshQuads > 0) return true
-  return totalN - 4 * (fq + freshQuads) - fs > 0 && spots + freshQuads < demandTrees // (new single spots)
+// THE DEMAND, in each kind of spot: squares for the square species' logs (spruce, dark oak - a single gives none of the
+// castle's spruce), singles for the class, the fuel and the single species'. Each counted by its OWN learnt yield: one
+// number over both (6.4, singles mostly) asked for ~250 spots for 1000 spruce logs, and the planter filled them with oak
+// and acacia (audit 2026-10-06).
+const SQUARE_LOG_RE = /^(spruce|dark_oak)_log$/
+const SINGLE_LOG_RE = /^(log|oak_log|birch_log|jungle_log|acacia_log|cherry_log)$/
+// (a square's yield until our own squares have measured it: the three measured mega spruces held 83, 97 and 105 logs,
+//  2026-09-29..10-02 - the low end)
+const SQUARE_YIELD = 80
+function yields () {
+  const o = orchard() || {}
+  return { square: o.quadCut ? Math.max(1, o.quadLogs / o.quadCut) : SQUARE_YIELD, single: o.singleCut ? Math.max(1, o.singleLogs / o.singleCut) : (o.perTree || 5) }
+}
+function demandFor (raw) {
+  const y = yields()
+  let sq = 0; let si = Math.ceil((raw.fuel || 0) * 8 / 7)
+  for (const [r, n] of Object.entries(raw)) { if (SQUARE_LOG_RE.test(r)) sq += n; else if (SINGLE_LOG_RE.test(r)) si += n }
+  return { squares: Math.ceil(sq / y.square), singles: Math.ceil(si / y.single) }
+}
+function spotCounts () { const sp = (orchard() || { spots: [] }).spots; const q = sp.filter(s => s.quad).length; return { squares: q, singles: sp.length - q } }
+const NO_DEMAND = { squares: 0, singles: 0 }
+
+// Saplings wanted - for the squares (in fours) or the singles, each to its own demand; `logName`: the tree being cut, whose
+// leaves give its own species' saplings. The fell loop breaks leaves only while this is > 0.
+function wantSaplings (bot, demand = NO_DEMAND, logName = null) {
+  const c = spotCounts(); const e = empty(bot); const eq = e.filter(s => s.quad).length
+  const wantQ = 4 * (Math.max(0, Math.min(demand.squares, 100) - c.squares) + eq) - quadCount(bot)
+  const wantS = Math.max(0, Math.min(demand.singles, 400) - c.singles) + (e.length - eq) - sapCounts(bot).singleN
+  if (logName) return Math.max(0, SQUARE_LOG_RE.test(logName) ? wantQ : wantS)
+  return Math.max(0, wantQ) + Math.max(0, wantS)
+}
+
+// THE SQUARE'S SPECIES to fill it with, from `n(name)` saplings: the one its saplings already are (enough for its free
+// cells), else one held four of; null - nothing to plant there. The trigger and the planter one rule: the trigger said yes
+// on four spruce for a half-planted dark oak square, and the planter planted nothing (audit 2026-10-06).
+function squareSpecies (bot, s, n) {
+  const bs = cellsOf(s).map(c => world.at(bot, c.x, c.y, c.z))
+  const have = bs.find(b => b && ANY_SAP_RE.test(b.name))
+  const freeN = bs.filter(b => free(b)).length
+  if (have) return n(have.name) >= freeN ? have.name : null
+  return QUAD_SAPS.find(x => n(x) >= 4) || null
+}
+// SINGLES GO IN BY THE HANDFUL: four to hand, or once a day - a trickle of one sapling a tree called the planting rung over
+// the build round after round (audit 2026-10-06)
+const SINGLE_BATCH = 4
+function singlesDue (bot, singleN) { return singleN >= SINGLE_BATCH || (orchard() || {}).singleDay !== require('./day').dayNo(bot) }
+
+// Whether plant() would put a sapling in the ground with these saplings to hand (`sc`: sapCounts, the bank's included) -
+// the director's trigger and the planter's plan one rule. A trigger on "any sapling, any empty spot" picked plant again and
+// again for nothing (4 in a row, 2026-09-28).
+function plantable (bot, sc, demand = NO_DEMAND) {
+  const c = spotCounts(); const fill = empty(bot)
+  const used = {}; const left = x => sc.n(x) - (used[x] || 0)
+  for (const s of fill.filter(q => q.quad)) { const sp = squareSpecies(bot, s, left); if (sp) return true }
+  if (c.squares < demand.squares && QUAD_SAPS.some(x => left(x) >= 4)) return true // (a fresh square)
+  if (!singlesDue(bot, sc.singleN)) return false
+  const fs = fill.length - fill.filter(q => q.quad).length
+  if (fs > 0 && sc.singleN > 0) return true // (an empty single spot)
+  return sc.singleN - fs > 0 && c.singles < demand.singles // (new single spots)
 }
 
 // Plant the saplings in the pack: empty spots first, then new spots up to the demand.
@@ -142,33 +216,29 @@ function pruneDead (bot) {
     const bs = cellsOf(s).map(c => world.at(bot, c.x, c.y, c.z))
     if (bs.some(b => !b)) continue // (unloaded: unknown, kept)
     if (bs.some(b => ANY_SAP_RE.test(b.name) || world.LOG_RE.test(b.name))) continue // (growing, or a trunk still there)
-    if (!spotOK(bot, s)) { const bad = bs.find(b => !free(b)); dropSpot(s, `${bad ? bad.name : 'no room'} there now`) }
+    if (s.quad && trunkLog(bot, s)) continue // (a square's tree standing over our pillar: the harvest's, not a dead spot)
+    // (dead by what stands IN it, or the soil gone from under it - never by a crown over it: a felled tree's leaves rot in a
+    //  minute and a neighbour's shade passes, and 4-8 spots were dropped for "no room" after each harvest, 72 -> 56 spots,
+    //  2026-10-02..06. A spot shaded now waits: empty() plants it once spotOK holds)
+    if (!spotOK(bot, s)) {
+      const bad = bs.find(b => !free(b))
+      const soil = cellsOf(s).map(c => world.at(bot, c.x, c.y - 1, c.z)).find(u => u && !SOIL_RE.test(u.name))
+      if (bad || soil) dropSpot(s, bad ? `${bad.name} there now` : `${soil.name} under it now`)
+    }
   }
 }
 
-async function plant (bot, { demandTrees = 0, shouldStop } = {}) {
+async function plant (bot, { demand = NO_DEMAND, shouldStop } = {}) {
   let o = orchard()
   if (!o) { o = { spots: [] }; mem.set('orchard', o) }
   pruneDead(bot)
   const fill = empty(bot)
-  const spruce = () => quadCount(bot) // (the squares' saplings: dark oak or spruce - quadSap)
-  // (spruce goes in fours - one mega tree - while four are in the pack for each square; the rest as single trees)
-  const fillQuads = fill.filter(q => q.quad).length
-  const quadsWanted = Math.max(0, Math.min(Math.floor(Math.max(0, spruce() - 4 * fillQuads) / 4), demandTrees - o.spots.length))
-  const freshQuads = newSpots(bot, quadsWanted, { quad: true })
-  if (freshQuads.length) { mem.update(m => { m.orchard.spots = m.orchard.spots.concat(freshQuads) }); setZone() }
-  const singles = saplingCount(bot) - (quadSap(bot) === 'spruce_sapling' ? 4 * (fillQuads + freshQuads.length) : 0) - fill.filter(q => !q.quad).length // (spruce kept back for its squares; dark oak is never a single)
-  const more = Math.max(0, Math.min(singles, demandTrees - orchard().spots.length))
-  const fresh = newSpots(bot, more)
-  if (fresh.length) { mem.update(m => { m.orchard.spots = m.orchard.spots.concat(fresh) }); setZone() }
+  const have = name => inv.count(bot, name)
   let planted = 0
-  for (const s of fill.concat(freshQuads, fresh)) {
-    if (shouldStop && shouldStop()) break
-    await reflex.waitClear()
-    const qs = s.quad ? quadSap(bot) : null // (one species a square)
-    if (s.quad && !qs) continue // (a square only whole)
+  // one spot's saplings in: a square's all of `qs`, a single's one of the singles' species
+  const fillSpot = async (s, qs) => {
     for (const c of cellsOf(s)) {
-      const sap = s.quad ? inv.items(bot).find(i => i.name === qs) : saplings(bot)[0]
+      const sap = s.quad ? inv.items(bot).find(i => i.name === qs) : inv.items(bot).find(i => SINGLE_SAP_RE.test(i.name))
       if (!sap) break
       const b = world.at(bot, c.x, c.y, c.z)
       if (!free(b)) continue
@@ -180,46 +250,93 @@ async function plant (bot, { demandTrees = 0, shouldStop } = {}) {
       else { dropSpot(s, `the sapling did not stay (${now ? now.name : '?'} there)`); break }
     }
   }
+  // THE SQUARES FIRST (a single spot planted first took the square's saplings, 2026-10-06): the empty ones, by the one rule
+  // (squareSpecies), then fresh ones of what is left, up to the squares' demand
+  for (const s of fill.filter(q => q.quad)) {
+    if (shouldStop && shouldStop()) break
+    await reflex.waitClear()
+    const qs = squareSpecies(bot, s, have)
+    if (qs) await fillSpot(s, qs)
+  }
+  const freshN = Math.max(0, Math.min(QUAD_SAPS.reduce((a, x) => a + Math.floor(have(x) / 4), 0), demand.squares - spotCounts().squares))
+  const freshQuads = newSpots(bot, freshN, { quad: true })
+  if (freshQuads.length) { mem.update(m => { m.orchard.spots = m.orchard.spots.concat(freshQuads) }); setZone() }
+  for (const s of freshQuads) {
+    if (shouldStop && shouldStop()) break
+    await reflex.waitClear()
+    const qs = squareSpecies(bot, s, have)
+    if (qs) await fillSpot(s, qs)
+  }
+  // THE SINGLES: the singles' species only, by the handful (singlesDue)
+  const singleN = sapCounts(bot).singleN
+  if (singleN > 0 && singlesDue(bot, singleN) && !(shouldStop && shouldStop())) {
+    const before = planted
+    const fillS = fill.filter(q => !q.quad)
+    const more = Math.max(0, Math.min(singleN - fillS.length, demand.singles - spotCounts().singles))
+    const fresh = newSpots(bot, more)
+    if (fresh.length) { mem.update(m => { m.orchard.spots = m.orchard.spots.concat(fresh) }); setZone() }
+    for (const s of fillS.concat(fresh)) {
+      if (shouldStop && shouldStop()) break
+      await reflex.waitClear()
+      await fillSpot(s, null)
+    }
+    if (planted > before) { const d = require('./day').dayNo(bot); mem.update(m => { m.orchard.singleDay = d }) }
+  }
   setZone()
-  if (planted) log('orchard', `planted ${planted} sapling${planted > 1 ? 's' : ''} (${orchard().spots.length} spots, ${grown(bot).length} grown)`)
+  if (planted) log('orchard', `planted ${planted} sapling${planted > 1 ? 's' : ''} (${orchard().spots.length} spots, ${grown(bot).length} grown; ${demand.squares} squares and ${demand.singles} singles wanted)`)
   return planted
 }
 
 // Cut the grown trees (logs up to `logs`), leaves too while saplings are wanted, and replant each spot.
-async function harvest (bot, { logs = Infinity, demandTrees = 0, shouldStop, species = null } = {}) {
+// (`skip(logName)`: trees of a wood the caller must not cut - the build's own species on a trip for any wood or for fuel)
+async function harvest (bot, { logs = Infinity, demand = NO_DEMAND, shouldStop, species = null, skip = null } = {}) {
   const trees = grown(bot)
   if (!trees.length) return 0
   // (a species' trip with none of its trees grown: back at once - the walk out to plant is the planting rung's, not a trip's)
-  if (species && !trees.some(t => { const b = world.at(bot, t.x, t.y, t.z); return b && b.name === species })) return 0
+  if (species && !trees.some(t => { const b = trunkLog(bot, t); return b && b.name === species })) return 0
   // (a species' trip counts only its own logs: pickups can take up other wood lying in the orchard)
   const cnt = () => species ? inv.count(bot, species) : inv.count(bot, n => world.LOG_RE.test(n))
   const gather = require('./gather')
   const me = bot.entity.position
   trees.sort((a, b) => world.dist3(a, me) - world.dist3(b, me))
   let got = 0
+  let axeFailed = false
+  const per = { quad: { logs: 0, cut: 0 }, single: { logs: 0, cut: 0 } } // (each kind's yield learnt apart: yields)
   for (const t of trees) {
     if (got >= logs || (shouldStop && shouldStop())) break
     await reflex.waitClear()
-    const b = world.at(bot, t.x, t.y, t.z)
-    if (!b || !world.LOG_RE.test(b.name)) continue
+    const b = trunkLog(bot, t)
+    if (!b) continue
     if (species && b.name !== species) continue // (a species' trip: its own trees only - an exact-wood build)
+    if (skip && skip(b.name)) continue
     const re = new RegExp('^' + b.name + '$')
     const before = cnt()
-    // (a mega tree is four trunks, felled from inside - gather.fellMega; a single one as ever)
-    if (t.quad) await gather.fellMega(bot, t, re, { allowZones: ['orchard'], shouldStop })
-    else await gather.fellTree(bot, new Vec3(t.x, t.y, t.z), re, { leaves: wantSaplings(bot, demandTrees) > 0, allowZones: ['orchard'] })
-    got += cnt() - before
+    if (!axeFailed && !await gather.keepAxe(bot, { shouldStop })) axeFailed = true // (gather.keepAxe: the chop's rule)
+    // (a mega tree is four trunks, felled from inside - gather.fellMega; a single one as ever. The spot is replanted below,
+    //  by the planter's rule - never the felling's: a spruce back in a single spot)
+    const leaves = wantSaplings(bot, demand, b.name) > 0 // (its own species' saplings wanted)
+    let stranded = false
+    if (t.quad) stranded = (await gather.fellMega(bot, t, re, { allowZones: ['orchard'], shouldStop, leaves })).stranded
+    else await gather.fellTree(bot, new Vec3(t.x, t.y, t.z), re, { leaves, allowZones: ['orchard'], replant: false })
+    const k = per[t.quad ? 'quad' : 'single']; const g = cnt() - before
+    got += g; k.logs += g; if (!trunkLog(bot, t)) k.cut++
+    // (left up a tree with no way down: no walk on to the next tree from up there - the reflexes' escape owns the body now)
+    if (stranded) { log('orchard', `the harvest stops - stranded up the square at ${move.fmt(t)}`); return got }
   }
   if (got) {
-    const cut = trees.filter(t => { const b = world.at(bot, t.x, t.y, t.z); return !b || !world.LOG_RE.test(b.name) }).length || 1
-    // (logs a tree gives, learnt from our own trees: the demand is counted in trees)
-    mem.update(m => { const o = m.orchard; o.cut = (o.cut || 0) + cut; o.logs = (o.logs || 0) + got; o.perTree = Math.max(1, o.logs / o.cut) })
-    log('orchard', `harvested ${got} logs from ${cut} grown tree${cut > 1 ? 's' : ''}`)
+    const cut = per.quad.cut + per.single.cut || 1
+    // (logs a tree gives, learnt from our own trees, each kind apart - the demand is counted in squares and singles)
+    mem.update(m => {
+      const o = m.orchard; o.cut = (o.cut || 0) + cut; o.logs = (o.logs || 0) + got; o.perTree = Math.max(1, o.logs / o.cut)
+      o.quadLogs = (o.quadLogs || 0) + per.quad.logs; o.quadCut = (o.quadCut || 0) + per.quad.cut
+      o.singleLogs = (o.singleLogs || 0) + per.single.logs; o.singleCut = (o.singleCut || 0) + per.single.cut
+    })
+    log('orchard', `harvested ${got} logs from ${cut} grown tree${cut > 1 ? 's' : ''} (squares ${per.quad.logs} logs/${per.quad.cut} cut, singles ${per.single.logs}/${per.single.cut})`)
   }
-  await plant(bot, { demandTrees, shouldStop })
+  await plant(bot, { demand, shouldStop })
   return got
 }
 
 function info (bot) { const o = orchard(); return o ? { spots: o.spots.length, grown: grown(bot).length, empty: empty(bot).length } : null }
 
-module.exports = { ANY_SAP_RE, quadSap, plantable, orchard, setZone, plant, harvest, grown, empty, wantSaplings, saplingCount, newSpots, spotOK, info, SAPLING_RE }
+module.exports = { ANY_SAP_RE, SINGLE_SAP_RE, sapCounts, trunkLog, demandFor, yields, squareSpecies, quadSap, plantable, orchard, setZone, plant, harvest, grown, empty, wantSaplings, saplingCount, newSpots, spotOK, info, SAPLING_RE }

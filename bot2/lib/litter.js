@@ -243,15 +243,8 @@ async function climbDown (bot) {
   // (ours = the ledger's, not only this climb's list: a body nudged off the list's own top stopped the descent at once and
   //  stood on the pillar's top, "stuck ... no way to jiggle", until the escape's descent took it down, 2026-09-30; audit)
   const ours = c => climbed.some(p => p.x === c.x && p.y === c.y && p.z === c.z) || ledger.has(k(c))
-  for (let guard = 0; guard < 24 && climbed.length; guard++) {
-    const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
-    if (!ours(under)) break
-    // (the fall it makes: onto the next solid within 3 - a gap lower down is a drop of its height; the escape's own guard)
-    { const bl = world.at(bot, under.x, under.y - 1, under.z); if (act.fallBelow(bot, under) > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) break }
-    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) break
-    const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await new Promise(r => setTimeout(r, 50))
-    climbed = climbed.filter(p => !(p.x === under.x && p.y === under.y && p.z === under.z))
-  }
+  // (the one descent - gather.climbDownPillar: each drop onto the next solid within 3, never onto lava or into water)
+  if (climbed.length) await require('./gather').climbDownPillar(bot, ours, { allowZones: ['orchard', 'base', 'farm'], max: 24, onDug: c => { climbed = climbed.filter(p => !(p.x === c.x && p.y === c.y && p.z === c.z)) } })
   climbed = []
 }
 

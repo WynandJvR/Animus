@@ -217,8 +217,10 @@ async function chop (bot, re, n, ctx = {}) {
     noteResource(itemName, trunk)
     // (the axe worn out mid-chop: a new one from the pack before the next tree - the tools rule runs only between tasks;
     //  craft.keepTool. Latched only on a failed make: a stone axe is 131 logs and an expedition's chop fells more)
-    if (!axeFailed && !inv.bestTool(bot, 'axe', 1) && !await require('./craft').keepTool(bot, 'axe', { minUses: 1, shouldStop: ctx.shouldStop, stack: ctx.stack })) axeFailed = true
-    const got = await fellTree(bot, trunk, re, { leaves: !!ctx.leaves, allowZones: move.inZone(trunk, 0) ? ['orchard'] : [], shouldStop: ctx.shouldStop })
+    if (!axeFailed && !await keepAxe(bot, { shouldStop: ctx.shouldStop, stack: ctx.stack })) axeFailed = true
+    // (an orchard tree's spot is the orchard planter's to fill - orchard.plant: a spruce only in a square)
+    const inOrchard = !!move.inZone(trunk, 0)
+    const got = await fellTree(bot, trunk, re, { leaves: !!ctx.leaves, allowZones: inOrchard ? ['orchard'] : [], shouldStop: ctx.shouldStop, replant: !inOrchard })
     if (!got) { unreachable.add(tk(trunk)); await move.sleep(300) }
   }
   return end('done', true)
@@ -231,49 +233,124 @@ async function chop (bot, re, n, ctx = {}) {
 // each level's three neighbour logs taken before the filler under the feet is dug and the body drops one. One pillar,
 // taken away on the way down, never a drop beside the body deeper than a step. Four 30-high pillars beside the trunk was
 // the other way, and a 30-block fall at the top of each (audit 2026-09-28). `corner` is the square's low corner.
-async function fellMega (bot, corner, re, { allowZones = [], shouldStop } = {}) {
+// THE COLUMN CLIMBED is any of the four (the corner while its foot is a log), and the climb goes to the top of the
+// SQUARE, not of that column: a felling that stopped part way left its pillar in the corner and three trunks standing -
+// 66-75 logs of each mega spruce, four squares, the orchard reading them as gone for good (2026-09-29..10-06). Each stop
+// says why. `leaves`: the natural crown within reach taken on the way down (a mega crown's leaves are the squares' next
+// saplings).
+const MEGA_SPAN = 40 // (a mega spruce runs past 30)
+function megaTop (bot, corner, re) {
+  let top = -1
+  for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) for (let y = corner.y; y <= corner.y + MEGA_SPAN; y++) { const b = world.at(bot, corner.x + dx, y, corner.z + dz); if (b && re.test(b.name)) top = Math.max(top, y) }
+  return top
+}
+async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves = false } = {}) {
   const zones = allowZones.concat(['orchard'])
+  const FILL = require('./build').FILLER_ITEMS // (THE scaffold list: filler in the square's trunk columns is our own pillar)
   const before = inv.count(bot, b => re.test(b))
   const cols = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([dx, dz]) => ({ x: corner.x + dx, z: corner.z + dz }))
   const isLog = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && re.test(b.name) }
-  const dig = p => act.dig(bot, new Vec3(p.x, p.y, p.z), { timeoutMs: 12000, noWalk: true, allowZones: zones }).catch(() => false)
+  const misses = {} // why each failed dig failed (one line at the end)
+  const dig = async p => { const ok = await act.dig(bot, new Vec3(p.x, p.y, p.z), { timeoutMs: 12000, noWalk: true, allowZones: zones }).catch(() => false); if (!ok) { const w = act.lastDigWhy() || '?'; misses[w] = (misses[w] || 0) + 1 } return ok }
   const y0 = corner.y
-  // in: the corner column's two lowest logs out, and step into it
-  const r = await move.goTo(bot, new goals.GoalNear(corner.x, y0, corner.z, 2), { timeoutMs: 40000, label: 'to tree', shouldStop })
-  if (!r.ok) return false
-  for (const dy of [1, 0]) if (isLog(corner.x, y0 + dy, corner.z)) await dig({ x: corner.x, y: y0 + dy, z: corner.z })
-  await move.goTo(bot, new goals.GoalBlock(corner.x, y0, corner.z), { timeoutMs: 8000, place: false, label: 'into the trunk' })
-  if (Math.floor(bot.entity.position.x) !== corner.x || Math.floor(bot.entity.position.z) !== corner.z) { log('gather', `could not step into the trunk at ${move.fmt(corner)}`); return false }
+  // the column to climb: its foot two cells a log, open (leaf litter, a tuft: dug), or our own filler - never a sapling's
+  const footOK = c => [0, 1].every(dy => { const b = world.at(bot, c.x, y0 + dy, c.z); return !!b && (re.test(b.name) || FILL.test(b.name) || (world.isAirish(b) && !/_sapling$/.test(b.name))) })
+  const logFoot = c => isLog(c.x, y0, c.z) ? 0 : 1
+  const entry = cols.filter(footOK).sort((a, b) => logFoot(a) - logFoot(b) || (b.x === corner.x && b.z === corner.z) - (a.x === corner.x && a.z === corner.z))[0]
+  if (!entry) { log('gather', `mega tree at ${move.fmt(corner)}: no column of it to climb (saplings or another block at the foot of each)`); return { got: 0, stranded: false } }
+  // in: the column's two lowest cells out, and step into it
+  const r = await move.goTo(bot, new goals.GoalNear(entry.x, y0, entry.z, 2), { timeoutMs: 40000, label: 'to tree', shouldStop })
+  if (!r.ok) return { got: 0, stranded: false }
+  for (const dy of [1, 0]) { const b = world.at(bot, entry.x, y0 + dy, entry.z); if (b && !/^(air|cave_air)$/.test(b.name)) await dig({ x: entry.x, y: y0 + dy, z: entry.z }) }
+  await move.goTo(bot, new goals.GoalBlock(entry.x, y0, entry.z), { timeoutMs: 8000, place: false, label: 'into the trunk' })
+  if (Math.floor(bot.entity.position.x) !== entry.x || Math.floor(bot.entity.position.z) !== entry.z) { log('gather', `could not step into the trunk at ${move.fmt({ x: entry.x, y: y0, z: entry.z })}`); return { got: 0, stranded: false } }
   const pillar = []
-  // UP: while the column goes on over the head
-  for (let guard = 0; guard < 40; guard++) {
-    if (shouldStop && shouldStop()) break
+  let upWhy = null; let downWhy = null
+  // UP: to two under the square's top log (its last level in reach of the way down) - the column's own logs, our old
+  // pillar and the crown's leaves over the head dug on the way. NEVER THROUGH OPEN AIR: each rise only with a block or a
+  // log beside the column at the new feet height or the one over it - a 1-wide pillar 25 high with nothing round it is a
+  // knockback's fall (audit 2026-10-06); stopped there, the way down takes what it reaches
+  const walled = fy => [fy + 1, fy + 2].some(y => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, entry.x + dx, y, entry.z + dz); return !!b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) }))
+  const top = megaTop(bot, corner, re)
+  for (let guard = 0; guard < MEGA_SPAN + 4; guard++) {
+    if (shouldStop && shouldStop()) { upWhy = 'stopped'; break }
     const fy = Math.floor(bot.entity.position.y + 0.01)
-    if (!isLog(corner.x, fy + 2, corner.z)) break
-    if (!await dig({ x: corner.x, y: fy + 2, z: corner.z })) break
-    if (!await towerUp(bot, { allowZones: zones, onPlaced: c => pillar.push(c) })) break
+    if (fy + 2 >= top) break
+    const over = world.at(bot, entry.x, fy + 2, entry.z)
+    if (!over) { upWhy = 'unloaded over the head'; break }
+    if (!world.isAirish(over)) {
+      if (!(re.test(over.name) || FILL.test(over.name) || world.LEAF_RE.test(over.name))) { upWhy = `${over.name} over the head at y${fy + 2}`; break }
+      if (!await dig({ x: entry.x, y: fy + 2, z: entry.z })) { upWhy = `the ${over.name} over the head would not come out (${act.lastDigWhy() || '?'})`; break }
+    }
+    if (!walled(fy)) { upWhy = `open air round the column at y${fy + 1}-${fy + 2}`; break }
+    if (!await towerUp(bot, { allowZones: zones, onPlaced: c => pillar.push(c) })) { upWhy = `no tower: ${towerWhy || '?'}`; break }
   }
-  // DOWN: each level's neighbour logs (feet and head height), then our own filler under the feet
+  // DOWN: each level's logs round the column (feet and head height and one over), the crown's leaves within reach when
+  // saplings are wanted, then our own filler under the feet
   const ours = c => pillar.some(q => q.x === c.x && q.y === c.y && q.z === c.z)
-  for (let guard = 0; guard < 40; guard++) {
+  const crown = b => { try { const pr = b.getProperties(); return pr.persistent === false || pr.persistent === 'false' } catch { return false } }
+  let leafN = 0
+  for (let guard = 0; guard < MEGA_SPAN + 4; guard++) {
     const fy = Math.floor(bot.entity.position.y + 0.01)
-    for (const dy of [2, 1, 0]) for (const c of cols) if (!(c.x === corner.x && c.z === corner.z) && isLog(c.x, fy + dy, c.z) && act.reach(bot, { x: c.x, y: fy + dy, z: c.z }, 4.5)) await dig({ x: c.x, y: fy + dy, z: c.z })
+    // (up to four over the feet - all the arm reaches: a climb stopped low for open air still takes a square's low logs, and
+    //  orchard.trunkLog reads a square as grown only with a log that low)
+    for (const dy of [4, 3, 2, 1, 0]) for (const c of cols) if (isLog(c.x, fy + dy, c.z) && act.reach(bot, { x: c.x, y: fy + dy, z: c.z }, 4.5)) await dig({ x: c.x, y: fy + dy, z: c.z })
+    if (leaves) {
+      const lv = world.findBlocks(bot, world.LEAF_RE, { maxDistance: 4.5, count: 60, point: bot.entity.position.offset(0, 1.6, 0), filter: b => crown(b) && b.position.x >= corner.x - 4 && b.position.x <= corner.x + 5 && b.position.z >= corner.z - 4 && b.position.z <= corner.z + 5 })
+      for (const b of lv) if (act.reach(bot, b.position, 4.5) && await act.dig(bot, b.position, { timeoutMs: 3000, noWalk: true, allowZones: zones }).catch(() => false)) leafN++
+    }
     const under = { x: Math.floor(bot.entity.position.x), y: fy - 1, z: Math.floor(bot.entity.position.z) }
-    if (!ours(under)) break
-    if (!await dig(under)) break
+    if (!ours(under)) { if (under.y >= y0) { const b = world.at(bot, under.x, under.y, under.z); downWhy = `not over my pillar at y${under.y} (${b ? b.name : '?'} under me, at ${Math.floor(bot.entity.position.x)},${Math.floor(bot.entity.position.z)})` } break }
+    if (!await dig(under)) { downWhy = `the pillar under me at y${under.y} would not come out (${act.lastDigWhy() || '?'})`; break }
     const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
     pillar.splice(pillar.findIndex(q => q.x === under.x && q.y === under.y && q.z === under.z), 1)
   }
+  // STILL UP THERE (the way down broke - walked off the pillar, a dig refused): down over whatever of ours or the tree's is
+  // under the feet - our pillar, filler in the square's columns, the tree's own logs - each drop checked (climbDownPillar).
+  // Never handed to the next walk from the top: the harvest walked on from a 20-high pillar (audit 2026-10-06)
+  let stranded = false
+  if (Math.floor(bot.entity.position.y + 0.01) > y0 + world.SAFE_DROP) {
+    const inSquare = c => cols.some(q => q.x === c.x && q.z === c.z) && c.y >= y0
+    await climbDownPillar(bot, c => ours(c) || (inSquare(c) && (b => !!b && (FILL.test(b.name) || re.test(b.name)))(world.at(bot, c.x, c.y, c.z))), { allowZones: zones, onDug: c => { const i = pillar.findIndex(q => q.x === c.x && q.y === c.y && q.z === c.z); if (i >= 0) pillar.splice(i, 1) } })
+    stranded = Math.floor(bot.entity.position.y + 0.01) > y0 + world.SAFE_DROP
+  }
   // the ground level last (the neighbours' stumps), then what fell
-  for (const dy of [1, 0]) for (const c of cols) if (isLog(c.x, y0 + dy, c.z) && act.reach(bot, { x: c.x, y: y0 + dy, z: c.z }, 4.5)) await dig({ x: c.x, y: y0 + dy, z: c.z })
-  await act.collectDrops(bot, { radius: 8, maxMs: 5000 }).catch(() => {})
+  if (!stranded) {
+    for (const dy of [1, 0]) for (const c of cols) if (isLog(c.x, y0 + dy, c.z) && act.reach(bot, { x: c.x, y: y0 + dy, z: c.z }, 4.5)) await dig({ x: c.x, y: y0 + dy, z: c.z })
+    await act.collectDrops(bot, { radius: 8, maxMs: leafN ? 10000 : 5000 }).catch(() => {})
+  }
   const got = inv.count(bot, b => re.test(b)) - before
-  const left = cols.reduce((n, c) => { let k = 0; for (let y = y0; y < y0 + 36; y++) if (isLog(c.x, y, c.z)) k++; return n + k }, 0)
-  log('gather', `felled a mega tree at ${move.fmt(corner)} from inside: +${got} logs${left ? `, ${left} left standing` : ''}${pillar.length ? `, ${pillar.length} pillar block(s) left` : ''}`)
-  return got > 0
+  const left = cols.reduce((n, c) => { let k = 0; for (let y = y0; y <= y0 + MEGA_SPAN; y++) if (isLog(c.x, y, c.z)) k++; return n + k }, 0)
+  const missed = Object.entries(misses).map(([w, n]) => `${n}x ${w}`).join('; ')
+  log('gather', `felled a mega tree at ${move.fmt(corner)} from inside (up ${entry.x},${entry.z} to y${top}): +${got} logs${leafN ? `, ${leafN} leaves` : ''}${left ? `, ${left} left standing` : ''}${pillar.length ? `, ${pillar.length} pillar block(s) left` : ''}${upWhy ? ` - the climb stopped: ${upWhy}` : ''}${downWhy ? ` - the way down stopped: ${downWhy}` : ''}${missed ? ` - digs missed: ${missed}` : ''}${stranded ? ` - STRANDED at y${Math.floor(bot.entity.position.y)}, ${Math.floor(bot.entity.position.y) - y0} over the foot` : ''}`)
+  return { got, stranded }
+}
+// DOWN A PILLAR FROM ON TOP, a player's way: the block under the feet dug, a drop of one onto the next, while `ours(cell)`
+// says the block under the feet is ours to take - never one whose dig drops the body further than SAFE_DROP, nor onto
+// lava or into water. THE one descent: the orchard's tree pillars and the litter's climbs (build.descendPillar keeps the
+// build's own cell checks). `onDug(cell)`: each block taken. Returns the blocks taken.
+async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48 } = {}) {
+  let n = 0
+  for (let guard = 0; guard < max; guard++) {
+    const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
+    if (!ours(under)) break
+    { const bl = world.at(bot, under.x, under.y - 1, under.z); if (act.fallBelow(bot, under) > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) break }
+    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones }).catch(() => false)) break
+    const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
+    n++; if (onDug) onDug(under)
+  }
+  return n
+}
+// AN AXE IN THE PACK before each tree: one worn out part way through a trip, every log after it went by hand - 15s a log
+// with a block of andesite in the hand, 2026-10-06 (craft.keepTool: a new one from the pack, or the bank near home).
+// THE rule the chop and the orchard's harvest both keep.
+async function keepAxe (bot, { shouldStop, stack = null } = {}) {
+  if (inv.bestTool(bot, 'axe', 1)) return true
+  return require('./craft').keepTool(bot, 'axe', { minUses: 1, shouldStop, stack })
 }
 
-async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], shouldStop } = {}) {
+// (replant: false - the orchard's own spots: its planter puts each species where it yields most, a spruce only in a square)
+async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], shouldStop, replant = true } = {}) {
   const before = inv.count(bot, b => re.test(b))
   const pillar = [] // (the blocks towered up to reach the top logs: taken down again after)
   const tFell = Date.now() // (and the planner's own stepping stones round this trunk from now on: reflex.plannerPlacedSince)
@@ -357,7 +434,7 @@ async function fellTree (bot, basePos, re, { leaves = false, allowZones = [], sh
   await act.collectDrops(bot, { radius: 7, maxMs: 10000 })
   // replant
   const sap = inv.items(bot).find(i => i.name.endsWith('_sapling') && basePos && i.name.startsWith(String(re).replace(/^\/\^|_log\$\/$/g, '')))
-  if (sap) {
+  if (sap && replant) {
     const soil = bot.blockAt(basePos.offset(0, -1, 0)); const cell = bot.blockAt(basePos)
     if (soil && /^(dirt|grass_block|podzol|coarse_dirt|rooted_dirt)$/.test(soil.name) && cell && world.isAirish(cell)) await act.place(bot, basePos, sap.name, { faceHint: [[0, -1, 0]], allowZones })
   }
@@ -899,4 +976,4 @@ async function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { trunkBase, isNaturalTree, towerWhy: () => towerWhy, fellMega, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
+module.exports = { trunkBase, isNaturalTree, towerWhy: () => towerWhy, fellMega, megaTop, keepAxe, climbDownPillar, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }

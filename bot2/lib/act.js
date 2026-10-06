@@ -71,6 +71,7 @@ function digRefusal (bot, b, { force = false, own = false, allowZones = [] } = {
 let lastDigWhy = null
 async function dig (bot, pos, { force = false, own = false, allowZones = [], timeoutMs = 30000, noWalk = false, reachMax = 4.3 } = {}) {
   lastDigWhy = null
+  let digErr = null // (what bot.dig last threw: said with the timeout - swallowed, a dig that never broke went unexplained)
   let b = world.at(bot, pos.x, pos.y, pos.z)
   // "done" means the cell holds nothing breakable. Grass/flowers have no collision box but they ARE
   // blocks: treating them as air made a seed-gathering loop spin on resolved promises and starve the
@@ -108,11 +109,17 @@ async function dig (bot, pos, { force = false, own = false, allowZones = [], tim
       if (holdsUsUp(bot, pos)) { lastDigWhy = 'I stand on it'; return false }
       continue
     }
+    // ON THE GROUND FIRST: a dig begun in the air is timed at five times as long (vanilla's off-ground penalty - the client
+    // times it once, at the start), and the walk into reach often ends in a jump: logs a stone axe takes in 0.75s took
+    // 3.75s, every one after a walk, 2026-10-06. The landing is a few ticks; on a ladder, a vine or in water none comes
+    // (a deadline on this dig, never a wait before thinking)
+    { const tl = Date.now(); while (!grounded(bot) && !noLanding(bot) && Date.now() - tl < 800) await sleep(50) }
     const td = Date.now()
     await inv.equipFor(bot, b)
     try {
       await bot.dig(b, true)
     } catch (e) {
+      digErr = e && e.message
       if (reflex.active()) continue
       await sleep(200)
     }
@@ -120,8 +127,22 @@ async function dig (bot, pos, { force = false, own = false, allowZones = [], tim
     if (Date.now() - tm > 6000) log('act', `slow dig ${b.name} at ${move.fmt(pos)}: walk ${td - tm}ms, dig ${Date.now() - td}ms (holding ${bot.heldItem ? bot.heldItem.name : 'nothing'})`)
     if (!after || after.name !== b.name) return true
   }
-  lastDigWhy = 'it would not break in time'
+  lastDigWhy = `it would not break in time${digErr ? ' (' + digErr + ')' : ''}`
   return false
+}
+// STANDING ON SOMETHING, as the dig timing reads it: physics' onGround, or a full block right under the feet (onGround
+// flickers on stairs and slab edges). THE one rule - bot.digTime (main.js) times a dig by it, act.dig waits for it.
+function grounded (bot) {
+  if (bot.entity.onGround) return true
+  const p = bot.entity.position
+  const under = bot.blockAt(p.offset(0, -0.05, 0))
+  return !!(under && under.boundingBox === 'block' && p.y - Math.floor(p.y) < 0.05)
+}
+// where no landing comes: in water, on a ladder or a vine, in scaffolding, in a boat
+function noLanding (bot) {
+  if (bot.vehicle) return true
+  const p = bot.entity.position; const f = world.at(bot, p.x, p.y, p.z)
+  return world.isWaterBlock(f) || !!(f && /^(ladder|vine|scaffolding|twisting_vines(_plant)?|weeping_vines(_plant)?|cave_vines(_plant)?)$/.test(f.name))
 }
 
 // Would a block at `pos` leave the cell we stand in with no way out - every side shut at the feet or the head? (only a
@@ -600,4 +621,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000, only = null } = {
   return picked
 }
 
-module.exports = { skippedDrop: id => unreachableDrops.has(id), SOIL_PLANT_RE, clearsFirst, lastDigWhy: () => lastDigWhy, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
+module.exports = { skippedDrop: id => unreachableDrops.has(id), SOIL_PLANT_RE, clearsFirst, lastDigWhy: () => lastDigWhy, grounded, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
