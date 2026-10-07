@@ -1540,7 +1540,7 @@ async function roomForBand (heads, waited, needs, y, room) {
   const keep = nm => Math.max(base.keepCount(bot, { name: nm }), build.FILLER_ITEMS.test(nm) ? build.SCAFFOLD_WANT : 0)
   const lowHead = Math.min(...heads.map(y))
   const slotsOf = nm => inv.items(bot).filter(i => i.name === nm).length - Math.ceil(keep(nm) / 64)
-  const names = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => !waited.includes(nm) && keep(nm) !== Infinity && inv.count(bot, nm) > keep(nm))
+  const names = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => !waited.includes(nm) && keep(nm) !== Infinity && inv.count(bot, nm) > keep(nm) && !/^shears$|bucket$|^flint_and_steel$/.test(nm) && !((bot.registry || {}).foodsByName || {})[nm]) // (the hands' own never, in any tier - a pour's water bucket at the band went to the chest; audit)
   // (never the hands' own: shears, a bucket, flint and steel, food - the next leaf trip or pour wanted them back; and the haul
   //  by the slots it frees, the most first - a pair of shears went before a stack of logs; audit)
   const md = bot.registry || {}
