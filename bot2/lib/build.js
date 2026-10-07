@@ -1510,7 +1510,7 @@ async function descendPillar (bot) {
   //  and the finish take it; forgotten here so no later walk digs under someone else's feet)
   myPillar = []
 }
-async function pillarTo (bot, c, first) {
+async function pillarTo (bot, c, first, stop = cellStop) {
   // (feetFor keeps only the feet the walk search reaches - from a CURRENT search: after the cluster stand's walk the set
   //  was another place's, canWalkTo read every foot reachable, and six pillar feet up on the castle's east side were walked
   //  at - "couldn't reach its foot … (timeout/stuck)", 30-48s each, two break-outs and two traps, 2026-10-06)
@@ -1520,11 +1520,12 @@ async function pillarTo (bot, c, first) {
   let tried = 0
   const stuckAt = [] // (feet that could not be reached this time: the others near them lie in the same ground)
   for (const f of feet.slice(0, 3)) {
+    if (stop()) break // (the cell's budget: cellStop)
     if (stuckAt.some(q => Math.abs(q.x - f.x) <= 3 && Math.abs(q.z - f.z) <= 3)) continue
     // (the last foot's tower failed: down it before the walk to the next - left standing, descendPillar forgot it; audit)
     if (tried++ && myPillar.length) await descendPillar(bot)
     // (the site walker: it goes in through the build's doors - the nave is walled round)
-    const r = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'to the foot of a pillar')
+    const r = await goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'to the foot of a pillar', { shouldStop: stop })
     // (a foot that could not be reached rules out the feet NEAR it - same ground - never the rest: a wall cell has feet on
     //  both sides, and the inside one on the wall walk is the one that works. Three stuck walks of 8s in one patch cost
     //  the south wall's high cells 24-32s each, more than half the step; audit 2026-09-28)
@@ -1532,7 +1533,7 @@ async function pillarTo (bot, c, first) {
     // (the TOWER's own blocks, not a fixed 16: the tower rises to c.y - 1 from the foot - with 24 filler in the pack a 4-high
     //  pillar walked 42b to the chest and back for "1 andesite", 2026-10-06. Two over it: the walk back to the foot may spend
     //  some; audit. Short is a tower stopped, a miss like any)
-    const r2 = await topUpAt(bot, Math.max(4, c.y - f.y + 2), f, () => goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar'), { shouldStop: stepStop }, 1)
+    const r2 = await topUpAt(bot, Math.max(4, c.y - f.y + 2), f, () => goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar', { shouldStop: stop }), { shouldStop: stepStop }, 1)
     if (r2.why === 'stopped') return false
     if (!r2.ok) { log('build', `pillar for ${c.name} at ${move.fmt(c)}: not back at its foot ${move.fmt(f)} after the scaffold top-up (${r2.why})`); continue }
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
@@ -1657,13 +1658,15 @@ async function placeCell (bot, c, j = job) {
       if (foot && c.y - foot.y >= 3) { pillared = true; await pillarTo(bot, c, foot) }
     }
     if (act.reach(bot, pos, 4.3)) return true
+    if (cellOutOfTime()) return why(`could not get within reach (its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`)
     const goal = faces ? new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces, LOS: true }) : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 })
-    const r = await goSite(bot, goal, 'place')
+    const r = await goSite(bot, goal, 'place', { shouldStop: cellStop })
+    if (!r.ok && cellOutOfTime() && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`) // (never "stopped": that word ends the step)
     // (a cell high over us: the planner won't tower toward a "see this face" goal - it never found one for the nave's
     //  y127 pillar tops, an evening of "stuck" - but it towers to a place to STAND: up beside the cell, then place)
     // (any cell above our feet: standing on a wall top at y125, the y128 cells were "3 above" and never pillared to)
     if (!r.ok && !act.reach(bot, pos, 4.8) && c.y > bot.entity.position.y && !pillared) {
-      const up = await pillarTo(bot, c)
+      const up = await pillarTo(bot, c, undefined)
       if (!up && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (${r.why}; no pillar up to it)${whereFrom()}`)
     } else if (!r.ok && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (${r.why})${whereFrom()}`)
     return true
@@ -1811,8 +1814,16 @@ function restRound (c, ready, holdBack) {
 }
 function failsOf (c) { const f = cellFails.get(key(c)); return f ? f.n : 0 }
 let stepStop = null // (the running build step's stop - a pillar's scaffold top-up inside it keeps the step's day)
+// ONE CELL'S REACH, ONE BUDGET: its stand walk, the look-at walk and the pillars' feet together - each capped on its own,
+// they ran in sequence: 30s look-at, a foot's walk of 112s (its stuck recovery digging down eight blocks), two more feet of
+// 30s - 202s for one oak plank, "could not get within reach x2 236s" in a step of 378, 2026-10-07. Past it the cell is a
+// reach miss like any (its rest, its own way next time); the step goes on
+const CELL_REACH_MS = 45000
+let cellEnd = Infinity // (the chosen cell's deadline: buildStepInner sets it as it picks the cell)
+const cellStop = () => (!!stepStop && stepStop()) || Date.now() > cellEnd
+const cellOutOfTime = () => Date.now() > cellEnd && !(stepStop && stepStop())
 async function buildStep (bot, opts = {}) {
-  try { return await buildStepInner(bot, opts) } finally { if (myPillar.length) await descendPillar(bot).catch(() => {}); stepStop = null } // (no stale stop for later walks: goSite's default)
+  try { return await buildStepInner(bot, opts) } finally { if (myPillar.length) await descendPillar(bot).catch(() => {}); stepStop = null; cellEnd = Infinity } // (no stale stop for later walks: goSite's default)
 }
 async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
@@ -2047,6 +2058,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const inReach = c => act.reach(bot, new Vec3(c.x, c.y, c.z), 4.3) ? 1 : 0
     ready.sort((a, b) => (clickable(b) - clickable(a)) * 100 + (inReach(b) - inReach(a)) * 50 + (a.y - b.y) + world.dist3(a, me) - world.dist3(b, me))
     const c = ready[0]
+    cellEnd = Date.now() + CELL_REACH_MS // (this cell's reach budget: cellStop)
     const tp = Date.now(); const d0 = world.dist3(c, bot.entity.position)
     prof.pick += tp - tpick
     // ONE STAND, MANY CELLS: out of reach of the chosen cell, the walk goes to the stand beside it that reaches the most
@@ -2093,8 +2105,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is in a closed compartment of the build I am not in (from ${move.fmt(world.feetPos(bot))}) - no other stand: tried as a last resort`)
       if (st && (st.n >= 3 || (st.n >= 1 && reachCurrent(bot) && reach && !reach.capped && reach.cells.has(key(st)) && !detourTooLong(bot, st)))) {
         const tw = Date.now()
-        const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
+        const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place', { shouldStop: cellStop }).catch(() => null)
         placeProf.reach += Date.now() - tw
+        if (r && r.why === 'stopped' && cellOutOfTime()) r.why = `timeout (the cell's ${CELL_REACH_MS / 1000}s)` // (the cell's budget, not the step's stop: a stand not reached)
         if (r && r.why === 'stopped') break // (the step's stop, not the stand's verdict; audit)
         if (r && !r.ok) {
           badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) { skipTry = true; c.ownWay = true; const f0 = cellFails.get(key(c)); if (f0) { f0.ownWay = true; saveCellFails() } else { cellFails.set(key(c), { n: 0, at: 0, ownWay: true }); saveCellFails() } }
