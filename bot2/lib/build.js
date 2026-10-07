@@ -1378,7 +1378,14 @@ async function walkReach (bot) {
   //  south courtyard's way in read the whole courtyard as a closed compartment: 35 acacia leaves, two fence gates, a stone and
   //  a trapdoor "wait for a way in", the band anchored round them at y119-126, 2026-10-07. Only a leg the body really failed
   //  is avoided)
-  const avoid = (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return (!!t && Date.now() - t < 600000) || stepCost(x, y, z) >= 100 }
+  // (and UNDER THE BUILD - the footprint below its base - is never a way IN: the planner's "under the build" price is a cost
+  //  so a walk that starts down there can leave, never a road. In the dear tier it was one: the south strip's pocket behind a
+  //  door, closed but for a 2-deep pit into the hollow under the floor, read as reachable through the hollow; the bot went in
+  //  that way and stuck walk after walk, broke out, a trap, twice an hour, 2026-10-07. From under the floor: the way out)
+  const fb = world.feetPos(bot); const bx = job.box
+  const inFoot = (x, z) => x >= bx.x1 && x <= bx.x2 && z >= bx.z1 && z <= bx.z2
+  const startUnder = fb.y < bx.y1 && inFoot(fb.x, fb.z)
+  const avoid = (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return (!!t && Date.now() - t < 600000) || stepCost(x, y, z) >= 100 || (!startUnder && y < bx.y1 && inFoot(x, z)) }
   const W = rooms.walkModel(rw, () => false, { opens: true, avoid }); const b = job.box
   const inArea = q => q.x >= b.x1 - REACH_MARGIN && q.x <= b.x2 + REACH_MARGIN && q.z >= b.z1 - REACH_MARGIN && q.z <= b.z2 + REACH_MARGIN
   // (where I stand is a start whatever it costs - under the floor, the way out is the walk's: the model without the avoid)
