@@ -1603,7 +1603,9 @@ function tick () {
       for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 1; dy++) {
         const x = fx + dx; const y = fy + 1 + dy; const z = fz + dz
         if (!world.standable(bot, x, y, z) || doomed(world.at(bot, x, y - 1, z)) || (ours && isFooting(x, y - 1, z))) continue
-        const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy)
+        // (a floor of LEAVES only when no other is within reach: a felled crown's leaves not yet at distance 7 rot a few
+        //  seconds later - stepped from leaf to leaf, the bot fell 18 blocks off a mega spruce's crown, 2026-10-07 04:22)
+        const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy) + (/_leaves$/.test((world.at(bot, x, y - 1, z) || {}).name || '') ? 10 : 0)
         if (d >= bd) continue
         // (and only one the straight steer reaches without crossing a drop: the edge brake stops that steer at the lip, the
         //  row steers again - 27 times in 26s on a felled crown beside a 5-block drop, 2026-10-03. Sampled every 0.1 - a

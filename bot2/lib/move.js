@@ -292,7 +292,10 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     if (v === undefined) {
       const f = world.at(bot, block.position.x, block.position.y - 1, block.position.z)
       v = 0
-      if (f && /_leaves$/.test(f.name)) { let pr = {}; try { pr = f.getProperties() || {} } catch {} if (pr.persistent === false || pr.persistent === 'false') v = 25 }
+      // (and one at distance 7 - no log within 6, rotting now - the last resort (70: 100 is a ban - the planner drops a step
+      //  past it - and a bot already on a rotting crown would get no path at all; audit): the walk home from a felled mega spruce's top crossed
+      //  its crown at y140, the leaves rotted under it and it fell 18 blocks, hp 20 -> 5, 2026-10-07 04:22)
+      if (f && /_leaves$/.test(f.name)) { let pr = {}; try { pr = f.getProperties() || {} } catch {} if (pr.persistent === false || pr.persistent === 'false') v = Number(pr.distance) >= 7 ? 70 : 25 }
       leafFloor.set(key, v)
     }
     return v

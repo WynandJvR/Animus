@@ -264,6 +264,9 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
   for (const dy of [1, 0]) { const b = world.at(bot, entry.x, y0 + dy, entry.z); if (b && !/^(air|cave_air)$/.test(b.name)) await dig({ x: entry.x, y: y0 + dy, z: entry.z }) }
   await move.goTo(bot, new goals.GoalBlock(entry.x, y0, entry.z), { timeoutMs: 8000, place: false, label: 'into the trunk' })
   if (Math.floor(bot.entity.position.x) !== entry.x || Math.floor(bot.entity.position.z) !== entry.z) { log('gather', `could not step into the trunk at ${move.fmt({ x: entry.x, y: y0, z: entry.z })}`); return { got: 0, stranded: false } }
+  // (a pickaxe for our own pillar on the way down: worn out at the top, the pillar's andesite went by hand - 7.5s a block -
+  //  and the descent read the cell it had just dug as "air under me" and stranded at y141, 2026-10-07 04:21)
+  await require('./craft').keepTool(bot, 'pickaxe', { minUses: 32, shouldStop }).catch(() => false)
   const pillar = []
   let upWhy = null; let downWhy = null
   // UP: to two under the square's top log (its last level in reach of the way down) - the column's own logs, our old
@@ -309,7 +312,10 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
     const under = standingOn(bot)[0] || { x: Math.floor(bot.entity.position.x), y: fy - 1, z: Math.floor(bot.entity.position.z) }
     if (!ours(under)) { if (under.y >= y0) { const b = world.at(bot, under.x, under.y, under.z); downWhy = `not over my pillar at y${under.y} (${b ? b.name : '?'} under me, at ${under.x},${under.z})` } break }
     if (!await dig(under)) { downWhy = `the pillar under me at y${under.y} would not come out (${act.lastDigWhy() || '?'})`; break }
-    const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
+    // (the drop itself waited for - the height, not the ground flag: read the tick after the dig, onGround was still the
+    //  old block's and the next read found "air under me" a block up; audit 2026-10-07)
+    { const t0 = Date.now(); while (Math.floor(bot.entity.position.y + 0.01) >= fy && Date.now() - t0 < 1500) await move.sleep(50) }
+    await landed(bot)
     pillar.splice(pillar.findIndex(q => q.x === under.x && q.y === under.y && q.z === under.z), 1)
   }
   // STILL UP THERE (the way down broke - walked off the pillar, a dig refused): down over whatever of ours or the tree's is
@@ -319,7 +325,30 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
   await landed(bot)
   if (Math.floor(bot.entity.position.y + 0.01) > y0 + world.SAFE_DROP) {
     const inSquare = c => cols.some(q => q.x === c.x && q.z === c.z) && c.y >= y0
-    await climbDownPillar(bot, c => ours(c) || (inSquare(c) && (b => !!b && (FILL.test(b.name) || re.test(b.name)))(world.at(bot, c.x, c.y, c.z))), { allowZones: zones, onDug: c => { const i = pillar.findIndex(q => q.x === c.x && q.y === c.y && q.z === c.z); if (i >= 0) pillar.splice(i, 1) } })
+    // (and the crown's own leaves round the square: stood on them, they rot - dug down through, each drop checked)
+    const inCrown = c => c.x >= corner.x - 4 && c.x <= corner.x + 5 && c.z >= corner.z - 4 && c.z <= corner.z + 5 && c.y >= y0
+    const crownLeaf = b => { if (!b || !world.LEAF_RE.test(b.name)) return false; try { const pr = b.getProperties(); return pr.persistent === false || pr.persistent === 'false' } catch { return false } }
+    const squareOurs = c => ours(c) || (inSquare(c) && (b => !!b && (FILL.test(b.name) || re.test(b.name)))(world.at(bot, c.x, c.y, c.z)))
+    const onDug = c => { const i = pillar.findIndex(q => q.x === c.x && q.y === c.y && q.z === c.z); if (i >= 0) pillar.splice(i, 1) }
+    // (the crown's leaves dug only onto a real landing - rotting leaves read as air; where there is none under the leaves,
+    //  over onto the square's own columns (our pillar, its log stubs) beside, and down those - three moves at most)
+    for (let k = 0; k < 3; k++) {
+      await climbDownPillar(bot, c => squareOurs(c) || (inCrown(c) && crownLeaf(world.at(bot, c.x, c.y, c.z))), { allowZones: zones, onDug, leavesAir: true })
+      await landed(bot)
+      if (Math.floor(bot.entity.position.y + 0.01) <= y0 + world.SAFE_DROP) break
+      const me = bot.entity.position; const fy = Math.floor(me.y + 0.01)
+      let to = null
+      for (const c of cols) for (const dy of [0, -1]) {
+        if (to) break
+        const q = { x: c.x, y: fy + dy, z: c.z }
+        if (Math.abs(q.x - Math.floor(me.x)) + Math.abs(q.z - Math.floor(me.z)) !== 1) continue
+        if (world.standable(bot, q.x, q.y, q.z) && squareOurs({ x: q.x, y: q.y - 1, z: q.z })) to = q
+      }
+      if (!to) break
+      log('gather', `mega tree at ${move.fmt(corner)}: no landing under the crown here - over to the square's column at ${move.fmt(to)}`)
+      const r = await move.goTo(bot, new goals.GoalBlock(to.x, to.y, to.z), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'onto the column' }).catch(() => null)
+      if (!r || !r.ok) break
+    }
     await landed(bot)
     stranded = Math.floor(bot.entity.position.y + 0.01) > y0 + world.SAFE_DROP
   }
@@ -350,15 +379,27 @@ function standingOn (bot) {
 // lava or into water. THE one descent: the orchard's tree pillars and the litter's climbs (build.descendPillar keeps the
 // build's own cell checks). `onDug(cell)`: each block taken. Returns the blocks taken.
 // (`force`: the escape's - a seeded block the body stands on because it towered it; survival outranks inferred ownership)
-async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48, force = false } = {}) {
+// (`leavesAir`: the landing read with natural leaves far from a log as air - a felled crown rots, and a leaf 1-3 under the
+//  one dug is no landing: the next to go, the 17-block void again (audit 2026-10-07). A leaf within ROT_SAFE of a log, a
+//  persistent one, or any other solid block is a landing)
+const ROT_SAFE = 4
+function rottingLeaf (b) { if (!b || !world.LEAF_RE.test(b.name)) return false; let pr = {}; try { pr = b.getProperties() || {} } catch {} return (pr.persistent === false || pr.persistent === 'false') && !(Number(pr.distance) <= ROT_SAFE) }
+function landingFall (bot, p, leavesAir) {
+  if (!leavesAir) return act.fallBelow(bot, p)
+  let k = 1
+  for (; k <= 64; k++) { const b = world.at(bot, p.x, p.y - k, p.z); if (!b || world.isLavaBlock(b)) return Infinity; if (world.isWaterBlock(b)) return 0; if (b.boundingBox === 'block' && !rottingLeaf(b)) break }
+  return k
+}
+async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48, force = false, leavesAir = false } = {}) {
   let n = 0; lastDownWhy = null
   for (let guard = 0; guard < max; guard++) {
     await landed(bot)
     const under = standingOn(bot).find(c => ours(c))
     if (!under) break
-    { const bl = world.at(bot, under.x, under.y - 1, under.z); if (act.fallBelow(bot, under) > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) { lastDownWhy = `a ${act.fallBelow(bot, under)}-block drop (or lava/water) under ${under.x},${under.y},${under.z}`; break } }
+    { const fall = landingFall(bot, under, leavesAir); const bl = world.at(bot, under.x, under.y - 1, under.z); if (fall > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) { lastDownWhy = `a ${fall}-block drop${leavesAir ? ' (rotting leaves read as air)' : ''} (or lava/water) under ${under.x},${under.y},${under.z}`; break } }
     if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones, force }).catch(() => false)) { lastDownWhy = `${(world.at(bot, under.x, under.y, under.z) || {}).name || '?'} at ${under.x},${under.y},${under.z} would not dig: ${act.lastDigWhy() || '?'}`; break }
-    const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await move.sleep(50)
+    // (the drop waited for by height, not the ground flag - read the tick after a dig it is still the old block's)
+    { const t0 = Date.now(); while (Math.floor(bot.entity.position.y + 0.01) > under.y && Date.now() - t0 < 1500) await move.sleep(50) }
     n++; if (onDug) onDug(under)
   }
   return n
