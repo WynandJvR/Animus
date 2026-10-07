@@ -352,6 +352,18 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     if (v === undefined) { const gy = world.groundY(bot, p.x, p.z, b0.y1); v = (j.index.has(`${p.x},${b0.y1},${p.z}`) || (gy != null && gy <= b0.y1 - 3)) ? 40 : 0; hollow.set(k, v) }
     return v
   })
+  // (A ONE-WAY POCKET'S CELLS - the build's last walk search: cells the walk drops into and never gets back out of (build.sinkAt,
+  //  rooms.oneWay) are refused; a walk that starts in one is free to leave. And from a pocket inside the footprint, no tower
+  //  of ours inside it: the chimney nest's walks towered diorite up into a column of the castle's trapdoors and the bot was
+  //  held there all night, 2026-10-07 18:48-19:00 (the escape's way out, not a tower into the build's cells)
+  const bld = (() => { try { return require('./build') } catch { return null } })()
+  const startSink = !!bld && (() => { try { return bld.sinkAt(world.standCell(bot)) } catch { return true } })()
+  if (bld && !startSink) m.exclusionAreasStep.push(block => (block && block.position && bld.sinkAt(block.position)) ? 100 : 0)
+  const inPocket = !!bld && (() => { try { return bld.pocketHere(bot) } catch { return false } })()
+  if (inPocket) {
+    const pj = bld.getJob(); const pb = pj && pj.box
+    if (pb) m.exclusionAreasPlace.push(block => (block && block.position && block.position.x >= pb.x1 && block.position.x <= pb.x2 && block.position.z >= pb.z1 && block.position.z <= pb.z2) ? 100 : 0)
+  }
   // (a remembered trap's cells: dear, not refused - a walk that starts inside one can still leave; noteTrap)
   let trapSet = null; let trapGen = -1
   m.exclusionAreasStep.push(block => {
@@ -1021,6 +1033,20 @@ let legSaid = null
 // (the cells an escape opened in our own wall, this escape: a walk out through them proves nothing of the trap - the
 //  builder closes them on its next pass and the pocket catches the bot again; 2026-09-30 audit)
 let escOpened = []
+// the cells an escape opened that the builder has not put back yet: this escape's, and those kept with a live trap (noteTrap)
+function escOpenedCells (bot) {
+  const out = escOpened.slice()
+  for (const t of (require('./memory').get().trapCells || [])) if (t.opened && t.day != null && trapLive(bot, t)) out.push(...t.opened)
+  return out
+}
+// THE CELL THE BODY STANDS IN, read only on the ground: in the air, the cell it comes down to (the first floor under it within
+//  four) - a floored read mid-jump is a block over the stand (the escape's walls opened a block too high, 2026-10-07)
+function restCell (bot) {
+  if (bot.entity.onGround) return world.standCell(bot)
+  const f = bot.entity.position.floored()
+  for (let y = f.y; y > f.y - 4; y--) { const u = world.at(bot, f.x, y - 1, f.z); if (u && !world.isAirish(u) && !world.isWaterBlock(u)) return { x: f.x, y, z: f.z } }
+  return { x: f.x, y: f.y, z: f.z }
+}
 function noteTrap (bot, p) {
   const opened = escOpened.slice(); escOpened = []
   const cells = giveUps.filter(g => Math.abs(g.x - p.x) <= GIVEUP_NEAR && Math.abs(g.y - p.y) <= GIVEUP_NEAR && Math.abs(g.z - p.z) <= GIVEUP_NEAR).map(g => ({ x: g.x, y: g.y, z: g.z }))
@@ -1199,7 +1225,11 @@ async function escapeUpInner (bot, { proven: provenBy = false } = {}) {
       //  lantern's cell and the body's head reaches the cell two over it; read from the floored feet, the room was the 69
       //  cells of the floor below, its wall "beside me" a cell the body could not step to - every walk noPath, "couldn't reach
       //  the wall", "no wall beside me", 20 minutes on a lantern, 2026-10-07)
-      const me = world.standCell(bot)
+      // (and the body LANDED first: read mid-jump - the planner's jump into a side it cannot take, again and again - the floored
+      //  feet are a block over the stand; the same spot read y126 and y127 by turns, and the pair opened at 127/128 was a step
+      //  from nowhere the body stood, 2026-10-07 18:50. Still in the air after the wait: the cell it comes down to)
+      await gather.landed(bot, 1000)
+      const me = restCell(bot)
       // (a door beside the bot is "a way" to wayOut, but crossDoor goes through a door only along its facing, from a step in
       //  front or behind: from its side - a one-cell pocket next to a double door - it never got through, and the log said
       //  "no way out" beside a door, 2026-09-29; audit)
@@ -1217,9 +1247,21 @@ async function escapeUpInner (bot, { proven: provenBy = false } = {}) {
       // (safe ground past the wall: room for the body and a drop a fall does not hurt - the castle's outer walls stand over
       //  a 6-9 block drop, and air past them is a lip, not a way out; audit)
       const safe = (x, y, z) => air(x, y, z) && air(x, y + 1, z) && world.dropAt(bot, x, y, z) <= world.SAFE_DROP
+      // A PAIR IS OPENED ONLY FOR A STEP THE WALK CAN TAKE: the walk model with the pair (and what this escape opened already)
+      //  read as air has the step from c into it - and on from it to past the wall, when asked. Two finished cells broken east
+      //  of the body at 18:50 on 2026-10-07: the column it stood in held two open trapdoors whose panels were on that very side,
+      //  and the step up onto the planks there had no head room - the walks stayed noPath. Never a cell the step cannot use
+      const stepThrough = (c, dx, dz, onward = false) => {
+        const k3 = q => q.x + ',' + q.y + ',' + q.z // (kk is declared further down)
+        const w = { x: c.x + dx, y: c.y, z: c.z + dz }; const open = new Set(escOpened.map(k3))
+        for (const dy of [0, 1]) if (!air(w.x, w.y + dy, w.z)) open.add(k3({ x: w.x, y: w.y + dy, z: w.z }))
+        const W2 = build.walkModelOver(bot, open)
+        if (!W2.next(c).some(n => n.x === w.x && n.y === w.y && n.z === w.z)) return false
+        return !onward || W2.next(w).some(n => n.x === w.x + dx && n.z === w.z + dz)
+      }
       const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => {
         const door = [0, 1].some(dy => { const b = world.at(bot, me.x + dx, me.y + dy, me.z + dz); return b && /_door$/.test(b.name) })
-        return { dx, dz, door, ok: ours(me.x + dx, me.y, me.z + dz) && ours(me.x + dx, me.y + 1, me.z + dz), beyond: safe(me.x + 2 * dx, me.y, me.z + 2 * dz) }
+        return { dx, dz, door, ok: ours(me.x + dx, me.y, me.z + dz) && ours(me.x + dx, me.y + 1, me.z + dz) && stepThrough(me, dx, dz), beyond: safe(me.x + 2 * dx, me.y, me.z + 2 * dz) }
       }).filter(sd => sd.ok).sort((a, b) => (b.door - a.door) || (b.beyond - a.beyond))
       // A ROOM, NOT A POCKET: shut in a 140-cell room under the plaza, every side of the body was air - "ours or air" - and
       // the tunnel ran three steps across the open floor, dug nothing, and the walks gave up again, a loop of 6 minutes,
@@ -1280,6 +1322,7 @@ async function escapeUpInner (bot, { proven: provenBy = false } = {}) {
           const wx = cx + dx; const wz = cz + dz; const bx = cx + 2 * dx; const bz = cz + 2 * dz
           if (room.has(kk({ x: wx, y: cy, z: wz })) || (air(wx, cy, wz) && air(wx, cy + 1, wz))) continue // (not a wall)
           if (!ours(wx, cy, wz) || !ours(wx, cy + 1, wz) || !safe(bx, cy, bz) || room.has(kk({ x: bx, y: cy, z: bz }))) continue
+          if (!stepThrough({ x: cx, y: cy, z: cz }, dx, dz, true)) continue // (a wall the walk could not step through once open)
           const cost = pairCost(wx, cy, wz)
           const cand = { c: { x: cx, y: cy, z: cz }, dx, dz, d, cost }
           const better = (a, b) => ((a.cost >= 10) - (b.cost >= 10)) || (a.d - b.d) || (a.cost - b.cost)
@@ -1356,6 +1399,8 @@ async function escapeUpInner (bot, { proven: provenBy = false } = {}) {
           if (!ours(p0.x, p0.y, p0.z) || !ours(p0.x, p0.y + 1, p0.z)) break
           // (a finished cell further in, the same rule: only when survival needs it)
           if (pairCost(p0.x, p0.y, p0.z) >= 10 && !urgent()) { log('move', `enclosed: a finished cell of the build at ${fmt(p0)} next - not breaking it with no danger`); break }
+          // (from where the body stands now: the step into the pair once open - else nothing dug)
+          if (!stepThrough(at, sd.dx, sd.dz)) { log('move', `enclosed: no step from ${fmt(at)} into ${fmt(p0)} even opened (a panel on that side, no head room) - not opening it`); break }
           for (const dy of [1, 0]) {
             const b = world.at(bot, p0.x, p0.y + dy, p0.z)
             if (b && !world.isAirish(b)) { escOpened.push({ x: p0.x, y: p0.y + dy, z: p0.z }); log('move', `enclosed: taking our own ${b.name} at ${fmt({ x: p0.x, y: p0.y + dy, z: p0.z })}`); const mine = !!cellAt(p0.x, p0.y + dy, p0.z); await act.dig(bot, { x: p0.x, y: p0.y + dy, z: p0.z }, { own: mine, force: mine, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }
@@ -1925,4 +1970,4 @@ function refuseNode (n, ms = 120000) {
   if (refusedNodes.size > 200) { const now = Date.now(); for (const [kk, t] of refusedNodes) if (t < now) refusedNodes.delete(kk) }
   refusedNodes.set(k, Date.now() + ms)
 }
-module.exports = { refuseNode, closedDoorAt, buried, legPoint, escapeUp, escapeUrgent, isVerdict, stuckPlace, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { escOpenedCells, refuseNode, closedDoorAt, buried, legPoint, escapeUp, escapeUrgent, isVerdict, stuckPlace, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }

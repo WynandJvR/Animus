@@ -306,7 +306,32 @@ try {
   console.log(`design walk: ${g.stands} stands of the finished castle, ${prot.size} protected cells - ${msD}ms, longest slice ${longestD}ms; its own ways up reached: ${tops.length - topsMissing.length}/${tops.length}; upper groups of 20+ stands: ${floors.length - unreachedFloors.length} of ${floors.length} reached by the walk model`)
   console.log(`design clear: the live strays ${strayInProt}/${strayAt.size} in protected cells; tops reached before the clear ${before.length}/${tops.length}, ${selected.size} strays selected (${[...selected.values()].map(q => key(q) + (q.stand ? ' from ' + key(q.stand) : '')).join(' ')}), after ${after.length}/${tops.length}; ${leftOnRoutes} left blocking a route (${strayBlocks.size} more in the walking space off the way taken - the teardown's)`)
 } catch (e) { console.log('design walk: could not run - ' + e.message); design = { error: e.message } }
-const fails = [design && design.error && 'the design walk did not run: ' + design.error, design && design.topsMissing && design.topsMissing.length && `the finished castle's walk misses its own ways up: ${design.topsMissing.join(' ')}`, design && design.after != null && design.after < 2 && `after the clear the castle's own ways up are still cut (${design.after}/2)`, design && design.longest > 25 && `the design walk held the loop ${design.longest}ms`, design && design.leftOnRoutes && `${design.leftOnRoutes} strays left blocking the castle's own routes`, design && design.standFar && design.standFar.length && `strays out of reach of the stand they are dug from: ${design.standFar.join(' ')}`, hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, longest > 25 && `the ring plan held the loop ${longest}ms in one slice`, ringUnserved && `${ringUnserved} cells a ring was planned for still without a stand`, !ringsLaid && tops.length >= 3 && 'no ring planned on the site', droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
+// ONE-WAY POCKETS (rooms.oneWay - walkReach's sinks, 2026-10-07): the walk from the dump's lowest edge stand over the whole
+// site; the cells it drops into with no walk back out - counted (left out of the reach set live, refused to the planner)
+let oneWayN = 0; let oneWayOf = 0; let oneWayLeavable = 0
+{
+  // (from the edge stand whose walk reaches furthest - a sample of 40 edge stands)
+  const edges = stands.filter(q => q.x === 0 || q.z === 0 || q.x === S.x - 1 || q.z === S.z - 1)
+  let best = null
+  for (const edge of edges.filter((_, i) => i % Math.max(1, Math.floor(edges.length / 40)) === 0)) {
+    const cellsO = new Set([key(edge)]); const backO = new Map(); const qO = [edge]
+    for (let i = 0; i < qO.length; i++) for (const n of W.next(qO[i])) { if (!inside(n.x, n.y, n.z)) continue; const nk = key(n); const bl = backO.get(nk); if (bl) bl.push(key(qO[i])); else backO.set(nk, [key(qO[i])]); if (!cellsO.has(nk)) { cellsO.add(nk); qO.push(n) } }
+    if (!best || cellsO.size > best.cellsO.size) best = { cellsO, backO }
+  }
+  if (best) {
+    const { cellsO, backO } = best
+    const seeds = [...cellsO].filter(k0 => { const [x, , z] = k0.split(',').map(Number); return x === 0 || z === 0 || x === S.x - 1 || z === S.z - 1 })
+    // (the planner asked too - deadEnd's rule for a region; and the gate: no one-way cell has a planner move out of the sinks)
+    const pNext = k0 => { const [x, y, z] = k0.split(',').map(Number); return plannerNext({ x, y, z }).map(m => key(m)) }
+    const sinksO = await rooms.oneWay(cellsO, backO, seeds, async () => {}, pNext)
+    const modelOnly = await rooms.oneWay(cellsO, backO, seeds)
+    oneWayN = sinksO.size; oneWayOf = cellsO.size
+    oneWayLeavable = [...sinksO].filter(k0 => pNext(k0).some(nk => !sinksO.has(nk))).length
+    console.log(`  (by the walk model alone ${modelOnly.size}; one-way cells the planner can leave: ${oneWayLeavable})`)
+    console.log(`one-way pockets: ${oneWayN} of ${oneWayOf} cells the walk reaches from the site's edge have no walk back out${oneWayN ? ' (e.g. ' + [...sinksO].slice(0, 4).join(' ') + ')' : ''}`)
+  }
+}
+const fails = [design && design.error && 'the design walk did not run: ' + design.error, design && design.topsMissing && design.topsMissing.length && `the finished castle's walk misses its own ways up: ${design.topsMissing.join(' ')}`, design && design.after != null && design.after < 2 && `after the clear the castle's own ways up are still cut (${design.after}/2)`, design && design.longest > 25 && `the design walk held the loop ${design.longest}ms`, design && design.leftOnRoutes && `${design.leftOnRoutes} strays left blocking the castle's own routes`, design && design.standFar && design.standFar.length && `strays out of reach of the stand they are dug from: ${design.standFar.join(' ')}`, hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, longest > 25 && `the ring plan held the loop ${longest}ms in one slice`, ringUnserved && `${ringUnserved} cells a ring was planned for still without a stand`, !ringsLaid && tops.length >= 3 && 'no ring planned on the site', droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`, oneWayLeavable && `${oneWayLeavable} one-way cells the planner can leave`].filter(Boolean)
 console.log(fails.length ? `FAIL ${fails.join('; ')}` : 'PASS')
 process.exit(fails.length ? 1 : 0)
 })()

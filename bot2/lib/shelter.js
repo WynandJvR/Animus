@@ -252,25 +252,41 @@ async function waitForDay (bot, shouldStop) {
 }
 
 // Surface shelter: blocks on all four sides at feet and head level, and one overhead.
+// (NEVER INTO THE BUILD'S CELLS: no wall of mine in a cell of the build, its walking space, or a cell an escape just opened
+//  to let the body out. Shut in a chimney nest at dusk, five nights' tries walled the escape's own opening
+//  with dark_oak_planks in a finished stripped_oak_wood cell and left them there on "7/9 sides", 2026-10-07 18:51-18:59.
+//  A wall that would need one of those is no wall-in: said, nothing placed (the director's back-off holds the next try); and a
+//  wall-in that fails takes back what it placed. In the build's zone otherwise as anywhere - the bunker and the dig-in are
+//  refused there already, and this is the night's last defence; audit)
 async function encloseHere (bot, { shouldStop } = {}) {
   const me = world.feetPos(bot)
+  const build = require('./build'); const job = build.getJob()
+  const opened = new Set(move.escOpenedCells(bot).map(q => `${q.x},${q.y},${q.z}`))
+  const notMine = c => (!!job && job.index.has(`${c.x},${c.y},${c.z}`)) || build.walkProtected(c) || opened.has(`${c.x},${c.y},${c.z}`)
   const cells = []
   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, 1]) cells.push({ x: me.x + dx, y: me.y + dy, z: me.z + dz })
   cells.push({ x: me.x, y: me.y + 2, z: me.z })
-  let placed = 0
+  { const bad = cells.find(c => { const b = world.at(bot, c.x, c.y, c.z); return !(b && world.isSolid(b)) && notMine(c) }); if (bad) { log('shelter', `not walling in at ${move.fmt(me)}: ${move.fmt(bad)} is a cell of the build, its walking space or an escape's opening`); return false } }
+  let placed = 0; const laid = []
   for (const c of cells) {
     const b = world.at(bot, c.x, c.y, c.z)
     if (b && world.isSolid(b)) { placed++; continue }
     const f = inv.shelterBlock(bot, { wood: true })
     if (!f) break
-    if (await act.place(bot, c, f.name, { allowZones: ['base', 'build'] })) placed++
+    if (await act.place(bot, c, f.name, { allowZones: ['base', 'build'] })) { placed++; laid.push(c) }
   }
-  if (placed < cells.length) { log('shelter', `could only wall in ${placed}/${cells.length} sides`); return false }
+  if (placed < cells.length) {
+    // (what this try laid comes back down: a wall-in that does not close is litter round the body - and maybe its way out)
+    let back = 0
+    for (const c of laid) if (await act.dig(bot, c, { force: true, noWalk: true, allowZones: ['base', 'build'], timeoutMs: 8000 }).catch(() => false)) back++
+    log('shelter', `could only wall in ${placed}/${cells.length} sides${laid.length ? ` - took ${back} of the ${laid.length} I laid back down` : ''}`); return false
+  }
   log('shelter', `walled in for the night at ${move.fmt(me)}`)
   mem.update(m => { m.bunker = { x: me.x, y: me.y, z: me.z, walls: cells } })
   const ok = await waitForDay(bot, shouldStop)
-  // morning: take the walls down again (they are ours and would otherwise litter the landscape)
-  for (const c of cells) {
+  // morning: take the walls down again (they are ours and would otherwise litter the landscape) - only the ones this night
+  // laid: a wall already standing beside the body is not ours to take (the castle's own planks counted as "a side"; audit)
+  for (const c of laid) {
     const b = world.at(bot, c.x, c.y, c.z)
     if (b && /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|sand|gravel|.*_planks|.*_log)$/.test(b.name)) await act.dig(bot, c, { force: true, allowZones: ['base', 'build'], timeoutMs: 8000 })
   }

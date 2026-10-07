@@ -89,6 +89,39 @@ function walkModel (w, isC = () => false, { opens = false, avoid = null } = {}) 
 // (a plate cell left along its plate only, never onto a fire) and a cell it alone reads as closed is a cell the planner
 // still walks out of - no reason to drop it (castlewalktest.js counts both)
 function deadEnd (W, p, plannerExits) { return !W.next(p).length && !plannerExits(p) }
+// THE ONE-WAY CELLS of a walk's reached set: those with no way back to any seed (where the walk began, the open ground past
+//  it) - the walk drops in and never climbs out. cells: Set of keys; back: key -> [keys with a step into it]; tick(): the
+//  caller's yield, every few cells. -> Set of keys (deadEnd's rule for a region, not a cell)
+// (BOTH, never the model alone - deadEnd's rule: plannerNext(k) -> the keys the legs' planner moves to from k (no dig, no
+//  place, cost <= 100). A cell with a planner move to a cell that gets out - or out of the set altogether - gets out, and so
+//  does every cell with a step into it. By the model alone 12 of the fixture's 71 "one-way" cells were cells the planner
+//  leaves - a plate cell's side, a part block's edge: real stands dropped and the planner refused them; audit 2026-10-07)
+async function oneWay (cells, back, seeds, tick = async () => {}, plannerNext = null) {
+  const ok = new Set(seeds.filter(k => cells.has(k))); const q = [...ok]; let i = 0
+  const spread = async () => {
+    for (; i < q.length; i++) {
+      if (i % 64 === 0) await tick()
+      for (const pk of back.get(q[i]) || []) if (!ok.has(pk) && cells.has(pk)) { ok.add(pk); q.push(pk) }
+    }
+  }
+  await spread()
+  if (plannerNext) {
+    // (to a fixed point: a cell freed by the planner frees the cells that step into it, which may free more by the planner)
+    let changed = true; const asked = new Map()
+    while (changed) {
+      changed = false; let n = 0
+      for (const k of cells) {
+        if (ok.has(k)) continue
+        if (++n % 16 === 0) await tick()
+        let nx = asked.get(k); if (!nx) { nx = plannerNext(k) || []; asked.set(k, nx) }
+        if (nx.some(nk => ok.has(nk) || !cells.has(nk))) { ok.add(k); q.push(k); changed = true }
+      }
+      await spread()
+    }
+  }
+  const out = new Set(); for (const k of cells) if (!ok.has(k)) out.add(k)
+  return out
+}
 
 // A WALK REGION round p: out if it leaves the box (x/z) or runs past `cap` cells (no compartment); else closed, with its
 // cells. NO sky exit - a region asks whether a walker gets IN or OUT on foot (over a roofless compartment's wall is a drop
@@ -226,4 +259,4 @@ function * closesPocketGen (w, c, { box, work, standsOf, cap = 300 }) {
   return null
 }
 
-module.exports = { walkModel, deadEnd, region, regionGen, exitReach, doorwayAxis, closesRoom, closesPocket, closesPocketAsync, doorPanel, edgeOf, OPP, CW, CCW }
+module.exports = { oneWay, walkModel, deadEnd, region, regionGen, exitReach, doorwayAxis, closesRoom, closesPocket, closesPocketAsync, doorPanel, edgeOf, OPP, CW, CCW }

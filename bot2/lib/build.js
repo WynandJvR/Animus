@@ -1477,19 +1477,34 @@ async function walkReach (bot) {
   const depth = new Map([[key(start), 0]]) // (its route's length: detourTooLong)
   const t0 = Date.now(); let slice = t0; let longest = 0
   const dearQ = [] // (the dear tier: walked on from once the cheap cells are spent)
+  const back = new Map() // key -> [keys of the cells with a step into it]: the way back, for the one-way pockets below
+  const leaves = [] // (cells reached but not walked on from - past the site's area: open ground, a way out by itself)
   while (i < q.length || dearQ.length) {
     if (i >= q.length) { q.push(...dearQ.splice(0)) }
     if (cells.size > REACH_CAP) { capped = true; break }
     if (Date.now() - slice > 8) { longest = Math.max(longest, Date.now() - slice); await new Promise(r => setImmediate(r)); slice = Date.now() }
     const c = q[i++]
-    if (!inArea(c)) continue // (reached, not walked on from: the site's own ground is the question)
+    if (!inArea(c)) { leaves.push(key(c)); continue } // (reached, not walked on from: the site's own ground is the question)
     const ns = W.next(c)
     // (A DEAD END IS NO STAND: a cell the walk drops into with no step out of it, nor any move of the legs' own planner (no
     //  dig, no place) - rooms.deadEnd. A 1x1 shaft over a lantern was a leg's end: dropped in, every walk an instant noPath
     //  for 20 minutes, 2026-10-07. Asked without the avoid - a leg failed lately is no wall to the body - and only when the
     //  model has no step: the planner is asked of those few cells alone)
     if (!ns.length && c !== start && rooms.deadEnd(W0, c, plannerExits)) { cells.delete(key(c)); continue }
-    for (const n of ns) { const k = key(n); if (!cells.has(k)) { cells.add(k); parent.set(k, c); depth.set(k, (depth.get(key(c)) || 0) + 1); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
+    for (const n of ns) { const k = key(n); { const bl = back.get(k); if (bl) bl.push(key(c)); else back.set(k, [key(c)]) } if (!cells.has(k)) { cells.add(k); parent.set(k, c); depth.set(k, (depth.get(key(c)) || 0) + 1); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
+  }
+  // ONE-WAY POCKETS ARE NO STANDS: cells the walk gets down into and never back out of - no way from them to where I stand or
+  //  past the site's area (rooms.deadEnd's rule for a region, not a cell). The walk dropped into the chimney nest round
+  //  -2284,123,-608 on its way to a stand, every walk out of it noPath, and the night came in there, 2026-10-07 18:47. Left out
+  //  of the set - no stand, no leg's end, no route through (a route to a cell that gets back never runs through one) - and
+  //  kept as reach.sinks: the legs' planner is refused them (move.movementsFor), the walker's towers out of one too
+  let sinks = null
+  if (!capped) {
+    // (the legs' planner asked too - no dig, no place, cost <= 100: deadEnd's rule, plannerExits' moves)
+    const plannerNext = k => { const [x, y, z] = k.split(',').map(Number); try { return mv.getNeighbors({ x, y, z, remainingBlocks: 0 }).filter(m => (m.x !== x || m.y !== y || m.z !== z) && m.cost <= 100 && !(m.toBreak && m.toBreak.length) && !(m.toPlace && m.toPlace.length)).map(m => m.x + ',' + m.y + ',' + m.z) } catch { return [x + ',' + (y + 999) + ',' + z] } } // (a throw: read as a way out - never a cell dropped on an error)
+    sinks = await rooms.oneWay(cells, back, [key(start), ...leaves], async () => { if (Date.now() - slice > 8) { longest = Math.max(longest, Date.now() - slice); await new Promise(r => setImmediate(r)); slice = Date.now() } }, plannerNext)
+    if (!sinks.size) sinks = null
+    if (sinks) { for (const k of sinks) cells.delete(k); if (Date.now() - sinkSaid > 120000) { sinkSaid = Date.now(); log('build', `walk reach: ${sinks.size} cells one way only (no walk back out) left out - e.g. ${[...sinks][0]}`) } }
   }
   // (SHUT IN - no cell of the set outside the build: every stand reads out of reach, no walk is made, and the walker's own
   //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
@@ -1501,11 +1516,23 @@ async function walkReach (bot) {
     reach = null; watchStatus(bot); shutIn = { job, kind: 'shut in', cells, at: Date.now(), gen: statusGen, from: f }; return null
   }
   shutIn = null
-  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent, depth }
+  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent, depth, sinks }
   if (Date.now() - reachLast > 120000) { reachLast = Date.now(); log('build', `walk reach: ${cells.size} cells from ${move.fmt(f)}${capped ? ' (capped - unknown past it)' : ''} in ${reach.ms}ms (longest slice ${longest}ms)`) }
   return reach
 }
-let reachLast = 0; let shutSaid = 0
+let reachLast = 0; let shutSaid = 0; let sinkSaid = 0
+// A ONE-WAY POCKET'S CELL (the last walk search's sinks, this job, under a minute old) - the planner's refusal (movementsFor)
+function sinkAt (p) { return !!reach && reach.job === job && !!reach.sinks && Date.now() - reach.at < 60000 && reach.sinks.has(`${p.x},${p.y},${p.z}`) }
+// IN A POCKET INSIDE THE FOOTPRINT: where I stand is a one-way pocket's cell, or the search's verdict here is shut in/perched -
+//  no tower of the planner's out of it inside the footprint (the nest's walks towered diorite up into the trapdoor column,
+//  2026-10-07 18:48): the escape's way, not a tower into the build's cells
+function pocketHere (bot) {
+  if (!job || !bot || !bot.entity) return false
+  const f = world.standCell(bot); const b = job.box
+  if (f.x < b.x1 || f.x > b.x2 || f.z < b.z1 || f.z > b.z2) return false
+  if (sinkAt(f)) return true
+  return !!shutIn && shutIn.job === job && Date.now() - shutIn.at < 60000 && shutIn.cells.has(key(f))
+}
 // THE SEARCH'S VERDICT WHEN IT HAS NO SET: shut in (no cell of the walk outside the build) or perched (a handful of cells) -
 // { job, kind, cells, at, from }. Read by goSite: a goal none of those cells serves goes to the escape, not to the walker.
 // Any other null (no stand under me, outside the site, capped) is no verdict - null here
@@ -2894,6 +2921,14 @@ function edgeOf (dx, dz) { return rooms.edgeOf(dx, dz) }
 // live world
 function roomWorld (bot) { return { floorTop: (x, y, z) => y + world.floorTop(world.at(bot, x, y, z)), at: (x, y, z) => world.at(bot, x, y, z), isAirish: world.isAirish, bodyPassable: world.bodyPassable, isOpenTrapdoor: world.isOpenTrapdoor, isSolid: world.isSolid, standable: (x, y, z) => world.standable(bot, x, y, z), plateEdge: world.plateEdge, SAFE_DROP: world.SAFE_DROP } }
 function walkModel (bot, isC = () => false) { return rooms.walkModel(roomWorld(bot), isC) }
+// THE WALK MODEL WITH SOME CELLS TAKEN OUT (open: a Set of keys, read as air): the steps there would be once they are dug -
+//  the escape asks it of the pair it would open before opening any (a plate edge in the body's own column, the head room of
+//  a step up: two finished cells broken beside two open trapdoors whose panels shut that very side, 2026-10-07 18:50)
+function walkModelOver (bot, open) {
+  const air = require('prismarine-block')(bot.registry).fromProperties('air', {}, 0)
+  const fake = { registry: bot.registry, blockAt: v => { const x = Math.floor(v.x); const y = Math.floor(v.y); const z = Math.floor(v.z); if (open.has(x + ',' + y + ',' + z)) return Object.assign(Object.create(air), { position: new Vec3(x, y, z) }); return bot.blockAt(v) } }
+  return rooms.walkModel(roomWorld(fake), () => false)
+}
 // A STAND'S REGION: whether the walk-only region round a cell gets out of the build (the box's edge, or a sky column a
 // tower may climb) - the same search as wayOut, from the stand. A stand whose region is closed off inside the build is in
 // one of its compartments: reachable only from inside it (a stand no walk gets to is no stand: 0 of 6 placed, three stands
@@ -3266,12 +3301,14 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, ex
       // standing on scaffold: that block first, from under our own feet (a drop of one)
       const feet = bot.entity.position.floored()
       const under = { x: feet.x, y: feet.y - 1, z: feet.z }
-      if (bot.entity.onGround && isScaf(under) && !rests(under) && safeDrop(bot, under)) {
+      if (bot.entity.onGround && isScaf(under) && !rests(under) && safeDrop(bot, under) && landsWithWayOn(bot, under, isScaf)) {
         if (await dig(under, true)) { removed++; got++; await landed(bot) } else miss(under)
         continue
       }
       const p = queue.shift()
       if (!isScaf(p) || rests(p) || (keep && keep(p))) continue
+      // (the block under me by any road: only where the landing has a way on - landsWithWayOn; else left for later)
+      { const fu = bot.entity.position.floored(); if (p.x === fu.x && p.z === fu.z && p.y === fu.y - 1 && !landsWithWayOn(bot, p, isScaf)) continue }
       if (!act.reach(bot, p, 4.3)) {
         // (near enough, not look-at: the look-at raycast through pews and pillars "stuck" at 5-6b; the server checks distance)
         // a short walk first; then the pillar from the ground beside it; the church door only for what is inside
@@ -3353,6 +3390,19 @@ function safeDrop (bot, under) {
     if (!b || world.isLavaBlock(b)) return false
     if (world.isSolid(b)) return under.y - y <= 3
     if (world.isWaterBlock(b)) return false
+  }
+  return false
+}
+// WHERE THE BODY LANDS when the block under it goes: a walk-model step on from there, or more of our own scaffold under it
+//  (a pillar dug down from its top). The teardown took our cobblestone from under the body at -2284,125,-610 and dropped it
+//  into the chimney nest below, where every walk was noPath again, 2026-10-07 19:00
+function landsWithWayOn (bot, under, isScaf) {
+  for (let y = under.y - 1; y >= under.y - 4; y--) {
+    const b = world.at(bot, under.x, y, under.z)
+    if (!b || world.isAirish(b)) continue
+    if (isScaf({ x: under.x, y, z: under.z })) return true
+    const land = { x: under.x, y: y + 1, z: under.z }
+    return walkModelOver(bot, new Set([`${under.x},${under.y},${under.z}`])).next(land).length > 0
   }
   return false
 }
@@ -3634,7 +3684,7 @@ async function costReport (bot, name, prefs = null) {
   return { name, total, typicalUnitSec: med, kinds: rows.length, blocks: rows.reduce((a, r) => a + r.count, 0), flagged: rows.filter(r => r.flag), top: rows.slice(0, 12) }
 }
 
-module.exports = { walkProtected, designFor, boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, walkReach, reachStandFor, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { sinkAt, pocketHere, walkModelOver, walkProtected, designFor, boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, walkReach, reachStandFor, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,
