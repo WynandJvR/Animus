@@ -321,18 +321,30 @@ async function withdrawMany (bot, list, { keepFree = 2, maxWalk = 64 } = {}) {
   const want = new Map(); for (const [nm, n] of list) if (n > 0) want.set(nm, (want.get(nm) || 0) + n)
   const goal = new Map(want); const start = {}; for (const nm of want.keys()) start[nm] = inv.count(bot, nm)
   const got = {}; let opened = 0
-  for (const p of knownChests(bot)) {
+  // THE CHESTS IN THE LIST'S ORDER: the next opened is the one holding the most wanted item still wanted (by the cache), the
+  // nearest on a tie - its slots are what the plan keeps free, and opened nearest-first those reservations held the pack open
+  // across every chest of the bank: 25 and 27 openings for 14 and 7 kinds, 48s of a round, 2026-10-07 12:42 (12:16-12:41: 4
+  // a withdraw). "Elsewhere" for the plan is a chest still to open within the walk - never one opened, failed or past it
+  // (a reservation for a chest that will not be opened kept slots free for nothing)
+  const tried = new Set()
+  const chests = knownChests(bot) // (once a withdraw: knownChests searches round home for chests each call)
+  const reachable = () => chests.filter(p => !tried.has(key(p)) && world.dist3(p, bot.entity.position) <= maxWalk)
+  const cached = p => { const c = chestCache()[key(p)]; return c && c.items ? c.items : null }
+  const rankOf = p => { const its = cached(p); if (!its) return want.size; let i = 0; for (const nm of want.keys()) { if (its[nm]) return i; i++ } return Infinity }
+  const bankLeft = nm => reachable().reduce((s, p) => s + ((cached(p) || {})[nm] || 0), 0)
+  for (;;) {
     if (!want.size || inv.freeSlots(bot) <= keepFree) break
-    if (world.dist3(p, bot.entity.position) > maxWalk) continue
-    const c = chestCache()[key(p)]
-    if (c && c.items && ![...want.keys()].some(nm => c.items[nm])) continue
+    const cands = reachable().map(p => ({ p, r: rankOf(p), d: world.dist3(p, bot.entity.position) })).filter(e => e.r !== Infinity).sort((a, b) => (a.r - b.r) || (a.d - b.d))
+    if (!cands.length) break
+    const p = cands[0].p; tried.add(key(p))
     const w = await openChest(bot, p)
     if (!w) continue
     opened++
     // (the slots this opening may fill, counted from before it - the pack's own count is the window's while it is open)
     let slots = inv.freeSlots(bot) - keepFree
     try {
-      const plan = withdrawPlan(bot, [...want], nm => w.containerItems().filter(i => i.name === nm).reduce((s, i) => s + i.count, 0), slots, nm => bankCount(nm))
+      const here = nm => w.containerItems().filter(i => i.name === nm).reduce((s, i) => s + i.count, 0)
+      const plan = withdrawPlan(bot, [...want], here, slots, nm => here(nm) + bankLeft(nm)) // (this chest's own count + the chests still to open)
       for (const [nm, k] of plan) {
         const its = w.containerItems().filter(i => i.name === nm)
         try { await w.withdraw(its[0].type, null, k); slots -= Math.ceil(k / ((its[0] && its[0].stackSize) || 64)) } catch (e) { log('base', `withdraw ${nm} failed: ${e.message}`); if (/inventory is full/i.test(e.message || '')) break }

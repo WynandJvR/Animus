@@ -768,6 +768,7 @@ function anchorable (bot, c, det) {
   //  an anchor it held the band until the step's end gave it a shared miss, one layer a step - oak leaves over an unplanted
   //  tulip, then the leaves over those, "the cell under it waits" ending step after step at the castle's base, 2026-10-06)
   if (bot && belowWaits(bot, c)) return false
+  if (bot && c.twin && !supportThere(bot, c)) return false // (a door waits for its floor: the step's own twin rule)
   // (NOR A CELL WITH NO FACE NOW AND NOWHERE FOR A SUPPORT - the step's own readiness (readyNow): every face it could be
   //  clicked on is a neighbour of the build not placed yet, so it waits on THEM, and they anchor in its stead if they can,
   //  as the cell under does above. As anchors, 12 stairs at a time held the band with nothing doable until the step's end
@@ -2008,7 +2009,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  a hole's last face, a column over a waiting hole - pinned the window at y120 for a few leaves and walls, and the
     //  4,868 blocks in hand for y122 and up were never offered: steps of 1-10 blocks, 2026-09-29; audit. They stay in the
     //  window - below its floor - and go in when their blocker does)
-    const tryable = c => { const f = cellFails.get(key(c)); if (f && f.n >= 1 && f.shared) return false; if (holdAround.has(key(c)) || compHeld.has(key(c))) return false; const w = waitCols.get(c.x + ',' + c.z); return !(w != null && c.y > w) }
+    // (THE ANCHOR'S OWN RULES: no cell under it waiting (belowWaits - the step's sealsBelow), a door's floor there, and READY -
+    //  a face now or a place for a support (readyNow). The window's floor was read from cells the band's rule passes over: 1131
+    //  in hand from y124, the y124-125 layer all over waiting cells, filtered out after the window was cut - nothing doable,
+    //  and the band's 14 anchors at y128 never offered, "not ready (no face or support yet)", 2026-10-07 12:47)
+    const tryable = c => { const f = cellFails.get(key(c)); if (f && f.n >= 1 && f.shared) return false; if (holdAround.has(key(c)) || compHeld.has(key(c))) return false; const w = waitCols.get(c.x + ',' + c.z); if (w != null && c.y > w) return false; if (belowWaits(bot, c) || (c.twin && !supportThere(bot, c))) return false; return readyNow(bot, c) }
     let minY = Infinity; for (const c of structural) if (c.y < minY && tryable(c)) minY = c.y
     if (minY === Infinity && structural.length) minY = Math.min(...structural.map(c => c.y)) // (none tryable: as before)
     // no more than 3 layers above the lowest unfinished cell: walls rise together, nothing floats far up
@@ -2084,7 +2089,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       for (const a of todo) {
         if (n >= 200) break
         if (!anchors(a) || !has(a) || dk.has(key(a)) || holdBack.has(key(a))) continue
-        const r = holdAround.has(key(a)) ? 'the last face of a hole' : sealsBelow(a) ? 'the cell under it waits' : a.pour ? 'a pour over air' : 'not ready (no face or support yet)'
+        // (the reason as the step read it - each of the window's own rules by name; "not ready" only when readyNow says so: it
+        //  covered every exclusion, and a ready anchor kept out of the window read as one with no face, 2026-10-07 12:47)
+        const r = holdAround.has(key(a)) ? 'the last face of a hole' : sealsBelow(a) ? 'the cell under it waits' : a.pour ? 'a pour over air' : !readyNow(bot, a) ? 'not ready (no face or support yet)' : (a.twin && !supportThere(bot, a)) ? 'its floor not there yet' : `ready, out of the step's window (its floor y${minY})`
         { const prev = cellFails.get(key(a)); cellFails.set(key(a), { n: failed.get(key(a)) + 1, at: Date.now(), shared: prev ? !!prev.shared : true }) } n++ // (a real own fail is never downgraded by a shared miss; audit)
         if (!why[r]) why[r] = { n: 0, first: a }; why[r].n++
       }
