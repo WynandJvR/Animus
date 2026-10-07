@@ -584,7 +584,10 @@ async function collectFurnaces (bot, { shouldStop = null } = {}) {
     if (!f) continue
     // (the ledger noted in finally: a takeOutput that threw skipped it, and the furnace kept its stale entry)
     // (and the empty bucket a burnt lava bucket left in the fuel slot - it blocks the slot, and it is the next lava trip's)
-    try { const o = f.outputItem(); if (o) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } if (await clearBucket(bot, f)) buckets++ } catch {} finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
+    // (A STUCK INPUT: what never cooks - an input with no smelting, its count where the last visit left it 20s and more ago, no
+    //  output - comes out. Left in, the ledger called the furnace busy for good and every round's collect walked to it: a
+    //  wooden hoe in an input slot, "furnaces collect+refuel 20s" in each of 13 rounds, 2026-10-07)
+    try { const o = f.outputItem(); if (o) { await f.takeOutput(); got += o.count; landed(o.name, o.count) } if (await clearBucket(bot, f)) buckets++; const inp = f.inputItem(); const u0 = use[fkey(fb.position)]; if (inp && !o && u0 && u0.input === inp.name && u0.inN === inp.count && Date.now() - u0.at > 20000 && !smeltsTo(inp.name) && !inv.COOKED_OF[inp.name] && inv.freeSlots(bot) > 0) { await f.takeInput(); log('smelt', `took ${inp.count} ${inp.name} out of a furnace at ${fkey(fb.position)} - it does not smelt`) } } catch {} finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
     if (inv.freeSlots(bot) <= 1) break
   }
   if (got) log('smelt', `collected ${got} items from the furnaces`)

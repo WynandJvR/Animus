@@ -1497,6 +1497,11 @@ async function withdrawWindow (needs, lowY = {}) {
   // go back to the chest, the highest first, until they all fit - only what is over the kit's keep and the scaffold stock
   // (a castle's torches, dirt and cobblestone are window needs too, and the kit's light went first; audit), and only for
   // the ones in the chest to take (else every round put the upper blocks back and took them out again; audit)
+  // (THE HAUL FIRST: a round begun with the pack full of a trip's haul - spruce logs, saplings, wheat - had 2 slots for the
+  //  window, took a handful of one-offs and never came to the band's own stone: "band anchored by stone (not in hand)", the
+  //  step 1s, the round over to fetch 16 from the chest - 10 of 13 rounds placed nothing, 2026-10-07. What the window places
+  //  none of goes to the chests first, by the deposit task's own rule (depositKeep), at home where the withdraw is anyway)
+  if (inv.freeSlots(bot) < Math.min(Object.keys(needs).length + 2, 12) && depositHaulSize() > 0) await base.depositAll(bot, { keep: (b, i) => Math.max(depositKeep(b, i), build.FILLER_ITEMS.test(i.name) ? build.SCAFFOLD_WANT : 0) }).catch(() => false) // (the scaffold's stock stays: ensureScaffold just took it)
   const heads = firsts.filter(nm => countOf(nm) === 0 && stockOf(nm) > 0)
   await roomForBand(heads, firsts, needs, y, Math.min(heads.length + 1, 6))
   for (const cap of [64, 64 * 4]) {
