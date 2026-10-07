@@ -1027,6 +1027,7 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
   // planner's own long walks to stands the search called reachable timed out at 30s with no door involved - 27s a try in
   // reach, 2 of 13 placed, 2026-10-02 analysis. From where I stand (the search redone if it started elsewhere); a leg that
   // fails hands the rest to the walker below
+  let walkerWhy = 'no stand goal' // (why the walker walks: said with its outcome below)
   if (job && goal && goal.x != null && goal.constructor && goal.constructor.name === 'GoalBlock') {
     const tgt = { x: goal.x, y: goal.y, z: goal.z }
     const f0 = world.feetPos(bot)
@@ -1040,6 +1041,8 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
       if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
       if (attempt > 0) { const prev = reach; reach = null; await walkReach(bot); if (!reach) { reach = prev; break } }
       const route = reachRoute(bot, tgt)
+      if (!route) walkerWhy = reachCurrent(bot) && !reach.capped ? 'no walking route in the search' : 'the search has no answer from here'
+      else if (route.length <= 2) walkerWhy = 'a step away'
       if (!route || route.length <= 2) break
       // (only a route near the straight line: legs never dig or place, and round the whole castle to an upper floor - 118-158
       //  cells, 94s a try - lost to the walker's one scaffold step up, 2026-10-03)
@@ -1072,7 +1075,7 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
       said = `legs ${done}/${stops.length + 1} to ${move.fmt(tgt)} (${route.length} cells, try ${attempt + 1}) - ${why}`
       missedLegs.push(`${done}/${stops.length + 1} legs of ${route.length} cells, ${why}`)
     }
-    if (said) legSaid(said + ' - handed to the walker')
+    if (said) { walkerWhy = said; legSaid(said + ' - handed to the walker') }
   }
   // ONE WALKER: the site's walk goes through move.goTo with the site's own movements - its door crossing on a stall, its
   // waits for the reflexes, its give-up verdicts. The old runGoal + viaDoor fallback walked to a door chosen by distance
@@ -1085,6 +1088,9 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
   const tWalk = Date.now()
   if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
   const r = await move.goTo(bot, goal, { timeoutMs: 30000, stuckMs: 8000, label: 'site ' + (label || ''), movements: () => siteMovements(bot, { place, dig }), shouldStop })
+  // (THE WALKER'S OUTCOME, with why it walked: its failures were 43% of a day's build-step time (130 timeouts, 51 give-ups,
+  //  2026-10-07) and its successes said nothing - no rate to judge it by. One line a walk; a step away is no walk to judge)
+  if (walkerWhy !== 'a step away' && !(r && r.why === 'stopped')) { const g = goal && goal.x != null ? goal : null; log('build', `site walker (${label || '-'}): ${r && r.ok ? 'reached' : (r ? r.why : 'no answer')} in ${((Date.now() - tWalk) / 1000).toFixed(1)}s${g ? ` to ${move.fmt(g)} (${world.dist3(g, bot.entity.position).toFixed(1)}b off now, dy ${Math.floor(g.y != null ? g.y : bot.entity.position.y) - Math.floor(bot.entity.position.y)})` : ''} - walked because: ${walkerWhy}`) }
   for (const q of reflex.plannerPlacedSince(tWalk)) if (!(job && job.index.has(key(q))) && !myPillar.some(c => c.x === q.x && c.y === q.y && c.z === q.z)) myPillar.push({ x: q.x, y: q.y, z: q.z })
   return r
 }
@@ -1669,6 +1675,14 @@ async function placeCell (bot, c, j = job) {
     }
     if (act.reach(bot, pos, 4.3)) return true
     if (cellOutOfTime()) return why(`could not get within reach (its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`)
+    // (NO STAND THE WALK REACHES - the search current, none within a player's reach of a cell above me: the look-at walker
+    //  cannot tower to a "see this face" goal (below), so its 30s ran out first and the pillar went up after it - the same
+    //  pillar, first. A pillar that does not get there leaves the walker its try as before)
+    if (!pillared && c.y > bot.entity.position.y && reachStandFor(bot, pos) === false) {
+      pillared = true
+      if (await pillarTo(bot, c, undefined) && act.reach(bot, pos, 4.3)) return true
+      if (cellOutOfTime()) return why(`could not get within reach (no stand in my walk; the pillar did not get there, its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`)
+    }
     const goal = faces ? new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces, LOS: true }) : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 })
     const r = await goSite(bot, goal, 'place', { shouldStop: cellStop })
     if (!r.ok && cellOutOfTime() && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`) // (never "stopped": that word ends the step)
@@ -2112,8 +2126,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  reaches: an unknown one goes the old way)
     if (!c.foundation && !c.ownWay && !inReach(c)) {
       const st = clusterStand(bot, c, ready, badStands, reachOf)
-      if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is in a closed compartment of the build I am not in (from ${move.fmt(world.feetPos(bot))}) - no other stand: tried as a last resort`)
-      if (st && (st.n >= 3 || (st.n >= 1 && reachCurrent(bot) && reach && !reach.capped && reach.cells.has(key(st)) && !detourTooLong(bot, st)))) {
+      // (A STAND THE WALK SEARCH PROVES OUT OF REACH is never walked to: the walker's 30s to it ended in a timeout and then the
+      //  cell's own way anyway - 14 of the day's 85 'site place' timeouts began at such a stand, 2026-10-07. Not a closed room
+      //  (that waits above): its own way - getInReach's pillar from a foot the search reaches, then the walker)
+      if (st && st.out) log('build', `no stand for ${c.name} at ${move.fmt(c)} in my walk from ${move.fmt(world.standCell(bot))} (the nearest ${move.fmt(st)}; its room leads out - no closed room) - its own way`)
+      if (st && !st.out && (st.n >= 3 || (st.n >= 1 && reachCurrent(bot) && reach && !reach.capped && reach.cells.has(key(st)) && !detourTooLong(bot, st)))) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place', { shouldStop: cellStop }).catch(() => null)
         placeProf.reach += Date.now() - tw

@@ -763,7 +763,9 @@ function noteWalk (label, goal) {
   if (now - c.since > 60000) { c.n = 0; c.since = now; c.at = new Set() }
   c.n++; c.at.add(at); labelWalks.set(label, c)
   if (labelWalks.size > 100) for (const [kk, cc] of labelWalks) if (now - cc.since > 600000) labelWalks.delete(kk) // (template labels - one per area or job: idle ones go)
-  if (c.n > 30 && now - c.warned > 60000) { c.warned = now; log('move', `busy or looping: "${label}" walked ${c.n} times in a minute to ${c.at.size} distinct places`) }
+  // (never for a site walk's LEGS: a route is walked in legs of five cells, ~1.5s each - 31 legs a minute to 31 places is one
+  //  80-cell walk, not a loop (11:08 and 11:09, 2026-10-07); the walk's own line says it. The same-place net above still holds)
+  if (c.n > 30 && label !== 'site leg' && now - c.warned > 60000) { c.warned = now; log('move', `busy or looping: "${label}" walked ${c.n} times in a minute to ${c.at.size} distinct places`) }
   const k = label + '@' + at
   const r = recentWalks.get(k) || { n: 0, since: now, warned: 0 }
   if (now - r.since > 60000) { r.n = 0; r.since = now }
