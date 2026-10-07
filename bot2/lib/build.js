@@ -510,7 +510,12 @@ function supportThere (bot, c) {
 // INFILL: blocks that hold nothing up - window glass, bars, lanterns, fences, trapdoors, chains. They never hold the
 // layers: the walls, floors and roof rise past an unglazed window and it is glazed when the glass comes (50 glass
 // cells at y124 held the whole 42k cathedral for a day while the sand for them was still being found, 2026-09-26).
-const INFILL_RE = /glass|_pane$|iron_bars|(?<!jack_o_|sea_)lantern$|_fence$|_trapdoor$|^chain$/
+// (and LEAVES: a castle's hedges and bushes carry no wall - placed when ready, never the band's anchor. Anchoring, 33 of
+//  them in the south courtyard's hedges held the band at y119-125 under 2,900 structural cells in hand: 6 of 19 step ends
+//  "anchored by acacia_leaves (in hand)", the steps walking 16s a block to scattered leaves, the walls a layer up placed
+//  at 3s a block when the band reached them, 2026-10-07. A leaf cell's hole is kept open as any: belowWaits holds the cell
+//  over one with no open side)
+const INFILL_RE = /glass|_pane$|iron_bars|(?<!jack_o_|sea_)lantern$|_fence$|_trapdoor$|^chain$|_leaves$/
 // ...and a cell of a material the bot has no route to yet (the castle's leaves, moss, honeycomb candles, 2026-09-27):
 // the structure rises past it and it goes in once a skill for it exists - never the band's anchor, never the chase
 function unsourced (item) { try { return !!item && require('./materials').unsourced(item) } catch { return false } }
