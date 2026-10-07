@@ -1233,7 +1233,10 @@ let origSet = (k, v) => bot.setControlState(k, v)
 // the hand - and the builder, equipping glass for its next window meanwhile, had the planner lay glass: 15 glass, 4
 // slabs and 2 stairs stood round the cathedral walls as stepping stones, the build's own blocks (2026-09-26). Every
 // place the planner asks for goes with a scaffold block in hand (re-equipped if something swapped it), or not at all.
-const PLANNER_SCAFFOLD = /^(dirt|coarse_dirt|rooted_dirt|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|cobblestone)$/
+// (THE WALK'S OWN SCAFFOLD: the kinds its movements hold - move.movementsFor's rule, what the pack has above the build's claim and
+//  never the item the walk is on its way to place. A list of its own here re-equipped any of ten kinds, the claimed and the
+//  spared too; audit 2026-10-07)
+function walkScaffold () { const m = bot.pathfinder && bot.pathfinder.movements; return m && Array.isArray(m.scafoldingBlocks) ? m : null }
 function installPlaceGuard () {
   if (typeof bot.placeBlock !== 'function') return
   const orig = bot.placeBlock.bind(bot)
@@ -1250,10 +1253,10 @@ function installPlaceGuard () {
       }
     } catch (e) { if (e.foreign) throw e }
     if (/mineflayer-pathfinder/.test(caller)) {
-      const held = bot.heldItem
-      if (!held || !PLANNER_SCAFFOLD.test(held.name)) {
-        const s = bot.inventory.items().find(i => PLANNER_SCAFFOLD.test(i.name))
-        if (!s) throw new Error('place guard: no scaffold block for the planner')
+      const held = bot.heldItem; const m = walkScaffold()
+      if (!held || !m || !m.scafoldingBlocks.includes(held.type)) {
+        const s = m ? m.getScaffoldingItem() : null
+        if (!s) throw new Error("place guard: no scaffold block for the planner (none of the walk's own kinds in the pack)")
         await bot.equip(s, 'hand')
         log('act', `place guard: the planner held ${held ? held.name : 'nothing'} - placing ${s.name} instead`)
       }
