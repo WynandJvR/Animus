@@ -768,7 +768,7 @@ function decide () {
     if (world.phase(bot) === 'day' && (mem.get().shaftsToFill || []).length && !held('fillShaft')) return { name: 'fillShaft', why: `${mem.get().shaftsToFill.length} hole${mem.get().shaftsToFill.length > 1 ? 's' : ''} on the grounds that I fell into - capping ${mem.get().shaftsToFill.length > 1 ? 'them' : 'it'}` }
     // a watered plot still at its starting size: widen it to everything the water reaches
     if (farm.farm() && farm.farmIsHome(bot) && farm.farm().water && farm.farm().cells.length < 60 && farm.farmLevel(bot) && farm.fullPlot(bot, farm.farm()).length > farm.farm().cells.length && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 8 && !held('farm')) return { name: 'farm', why: `the farm is ${farm.farm().cells.length} cells - widening it to all the water reaches` }
-    if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && (farm.unplantedCount(bot) >= 8 || (farm.unplantedCount(bot) > 0 && foodStock() < FOOD_WANTED)) && !held('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
+    if (farm.farm() && farm.farmIsHome(bot) && !farm.waterNeedsFixing(bot) && inv.count(bot, 'wheat_seeds') + base.bankCount('wheat_seeds') >= 4 && farm.unplantedCount(bot) >= 8 && !held('farm')) return { name: 'farm', why: `${farm.unplantedCount(bot)} farm cells unplanted and ${inv.count(bot, 'wheat_seeds')} seeds in hand` }
   }
 
   // 8. iron gear when the iron is on hand
