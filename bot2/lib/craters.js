@@ -91,8 +91,16 @@ function prune (bot) {
 }
 
 const FILL_RE = /^(dirt|coarse_dirt|cobblestone|cobbled_deepslate|andesite|diorite|granite|tuff)$/
+// WHAT A FILL MAY SPEND: a kind's stock (pack and chests) past what the build still needs of it - never the build's own blocks.
+//  The fresh-crater fill put the castle's coarse dirt (58 still to place, none spare) into a blast hole at -2300,114,-596,
+//  and the next cell's coarse dirt was gone by its click, 2026-10-07 20:24
+function spareOf (bot, name) {
+  let need = 0; try { const st = require('./build').getJob() ? require('./build').cachedStatus(bot) : null; need = (st && st.need && st.need[name]) || 0 } catch {}
+  const have = bot.inventory.items().filter(i => i.name === name).reduce((s, i) => s + i.count, 0) + (require('./base').bankCount(name) || 0)
+  return Math.max(0, have - need)
+}
 function filler (bot, was) {
-  const its = bot.inventory.items()
+  const its = bot.inventory.items().filter(i => !FILL_RE.test(i.name) || spareOf(bot, i.name) > 0)
   const soil = /dirt|grass|mud|podzol|mycelium|farmland|path|sand|gravel|clay/.test(was || '')
   const pref = soil ? /^(dirt|coarse_dirt)$/ : FILL_RE
   return its.find(i => pref.test(i.name)) || its.find(i => FILL_RE.test(i.name)) || null
@@ -111,10 +119,13 @@ async function fill (bot, { shouldStop, onlyFresh = false } = {}) {
   const have = bot.inventory.items().filter(i => FILL_RE.test(i.name)).reduce((s, i) => s + i.count, 0)
   // (from the bank - its dirt, and the mine's andesite, diorite, granite, tuff - never dug from the grounds: a new pit for
   //  each old one; what is in hand fills what it can; audit)
-  for (const n of ['dirt', 'coarse_dirt', 'andesite', 'diorite', 'granite', 'tuff', 'cobbled_deepslate']) { // (never the castle's cobblestone; audit)
-    const now = bot.inventory.items().filter(i => FILL_RE.test(i.name)).reduce((s, i) => s + i.count, 0)
+  // (cobblestone last: spareOf keeps the castle's claim, so an open blast hole by the safehouse is never left for want of a
+  //  look-alike - safety before looks; audit)
+  for (const n of ['dirt', 'coarse_dirt', 'andesite', 'diorite', 'granite', 'tuff', 'cobbled_deepslate', 'cobblestone']) {
+    const now = [...new Set(bot.inventory.items().filter(i => FILL_RE.test(i.name)).map(i => i.name))].reduce((s, n0) => s + Math.min(bot.inventory.items().filter(i => i.name === n0).reduce((a, i) => a + i.count, 0), spareOf(bot, n0)), 0) // (the fill's own: spare only)
     if (now >= need) break
-    if (require('./base').bankCount(n) > 0) await require('./base').withdraw(bot, n, need - now).catch(() => 0)
+    const sp = Math.min(spareOf(bot, n), require('./base').bankCount(n)) // (only what the build does not need)
+    if (sp > 0) await require('./base').withdraw(bot, n, Math.min(sp, need - now)).catch(() => 0)
   }
   // bottom up, nearest first within a layer: each block stands on the one before it
   const me = bot.entity.position
@@ -129,7 +140,9 @@ async function fill (bot, { shouldStop, onlyFresh = false } = {}) {
     if (q.x === f.x && q.z === f.z && q.y >= f.y - 1 && q.y <= f.y + 1) continue
     const it = filler(bot, q.was)
     if (!it) { log('craters', `out of dirt and stone with ${cells.length - done} blast cells still open`); break }
-    if (await act.place(bot, q, it.name, { allowZones: ['base', 'build', 'orchard'], sneak: false }).catch(() => false)) done++
+    // (the walk to this cell spares every fill kind in the pack - the next cells' blocks are never its stepping stones)
+    const kinds = [...new Set(bot.inventory.items().filter(i => FILL_RE.test(i.name)).map(i => i.name))]
+    if (await act.place(bot, q, it.name, { allowZones: ['base', 'build', 'orchard'], sneak: false, spare: kinds }).catch(() => false)) done++
     else mem.update(m => { const x = (m.craters || []).find(c => c.x === q.x && c.y === q.y && c.z === q.z); if (x) { if (x.day !== d) { x.day = d; x.tries = 0 } x.tries = (x.tries || 0) + 1 } })
   }
   prune(bot)

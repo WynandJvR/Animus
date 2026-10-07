@@ -315,7 +315,7 @@ function hotInOurCell (bot, pos, itemName) {
   const xs = [fx, Math.floor(p.x - 0.3), Math.floor(p.x + 0.3)]; const zs = [fz, Math.floor(p.z - 0.3), Math.floor(p.z + 0.3)]
   return xs.includes(pos.x) && zs.includes(pos.z) && (pos.y === fy || pos.y === fy + 1 || pos.y === fy - 1)
 }
-async function place (bot, pos, itemName, { faceHint = null, plans = null, accept = null, allowZones = [], timeoutMs = 20000, sneak = true, tall = false, twin = null, useRefs = false, noWalk = false, fromReflex = false, keepExit = false } = {}) {
+async function place (bot, pos, itemName, { faceHint = null, plans = null, accept = null, allowZones = [], timeoutMs = 20000, sneak = true, tall = false, twin = null, useRefs = false, noWalk = false, fromReflex = false, keepExit = false, spare = [] } = {}) {
   if (fromReflex) noWalk = true
   if (tall && !twin) twin = [0, 1, 0]
   const target = new Vec3(pos.x, pos.y, pos.z)
@@ -388,7 +388,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     }
     if (!reach(bot, pos, 4.4)) {
       if (noWalk) return false
-      const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to place', spare: [itemName] }) // (never the item it walks to place as a stepping stone: move.movementsFor)
+      const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to place', spare: [itemName].concat(spare || []) }) // (never the item it walks to place as a stepping stone: move.movementsFor - nor what the caller places next, spare)
       if (!r.ok && !reach(bot, pos, 4.8)) { log('act', `place ${itemName} at ${move.fmt(pos)}: could not get within reach (${r.why}) from ${move.fmt(bot.entity.position)}`); return false }
     }
     // (the flower out of the cell, now in reach - the walk came after the first look: a support placed from 6 blocks off
