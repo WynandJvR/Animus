@@ -36,7 +36,7 @@ function walkModel (w, isC = () => false, { opens = false, avoid = null } = {}) 
   //  a route over one was no route to the walker; audit 2026-10-03)
   const topAt = (x, y, z) => isC(x, y, z) ? y + 1 : w.floorTop ? w.floorTop(x, y, z) : y + 1 // (a floor's real top, absolute)
   const hot = (x, y, z) => { const b = w.at(x, y, z); return !!b && /^(soul_)?campfire$|^magma_block$|(^|_)fire$/.test(b.name) }
-  const st = (x, y, z) => { if (hot(x, y - 1, z) || hot(x, y, z)) return false; if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (avoid && avoid(x, y, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) } return w.standable(x, y, z) }
+  const st = (x, y, z) => { if (hot(x, y - 1, z) || hot(x, y, z)) return false; if (!air(x, y, z) || !air(x, y + 1, z)) return false; if (avoid && avoid(x, y, z)) return false; if (isC(x, y - 1, z)) return true; const fb = w.at(x, y, z); if (fb && (/_door$/.test(fb.name) || w.isOpenTrapdoor(fb))) { const fl = w.at(x, y - 1, z); return !!fl && w.isSolid(fl) && !w.isOpenTrapdoor(fl) && !/_door$/.test(fl.name) && !(w.floorTop && w.floorTop(x, y - 1, z) > y - 1 + 1.01) } /* (never on a door nor a fence-high floor: world.standable's floor rule, the planner's) */ return w.standable(x, y, z) }
   // (an open door's or trapdoor's plate by plateEdge - the planner's own model; a CLOSED door by its panel here)
   // (opens: a CLOSED door is a way through - the crossing opens it; an OPEN one's plate is an edge, as the planner's own
   //  panel rule has it. Both were free here: a leg ran past an open door's plate to the ladder behind it, the planner
@@ -57,15 +57,17 @@ function walkModel (w, isC = () => false, { opens = false, avoid = null } = {}) 
       if (edgeShut(p.x, p.y, p.z, dx, dz)) continue
       if (edgeShut(x, p.y, z, -dx, -dz)) continue
       if (!along(p.x, p.y, p.z, dx, dz)) continue // (out of a plate cell: along its plate only)
-      for (let dy = 1; dy >= -w.SAFE_DROP; dy--) {
+      // (a drop the planner takes: its landing BLOCK within maxDropDown (SAFE_DROP) of the feet - the feet two lower at most;
+      //  three lower was 280 of the castle's walk-model steps the planner refuses, legs that never left; castlewalktest.js)
+      for (let dy = 1; dy >= -(w.SAFE_DROP - 1); dy--) {
         const y = p.y + dy
         if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
         if (dy < 0) { let open = true; for (let yy = y + 2; yy <= p.y + 1; yy++) if (!air(x, yy, z)) open = false; if (!open) break } // (a drop wants its column open)
         if (!st(x, y, z)) continue
         if (!along(x, y, z, dx, dz)) break // (into a plate cell: along its plate only - nor any lower cell of that column)
-        // (and never a rise past a jump: floor top to floor top over 1.25 - onto a fence, a wall or a closed gate from the
+        // (and never a rise past a jump: floor top to floor top over 1.2 - onto a fence, a wall or a closed gate from the
         //  ground beside it: the body cannot, the planner does not; w.floorTop - the world's floorTop - absent: whole blocks)
-        if (dy > -1 && topAt(x, y - 1, z) - (climb(p.x, p.y, p.z) ? p.y : topAt(p.x, p.y - 1, p.z)) > 1.25) continue // (on a ladder the climb lifts the body: its base is its own cell's)
+        if (dy > -1 && topAt(x, y - 1, z) - (climb(p.x, p.y, p.z) ? p.y : topAt(p.x, p.y - 1, p.z)) > 1.2) continue // (1.2: the planner's own "too high to jump") // (on a ladder the climb lifts the body: its base is its own cell's)
         out.push({ x, y, z }); break
       }
     }

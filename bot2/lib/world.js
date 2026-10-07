@@ -111,15 +111,19 @@ function floorTop (b) {
 }
 // the eye's height standing at feet cell p (on whatever floor is under it)
 function eyeAt (bot, p) { return p.y - 1 + floorTop(at(bot, p.x, p.y - 1, p.z)) + 1.62 }
-// Can a player stand with feet at (x,y,z)? Solid, non-hazard floor; two clear cells - three on a floor over a block high.
+// Can a player stand with feet at (x,y,z)? Solid, non-hazard floor; two clear cells.
+// (the floor as THE PLANNER that walks the legs has it - mineflayer-pathfinder's physical floor: never a block over a block
+//  high (its "fences": a fence, a wall, a fence gate - never a floor to it at all), and never a door (walked through,
+//  so no floor: the legs' movements). Stood on here, about 75 of the castle's walk-model steps were steps the planner refuses -
+//  wall and fence tops, the top of a doorway's door; castlewalktest.js, 2026-10-07)
 function standable (bot, x, y, z) {
   const floor = at(bot, x, y - 1, z)
   const feet = at(bot, x, y, z)
   const head = at(bot, x, y + 1, z)
   if (!floor || !feet || !head) return false
-  if (!isSolid(floor) || isOpenTrapdoor(floor) || DANGER_FLOOR_RE.test(floor.name)) return false
+  if (!isSolid(floor) || isOpenTrapdoor(floor) || DANGER_FLOOR_RE.test(floor.name) || /_door$/.test(floor.name)) return false
   if (!bodyPassable(feet) || !bodyPassable(head)) return false
-  if (floorTop(floor) > 1.01) { const h2 = at(bot, x, y + 2, z); if (!h2 || !bodyPassable(h2)) return false }
+  if (floorTop(floor) > 1.01) return false
   return true
 }
 
