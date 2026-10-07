@@ -1362,10 +1362,18 @@ async function walkReach (bot) {
   //  leg's end went under the castle's floor at its west rim, the planner would not go in: a 213-cell route and a timeout
   //  2.3b short, 2026-10-06. Asked of the legs' movements themselves - one set of rules, the walker's)
   const mv = move.movementsFor(bot, { dig: false, place: false, sprint: false }); const dearM = new Map()
-  const dear = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = dearM.get(k); if (v === undefined) { v = false; try { const bk = mv.getBlock({ x, y, z }, 0, 0, 0); v = !!bk && !!bk.position && mv.exclusionStep(bk) >= DEAR_STEP } catch {} dearM.set(k, v) } return v }
+  const stepCost = (x, y, z) => { const k = x + ',' + y + ',' + z; let v = dearM.get(k); if (v === undefined) { v = 0; try { const bk = mv.getBlock({ x, y, z }, 0, 0, 0); if (bk && bk.position) v = mv.exclusionStep(bk) } catch {} dearM.set(k, v) } return v }
+  // (dear: the planner's last resort - 50 to 99; 100 and over it never enters at all - mineflayer-pathfinder drops a move
+  //  costing over 100 (a refused node, a head under water, a sum of rules): impassable here as for it; audit)
+  const dear = (x, y, z) => { const c0 = stepCost(x, y, z); return c0 >= DEAR_STEP && c0 < 100 }
   // (a cell a leg could not reach, lately: the model says walkable, the body did not get there - routed round for 10 min.
   //  AVOIDED, never solid: passed as a closed cell it was a floor for the cell over it - a search standing on air)
-  const avoid = (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return (!!t && Date.now() - t < 600000) || dear(x, y, z) }
+  // (DEAR IS NOT SHUT: the planner walks a dear cell when there is no other way - so the search reaches it too, in a second
+  //  tier after every cheap cell (the route to a cheap cell never runs through one). Avoided outright, a trap remembered in the
+  //  south courtyard's way in read the whole courtyard as a closed compartment: 35 acacia leaves, two fence gates, a stone and
+  //  a trapdoor "wait for a way in", the band anchored round them at y119-126, 2026-10-07. Only a leg the body really failed
+  //  is avoided)
+  const avoid = (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return (!!t && Date.now() - t < 600000) || stepCost(x, y, z) >= 100 }
   const W = rooms.walkModel(rw, () => false, { opens: true, avoid }); const b = job.box
   const inArea = q => q.x >= b.x1 - REACH_MARGIN && q.x <= b.x2 + REACH_MARGIN && q.z >= b.z1 - REACH_MARGIN && q.z <= b.z2 + REACH_MARGIN
   // (where I stand is a start whatever it costs - under the floor, the way out is the walk's: the model without the avoid)
@@ -1380,12 +1388,14 @@ async function walkReach (bot) {
   const cells = new Set([key(start)]); const q = [start]; let i = 0; let capped = false
   const parent = new Map() // (the way each cell was reached: the route to a stand is read back from it - reachRoute)
   const t0 = Date.now(); let slice = t0; let longest = 0
-  while (i < q.length) {
+  const dearQ = [] // (the dear tier: walked on from once the cheap cells are spent)
+  while (i < q.length || dearQ.length) {
+    if (i >= q.length) { q.push(...dearQ.splice(0)) }
     if (cells.size > REACH_CAP) { capped = true; break }
     if (Date.now() - slice > 8) { longest = Math.max(longest, Date.now() - slice); await new Promise(r => setImmediate(r)); slice = Date.now() }
     const c = q[i++]
     if (!inArea(c)) continue // (reached, not walked on from: the site's own ground is the question)
-    for (const n of W.next(c)) { const k = key(n); if (!cells.has(k)) { cells.add(k); parent.set(k, c); q.push(n) } }
+    for (const n of W.next(c)) { const k = key(n); if (!cells.has(k)) { cells.add(k); parent.set(k, c); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
   }
   // (SHUT IN - no cell of the set outside the build: every stand reads out of reach, no walk is made, and the walker's own
   //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
