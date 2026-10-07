@@ -223,28 +223,53 @@ function standUnder (bot, low) {
   return best
 }
 
-// A pillar of our own up to a block above the reach (at most 4), and back down from on top after (climbDown). Its blocks
-// are litter like any tower's (towerUp notes them): a pillar the teardown missed is the next run's work, never lost.
+// A pillar of our own up to the reach of the block, and back down from on top after (climbDown), the column beside taken on
+// the way down. Its blocks are litter like any tower's (towerUp notes them): a pillar the teardown missed is the next run's
+// work, never lost.
+// (no 4-block cap: a mega fell's 22-high pillar and a climb-out's column stood for days "out of reach from the ground", the
+//  tidy's backlog 48 -> 70 and growing, 2026-10-07. Bounded instead by the column itself - each rise only with a solid block
+//  beside the new feet or head: the column we climb beside walls the tower, never a 1-wide tower in open air - and MAX_CLIMB)
+// (a hard 16: the 22-high mega-fell pillars come down by the felling's own way down now; audit)
+const MAX_CLIMB = 16
+const LOW_CLIMB = 4
+// A TALL CLIMB FOR HOUSEKEEPING only with nothing to fear: the tower stands beside the column it takes, and the way down
+// takes that wall away - a knockback near the top is a fall. Past LOW_CLIMB only by day with time left, near full health,
+// armoured, no hostile within 16 and no shooter in sight within 24 (audit 2026-10-07)
+function tallClimbSafe (bot) {
+  const reflex = require('./reflex'); const inv = require('./inventory')
+  if (world.phase(bot) !== 'day' || world.ticksUntilNight(bot) < 2400) return false
+  if (bot.health < Math.max(18, reflex.hurtLine() + 6) || inv.armorPoints(bot) < 8) return false
+  if (reflex.hostiles(16).some(h => h.e.name !== 'bat')) return false
+  return !reflex.hostiles(24).some(h => reflex.RANGED.has(h.e.name) && reflex.canSee(h.e))
+}
+// (a climb stops the moment danger comes: a hostile within 16, or a hit in the last 3s - straight down by climbDown)
+function climbDanger () { const reflex = require('./reflex'); const lh = reflex.lastHurt(); return reflex.hostiles(16).some(h => h.e.name !== 'bat') || (!!lh && Date.now() - lh.at < 3000) }
 let climbed = []
 async function climbTo (bot, q, shouldStop) {
   const gather = require('./gather')
-  // (4 at most: a block higher on a canopy stands on no spot, no path, no farm - a taller tower costs more than it; said as
-  //  left, audit 2026-09-28)
-  for (let i = 0; i < 4 && !act.reach(bot, q, 4.5) && bot.entity.position.y < q.y; i++) {
+  const walled = () => { const p = bot.entity.position; const fx = Math.floor(p.x); const fy = Math.floor(p.y + 0.01); const fz = Math.floor(p.z); return [fy + 1, fy + 2].some(y => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, fx + dx, y, fz + dz); return !!b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) })) }
+  const cap = tallClimbSafe(bot) ? MAX_CLIMB : LOW_CLIMB
+  for (let i = 0; !act.reach(bot, q, 4.5) && bot.entity.position.y < q.y; i++) {
+    if (i >= cap) { if (cap < MAX_CLIMB) log('litter', `${q.name || 'block'} at ${k(q)} left: too tall to climb safely now (hp ${Math.round(bot.health)}, ${world.phase(bot)}, the ${LOW_CLIMB}-block climb)`); break }
     if (shouldStop && shouldStop()) break
+    if (climbDanger()) { log('litter', `the climb stopped at ${k(bot.entity.position.floored())}: danger (a hostile near, or hurt) - straight down`); break }
     // (one pillar, straight: each step from the top of the last - a body moved off it (a reflex, a push) began a new pillar
     //  beside the old one each time, a stair in the air; stopped there, what it raised comes down with climbDown)
+    // (off it = in ANOTHER column only: a tower whose block went in after the jump came down left the body a block under its
+    //  "top", and "moved off its pillar" ended every climb at the same slope columns since 01:12, 2026-10-07 - the next
+    //  tower from where it stands goes on)
     const top = climbed[climbed.length - 1]; const me = bot.entity.position
-    if (top && (Math.floor(me.x) !== top.x || Math.floor(me.z) !== top.z || Math.floor(me.y - 0.01) !== top.y)) { log('litter', `the climb stopped: moved off its pillar at ${k(top)}`); break }
-    if (!await gather.towerUp(bot, { allowZones: ['orchard', 'base', 'farm'], onPlaced: c => climbed.push(c) })) break
+    if (top && (Math.floor(me.x) !== top.x || Math.floor(me.z) !== top.z)) { log('litter', `the climb stopped: moved off its pillar at ${k(top)} (standing at ${k(me.floored())})`); break }
+    if (!walled()) { log('litter', `the climb stopped: open air beside the tower at ${k(me.floored())}`); break }
+    if (!await gather.towerUp(bot, { allowZones: ['orchard', 'base', 'farm'], onPlaced: c => climbed.push(c) })) { if (gather.towerWhy()) log('litter', `the climb stopped at ${k(bot.entity.position.floored())}: ${gather.towerWhy()}`); break }
   }
 }
-async function climbDown (bot) {
+async function climbDown (bot, onLevel = null) {
   // (ours = the ledger's, not only this climb's list: a body nudged off the list's own top stopped the descent at once and
   //  stood on the pillar's top, "stuck ... no way to jiggle", until the escape's descent took it down, 2026-09-30; audit)
   const ours = c => climbed.some(p => p.x === c.x && p.y === c.y && p.z === c.z) || ledger.has(k(c))
   // (the one descent - gather.climbDownPillar: each drop onto the next solid within 3, never onto lava or into water)
-  if (climbed.length) await require('./gather').climbDownPillar(bot, ours, { allowZones: ['orchard', 'base', 'farm'], max: 24, onDug: c => { climbed = climbed.filter(p => !(p.x === c.x && p.y === c.y && p.z === c.z)) } })
+  if (climbed.length) await require('./gather').climbDownPillar(bot, ours, { allowZones: ['orchard', 'base', 'farm'], max: MAX_CLIMB + 8, onLevel, onDug: c => { climbed = climbed.filter(p => !(p.x === c.x && p.y === c.y && p.z === c.z)) } })
   climbed = []
 }
 
@@ -288,6 +313,8 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
       //  pillar of our own beside it, then that pillar down from on top. From the ground only, such blocks stood for good -
       //  the cobble on the spruce tops the operator asked about, 2026-09-28)
       if (!act.reach(bot, q, 4.5) && q.y > bot.entity.position.y) await climbTo(bot, q, shouldStop)
+      // (danger while up our tower: nothing more up here - straight down, climbDown below)
+      if (climbed.length && climbDanger()) { left++; continue }
       if (!act.reach(bot, q, 4.5)) { left++; continue }
       // (a block in the air - a stair, a crown's stand, a walk's BRIDGE over a gully - only from a floor that is not litter:
       //  real ground, or this run's own tower (climbDown takes it). Stood on the bridge's span, the far blocks dug first
@@ -298,7 +325,18 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
       }
       if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { noWalk: true, timeoutMs: 8000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) removed++; else left++
     }
-    await climbDown(bot)
+    // (on the way down our tower: the column's blocks still standing, each as it comes in reach - those under the top that
+    //  were out of reach from up there; counted back off `left`)
+    const takeOnTheWay = async () => {
+      if (climbDanger()) return // (danger: straight down, the column left for the next run)
+      for (const q of col) {
+        const b = world.at(bot, q.x, q.y, q.z)
+        if (!b || world.isAirish(b) || !ledger.has(k(q)) || !act.reach(bot, q, 4.5)) continue
+        if (kept(bot, q, pts) || capsADrop(bot, q)) continue
+        if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { noWalk: true, timeoutMs: 8000, allowZones: ['orchard', 'base', 'farm'] }).catch(() => false)) { removed++; if (left > leftBefore) left-- }
+      }
+    }
+    await climbDown(bot, climbed.length ? takeOnTheWay : null)
     if (left > leftBefore) miss()
     await act.collectDrops(bot, { radius: 5, maxMs: 3000 }).catch(() => {})
   }

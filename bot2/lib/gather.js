@@ -390,10 +390,13 @@ function landingFall (bot, p, leavesAir) {
   for (; k <= 64; k++) { const b = world.at(bot, p.x, p.y - k, p.z); if (!b || world.isLavaBlock(b)) return Infinity; if (world.isWaterBlock(b)) return 0; if (b.boundingBox === 'block' && !rottingLeaf(b)) break }
   return k
 }
-async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48, force = false, leavesAir = false } = {}) {
+// (`onLevel()`: the caller's work at each level before the block under the feet goes - the litter's column beside the tower,
+//  taken as the body comes down past it)
+async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48, force = false, leavesAir = false, onLevel = null } = {}) {
   let n = 0; lastDownWhy = null
   for (let guard = 0; guard < max; guard++) {
     await landed(bot)
+    if (onLevel) await onLevel().catch(() => {})
     const under = standingOn(bot).find(c => ours(c))
     if (!under) break
     { const fall = landingFall(bot, under, leavesAir); const bl = world.at(bot, under.x, under.y - 1, under.z); if (fall > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) { lastDownWhy = `a ${fall}-block drop${leavesAir ? ' (rotting leaves read as air)' : ''} (or lava/water) under ${under.x},${under.y},${under.z}`; break } }
