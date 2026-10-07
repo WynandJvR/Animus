@@ -1596,15 +1596,19 @@ async function withdrawWindow (needs, lowY = {}) {
   // (room for the heads AND the withdraw's own free slots - BAND_KEEP_FREE: room for heads + 1 left 3 free, the withdraw keeps
   //  3 free, and 0 of the band's two kinds came out - "no room for dark_oak_stairs, stripped_spruce_log ... 3 slots free",
   //  the step ended on dark_oak_stairs "not in hand" with 13 in the chest, 2026-10-07 11:51. One number for both)
-  await roomForBand(heads, firsts, needs, y, Math.min(heads.length, 6) + BAND_KEEP_FREE)
+  const putBack = await roomForBand(heads, firsts, needs, y, Math.min(heads.length, 6) + BAND_KEEP_FREE)
+  // (ONE PLAN A ROUND: what roomForBand put back for the band is not this round's to take again - the same signs and doors went
+  //  into the chest and out of it in the same second, twice, 2026-10-07 12:29/12:31. The band's kinds lead the list, and the
+  //  withdraw keeps their slots across the chests - base.withdrawPlan)
+  const plan = order.filter(([name]) => !putBack.has(name) || firsts.includes(name))
   // (each pass in ONE round of chest openings - base.withdrawMany, the exact items in the band's order; then, kind by kind, only
   //  what a stand-in must cover - a birch stair for a jungle stair: withdrawOf's pool)
   for (const cap of [64, 64 * 4]) {
     if (inv.freeSlots(bot) < 2) return
-    const list = order.map(([name, n]) => [name, Math.min(n, cap) - countOf(name)]).filter(([, w]) => w > 0)
+    const list = plan.map(([name, n]) => [name, Math.min(n, cap) - countOf(name)]).filter(([, w]) => w > 0)
     // (three slots kept, not two: the pickups on the way take two, and the band's next anchor - found only by the step - its own)
     await base.withdrawMany(bot, list.map(([name, w]) => [name, Math.min(w, base.bankCount(name))]), { keepFree: BAND_KEEP_FREE }).catch(() => ({}))
-    for (const [name, n] of order) {
+    for (const [name, n] of plan) {
       if (inv.freeSlots(bot) < 2) return
       const want = Math.min(n, cap) - countOf(name)
       if (want > 0 && stockOf(name) - countOf(name) > base.bankCount(name)) await withdrawOf(name, want) // (a stand-in banked beyond the exact item)
@@ -1620,8 +1624,10 @@ async function withdrawWindow (needs, lowY = {}) {
 // (the slots a band's withdraw leaves free - the pickups on the way take two, the band's next anchor its own: the withdraw's
 //  keepFree and the room roomForBand makes above it, one number)
 const BAND_KEEP_FREE = 3
+// (returns the kinds it put back: the round's withdraw does not take them again)
 async function roomForBand (heads, waited, needs, y, room) {
-  if (!heads.length || inv.freeSlots(bot) >= room) return
+  if (!heads.length || inv.freeSlots(bot) >= room) return new Set()
+  const free0 = inv.freeSlots(bot)
   const keep = nm => Math.max(base.keepCount(bot, { name: nm }), build.FILLER_ITEMS.test(nm) ? build.SCAFFOLD_WANT : 0)
   const lowHead = Math.min(...heads.map(y))
   const slotsOf = nm => inv.items(bot).filter(i => i.name === nm).length - Math.ceil(keep(nm) / 64)
@@ -1641,7 +1647,10 @@ async function roomForBand (heads, waited, needs, y, room) {
   for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - 1; if (s > 0) { back.set(nm, Math.max(keep(nm), 64)); free += s } }
   for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - (back.has(nm) ? slotsOf(nm) - 1 : 0); if (s > 0) { back.set(nm, keep(nm)); free += s } }
   if (back.size) await base.depositAll(bot, { keep: (b, i) => back.has(i.name) ? back.get(i.name) : Infinity }).catch(() => false)
-  log('dir', `no room for ${heads.join(', ')} (the band's) - put back ${back.size ? [...back.keys()].join(', ') : 'nothing'} (the haul, then window blocks for higher layers, then the band's own spares); ${inv.freeSlots(bot)} slots free`)
+  // (said as it is: the room it found and the room it made - "no room ... 5 slots free" read as a failure with the room made)
+  const free1 = inv.freeSlots(bot)
+  log('dir', `room for ${heads.join(', ')} (the band's): ${free0} slots free of the ${room} wanted${back.size ? ` - put back ${[...back.keys()].join(', ')} (the haul, then window blocks for higher layers, then the band's own spares)` : ' - nothing to put back'}; ${free1} free now${free1 < room ? ' - still short' : ''}`)
+  return new Set(back.keys())
 }
 function countOf (name) { return mats.held(bot, name) }
 function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.nextNeeds(bot, WINDOW_LAYERS) : {} }
@@ -1929,7 +1938,7 @@ async function castleWorkInner () {
   // (the item the band waits on lies in the chests: out with it and back to the build - not a trip for the next thing on
   //  the list. 63 dirt banked while the round went for gravel, 208s, into someone else's place, 2026-10-03)
   if (steer && !blockedRaw && base.bankCount(steer) > 0) {
-    { const yl = it => nextLow[it] != null ? nextLow[it] : Infinity; await roomForBand(countOf(steer) === 0 ? [steer] : [], [steer], next, yl, 2) } // (a slot for it first: roomForBand)
+    { const yl = it => nextLow[it] != null ? nextLow[it] : Infinity; await roomForBand(countOf(steer) === 0 ? [steer] : [], [steer], next, yl, 2) } // (a slot for it first: roomForBand) (its put-back set: nothing withdraws after it here)
     const n = Math.min(base.bankCount(steer), Math.max(16, (next[steer] || 0) - inv.count(bot, steer)))
     const got = await base.withdraw(bot, steer, n).catch(() => 0)
     log('dir', `the builder waits on ${steer} - ${got} taken out of the chests, back to the build`)

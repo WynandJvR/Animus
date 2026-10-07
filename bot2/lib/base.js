@@ -280,6 +280,25 @@ async function withdraw (bot, name, n, { maxWalk = 64, only = null } = {}) {
 // holds, until each is had or the pack is down to `keepFree` slots. Kind by kind (withdraw), a round's window opened the
 // chests 20 times over for 20 kinds - "scaffold+withdraw 52s", 2026-10-07. Exact names only (a stand-in is the caller's).
 // Returns { name: got }
+// WHAT ONE CHEST OPENING TAKES, IN THE LIST'S ORDER ACROSS ALL THE CHESTS: [[name, count]]. The list is a priority - and the
+// chests are opened nearest first, so a near chest's low items took the slots before the far chest's first item was ever
+// reached: the band's dark oak stairs stayed in the chest while 3 signs and 3 doors came out of the near one, "placed 0,
+// waiting on dark_oak_stairs", 2026-10-07 12:29. Each item here leaves room for every item ahead of it that this chest cannot
+// give and the bank holds elsewhere. Pure: here(nm) - this chest's count; bank(nm) - the whole bank's (this chest included)
+function withdrawPlan (bot, wants, here, slots, bank) {
+  const stackOf = nm => { const d = (bot.registry || world.data(bot)).itemsByName[nm]; return (d && d.stackSize) || 64 }
+  const out = []; let reserve = 0
+  for (const [nm, n] of wants) {
+    const h = here(nm); const st = stackOf(nm)
+    const k = Math.max(0, Math.min(h, n, (slots - reserve) * st))
+    if (k > 0) { out.push([nm, k]); slots -= Math.ceil(k / st) }
+    // (what is still wanted of it after this chest, and lies in another: its slots kept for it from every item after it)
+    const elsewhere = Math.min(n - k, Math.max(0, bank(nm) - h))
+    if (elsewhere > 0) reserve += Math.ceil(elsewhere / st)
+    if (slots - reserve <= 0) break
+  }
+  return out
+}
 async function withdrawMany (bot, list, { keepFree = 2, maxWalk = 64 } = {}) {
   const want = new Map(); for (const [nm, n] of list) if (n > 0) want.set(nm, (want.get(nm) || 0) + n)
   const goal = new Map(want); const start = {}; for (const nm of want.keys()) start[nm] = inv.count(bot, nm)
@@ -295,13 +314,10 @@ async function withdrawMany (bot, list, { keepFree = 2, maxWalk = 64 } = {}) {
     // (the slots this opening may fill, counted from before it - the pack's own count is the window's while it is open)
     let slots = inv.freeSlots(bot) - keepFree
     try {
-      for (const [nm, n] of [...want]) {
-        if (slots <= 0) break
-        const its = w.containerItems().filter(i => i.name === nm); const have = its.reduce((s, i) => s + i.count, 0)
-        const stack = (its[0] && its[0].stackSize) || 64
-        const k = Math.min(have, n, slots * stack)
-        if (k <= 0) continue
-        try { await w.withdraw(its[0].type, null, k); slots -= Math.ceil(k / stack) } catch (e) { log('base', `withdraw ${nm} failed: ${e.message}`); if (/inventory is full/i.test(e.message || '')) break }
+      const plan = withdrawPlan(bot, [...want], nm => w.containerItems().filter(i => i.name === nm).reduce((s, i) => s + i.count, 0), slots, nm => bankCount(nm))
+      for (const [nm, k] of plan) {
+        const its = w.containerItems().filter(i => i.name === nm)
+        try { await w.withdraw(its[0].type, null, k); slots -= Math.ceil(k / ((its[0] && its[0].stackSize) || 64)) } catch (e) { log('base', `withdraw ${nm} failed: ${e.message}`); if (/inventory is full/i.test(e.message || '')) break }
       }
       refreshCache(w, p)
     } finally { try { w.close() } catch {} }
@@ -605,4 +621,4 @@ async function roomToCraft (bot, keep = new Set()) {
   return inv.freeSlots(bot) > 0
 }
 
-module.exports = { SPARE_KIT, toolsKept, depositByWear, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+module.exports = { SPARE_KIT, toolsKept, depositByWear, withdrawPlan, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }

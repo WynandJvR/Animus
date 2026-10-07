@@ -53,6 +53,19 @@ pack = [tool('stone_axe', 1)]
 check('only a worn-out axe: kept', keep('stone_axe'), Infinity)
 // 7. the job's number is the largest ask: gather's pickaxe check reads it
 check('TOOL_JOB_USES is the largest ask (32)', inv.TOOL_JOB_USES, 32)
+// 9. ONE WITHDRAW PLAN ACROSS THE CHESTS (base.withdrawPlan): the band's kinds lead the list; a near chest holding only the
+// window's signs and doors gives nothing while the band's stairs and logs lie in a far one and the pack has 2 slots for them
+{
+  const bank = { dark_oak_stairs: 18, stripped_spruce_log: 55, dark_oak_sign: 3, spruce_door: 3 }
+  const wants = [['dark_oak_stairs', 18], ['stripped_spruce_log', 55], ['dark_oak_sign', 3], ['spruce_door', 3]]
+  const near = { dark_oak_sign: 3, spruce_door: 3 }; const far = { dark_oak_stairs: 18, stripped_spruce_log: 55 }
+  const fmt = pl => pl.map(([n, k]) => k + ' ' + n).join(', ') || 'nothing'
+  check('2 slots, the near chest (signs, doors): nothing taken', fmt(base.withdrawPlan(bot, wants, nm => near[nm] || 0, 2, nm => bank[nm] || 0)), 'nothing')
+  check('2 slots, the far chest: the band kinds', fmt(base.withdrawPlan(bot, wants, nm => far[nm] || 0, 2, nm => bank[nm] || 0)), '18 dark_oak_stairs, 55 stripped_spruce_log')
+  check('4 slots, the near chest: the signs and doors into the 2 left over', fmt(base.withdrawPlan(bot, wants, nm => near[nm] || 0, 4, nm => bank[nm] || 0)), '3 dark_oak_sign, 3 spruce_door')
+  const banked = nm => (nm === 'dark_oak_stairs' || nm === 'stripped_spruce_log') ? 0 : (bank[nm] || 0)
+  check('band kinds in no chest reserve nothing', fmt(base.withdrawPlan(bot, wants, nm => near[nm] || 0, 2, banked)), '3 dark_oak_sign, 3 spruce_door')
+}
 // 8. the deposit takes the most worn copies first (the haul), the freshest for a spare - by slot, never the type's first slot
 {
   const mkw = () => { const sl = []; sl[9] = Object.assign(tool('iron_pickaxe'), { slot: 9 }); sl[10] = Object.assign(tool('iron_pickaxe', 20), { slot: 10 }); sl[11] = Object.assign(tool('iron_pickaxe', 100), { slot: 11 }); return { slots: sl, inventoryStart: 9, inventoryEnd: 45, deposit: async () => { throw new Error('by type') } } }
