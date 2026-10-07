@@ -92,6 +92,68 @@ async function routeFrom (w, graph, reachHas, d, { tick = async () => {}, cap = 
   }
   return null
 }
+// THE DESIGN'S ROUTES TO MANY STANDS AT ONCE - routeFrom's one search for a set of targets: from every design stand the walk
+//  reaches (met one up or down) through the finished build's own steps; -> Map(target key -> [keys from the walk's side to it])
+//  for each target found. (access-first placement: the cells that make these routes are the floor's way up)
+async function routesFrom (w, graph, reachHas, targets, { tick = async () => {}, cap = 20000 } = {}) {
+  const W = rooms.walkModel(w, () => false, { opens: true })
+  const want = new Set(targets); const prev = new Map(); const q = []
+  for (const k of graph.parent.keys()) if (near(reachHas, k)) { prev.set(k, null); q.push(parse(k)) }
+  let left = 0; for (const k of want) if (!prev.has(k)) left++
+  for (let i = 0; i < q.length && prev.size < cap && left > 0; i++) {
+    for (const n of W.next(q[i])) { const k = key(n); if (prev.has(k)) continue; prev.set(k, key(q[i])); if (want.has(k)) left--; q.push(n) }
+    if (i % 32 === 0) await tick()
+  }
+  const out = new Map()
+  for (const t of want) {
+    if (!prev.has(t)) continue
+    const r = []; let cur = t; let guard = 0
+    while (cur != null && guard++ < 100000) { r.push(cur); cur = prev.get(cur) }
+    out.set(t, r.reverse())
+  }
+  return out
+}
+// ACCESS FIRST - the cells of the build that make the finished build's own way to where the work is: for each cell still to place
+//  (cells) with no stand of the walk (reachHas) in an eye's reach - NEEDY - the design's stands that would reach it, the routes
+//  the design walks to them from the walk's side (routesFrom), and on each route past the walk the cells of the build that
+//  make its stands: the floor under a stand (a stair, a floor block, a slab) and a ladder or thin floor in its feet, still to
+//  place (isTodo). The castle's upper story: its stairs and ladder built, its floors not, and 3 of 16 upper groups reached -
+//  every upper cell "no stand", a ring plan a cell, 2026-10-07. Built first, the floor's way up comes before its walls.
+//  -> { cells: Map(key -> needy cells served), needy, targets, routed }. PURE; eyeReaches(stand, cell) by cell centres
+async function accessPlan (w, graph, { reachHas, cells, isTodo, eyeReaches, tick = async () => {}, maxNeedy = 400 }) {
+  const has = k => near(reachHas, k)
+  const ctr = p => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 })
+  const needy = []; const serves = new Map() // target stand -> [needy keys]
+  let n = 0
+  for (const c of cells) {
+    if (++n % 8 === 0) await tick()
+    let reached = false; const ds = []
+    for (let dx = -4; dx <= 4 && !reached; dx++) for (let dz = -4; dz <= 4 && !reached; dz++) for (let dy = -5; dy <= 1; dy++) {
+      const st = { x: c.x + dx, y: c.y + dy, z: c.z + dz }; const k = key(st)
+      if (!eyeReaches(ctr(st), ctr(c))) continue
+      if (reachHas(k)) { reached = true; break }
+      if (graph.parent.has(k) && !has(k)) ds.push(k)
+    }
+    if (reached || !ds.length) continue
+    needy.push(c); for (const k of ds) { const l = serves.get(k); if (l) l.push(key(c)); else serves.set(k, [key(c)]) }
+    if (needy.length >= maxNeedy) break
+  }
+  const routes = serves.size ? await routesFrom(w, graph, reachHas, [...serves.keys()], { tick }) : new Map()
+  const out = new Map() // job cell key -> Set of needy keys
+  for (const [t, r] of routes) {
+    let from = -1; for (let i = r.length - 1; i >= 0; i--) if (has(r[i])) { from = i; break }
+    for (const k of r.slice(from + 1)) {
+      const s0 = parse(k)
+      for (const dy of [-1, 0]) {
+        const q = { x: s0.x, y: s0.y + dy, z: s0.z }
+        if (!isTodo(q.x, q.y, q.z)) continue
+        const kk = key(q); let set = out.get(kk); if (!set) out.set(kk, (set = new Set()))
+        for (const nk of serves.get(t)) set.add(nk)
+      }
+    }
+  }
+  return { cells: new Map([...out].map(([k, v]) => [k, v.size])), needy: needy.length, targets: serves.size, routed: routes.size }
+}
 function routeBlockers (graph, d, { reachHas, at, isOurs, isProtected, route: given = null }) {
   const route = given || routeTo(graph, typeof d === 'string' ? d : key(d))
   let from = -1; for (let i = route.length - 1; i >= 0; i--) if (near(reachHas, route[i])) { from = i; break }
@@ -148,4 +210,4 @@ function routeBlockers (graph, d, { reachHas, at, isOurs, isProtected, route: gi
   }
   return { strays, blocked: null }
 }
-module.exports = { designWorld, designGraph, protectedOf, routeTo, routeFrom, routeBlockers, parse, key }
+module.exports = { designWorld, designGraph, protectedOf, routeTo, routeFrom, routesFrom, accessPlan, routeBlockers, parse, key }

@@ -236,7 +236,7 @@ const hard = Object.entries(byClass).filter(([c]) => !/ladder/.test(c)).reduce((
 // (2) the dump's blocks standing in that space - strays, by definition (the space is open in the design and no cell of the
 //     build) - and after the clear's own selection (each upper floor's route: the strays on it, where nothing but strays
 //     blocks it) none left on those routes; (3) the computation's longest slice (body first)
-let design = null; const fs = require('fs')
+let design = null; const fs = require('fs'); let accessGain = null
 try {
   process.env.BOT2_LOG_FILE = process.env.BOT2_LOG_FILE || path.join(require('os').tmpdir(), 'castlewalktest.log')
   const memory = require(path.join(bot2, 'lib', 'memory')); const fakeMem = { stats: {} }; memory.get = () => fakeMem; memory.set = (k0, v) => { fakeMem[k0] = v; return v }; memory.update = f => f(fakeMem); memory.save = () => {}
@@ -302,6 +302,38 @@ try {
   //  off the way the walk takes, and the teardown's rule takes them: never kept in a protected cell)
   let leftOnRoutes = 0; for (const k0 of tops) { const rt = await dw.routeFrom(wD, g, kk => gA.parent.has(kk), k0, { tick: tickD }); leftOnRoutes += dw.routeBlockers(g, k0, { route: rt || undefined, reachHas: kk => gA.parent.has(kk), at: liveAt, isOurs: q => strayBlocks.has(key(q)), isProtected: q => prot.has(key(q)) }).strays.length }
   const strayInProt = [...strayAt.keys()].filter(k0 => prot.has(k0)).length
+  // (3) ACCESS FIRST (designwalk.accessPlan): on the dump as it stood (its corner at -2302,117,-618), the walk from the site's
+  //     edge; the cells still to place with no stand of that walk in an eye's reach (needy); the build's cells on the design's
+  //     routes to their stands - placed (in the dump), how many needy cells gain a stand
+  const FO = { x: -2302, y: 117, z: -618 }
+  const relK = k0 => { const [x, y, z] = k0.split(',').map(Number); return `${x - FO.x},${y - FO.y},${z - FO.z}` }
+  const reachOfDump = () => {
+    const edges = stands.filter(q => q.x === 0 || q.z === 0 || q.x === S.x - 1 || q.z === S.z - 1); let bestR = null
+    for (const e0 of edges.filter((_, i) => i % Math.max(1, Math.floor(edges.length / 40)) === 0)) {
+      const rc = new Set([key(e0)]); const rq = [e0]
+      for (let i = 0; i < rq.length; i++) for (const n of W.next(rq[i])) { if (!inside(n.x, n.y, n.z)) continue; const nk = key(n); if (!rc.has(nk)) { rc.add(nk); rq.push(n) } }
+      if (!bestR || rc.size > bestR.size) bestR = rc
+    }
+    return bestR || new Set()
+  }
+  const ringMod = require(path.join(bot2, 'lib', 'ring'))
+  const sameAs = (k0, c) => { const v = fx.blocks[relK(k0)]; return !!v && v.replace(/{.*/, '') === c.name }
+  const todoD = new Map([...cellsD].filter(([k0, c]) => !sameAs(k0, c)))
+  const todoList = [...todoD.keys()].map(k0 => { const [x, y, z] = k0.split(',').map(Number); return { x, y, z } }).filter(c => c.y - FO.y < S.y)
+  const reach0 = reachOfDump()
+  const hasStand = (rs, c) => { for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 1; dy++) { const st = { x: c.x + dx, y: c.y + dy, z: c.z + dz }; if (rs.has(relK(key(st))) && ringMod.eyeReaches({ x: st.x + 0.5, y: st.y, z: st.z + 0.5 }, { x: c.x + 0.5, y: c.y, z: c.z + 0.5 })) return true } return false }
+  let slA = Date.now(); let longestA = 0
+  const tickA = async () => { const d = Date.now() - slA; if (d > longestA) longestA = d; if (d > 8) { await new Promise(r => setImmediate(r)); slA = Date.now() } }
+  const ap = await dw.accessPlan(wD, g, { reachHas: k0 => reach0.has(relK(k0)), cells: todoList, isTodo: (x, y, z) => todoD.has(`${x},${y},${z}`), eyeReaches: ringMod.eyeReaches, tick: tickA, maxNeedy: 100000 })
+  const needyBefore = todoList.filter(c => !hasStand(reach0, c))
+  // (the access cells placed in the dump - its own blocks, as the blueprint draws them - and the walk again)
+  const saved = new Map()
+  for (const k0 of ap.cells.keys()) { const c = cellsD.get(k0); const rk = relK(k0); if (!c) continue; saved.set(rk, cells.get(rk)); try { cells.set(rk, Block.fromProperties(c.name, Object.fromEntries(Object.entries(c.props || {}).map(([a0, b0]) => [a0, String(b0)])), 0)) } catch {} }
+  const reach1 = reachOfDump()
+  const gained = needyBefore.filter(c => hasStand(reach1, c)).length
+  for (const [rk, b0] of saved) { if (b0) cells.set(rk, b0); else cells.delete(rk) }
+  console.log(`access first: ${todoList.length} cells still to place in the dump's height, ${needyBefore.length} with no stand of the walk; ${ap.targets} design stands would reach them, ${ap.routed} routed from the walk; ${ap.cells.size} access cells (the floor's way up) - placed, ${gained} of the ${needyBefore.length} gain a stand (walk ${reach0.size} -> ${reach1.size} cells); plan's longest slice ${longestA}ms`)
+  accessGain = { gained, needy: needyBefore.length, cells: ap.cells.size, longest: longestA }
   design = { standFar, stands: g.stands, prot: prot.size, ms: msD, longest: longestD, floors: floors.length, unreachedFloors: unreachedFloors.length, topsMissing, before: before.length, after: after.length, selected: selected.size, leftOnRoutes, strayInProt }
   console.log(`design walk: ${g.stands} stands of the finished castle, ${prot.size} protected cells - ${msD}ms, longest slice ${longestD}ms; its own ways up reached: ${tops.length - topsMissing.length}/${tops.length}; upper groups of 20+ stands: ${floors.length - unreachedFloors.length} of ${floors.length} reached by the walk model`)
   console.log(`design clear: the live strays ${strayInProt}/${strayAt.size} in protected cells; tops reached before the clear ${before.length}/${tops.length}, ${selected.size} strays selected (${[...selected.values()].map(q => key(q) + (q.stand ? ' from ' + key(q.stand) : '')).join(' ')}), after ${after.length}/${tops.length}; ${leftOnRoutes} left blocking a route (${strayBlocks.size} more in the walking space off the way taken - the teardown's)`)
@@ -331,7 +363,7 @@ let oneWayN = 0; let oneWayOf = 0; let oneWayLeavable = 0
     console.log(`one-way pockets: ${oneWayN} of ${oneWayOf} cells the walk reaches from the site's edge have no walk back out${oneWayN ? ' (e.g. ' + [...sinksO].slice(0, 4).join(' ') + ')' : ''}`)
   }
 }
-const fails = [design && design.error && 'the design walk did not run: ' + design.error, design && design.topsMissing && design.topsMissing.length && `the finished castle's walk misses its own ways up: ${design.topsMissing.join(' ')}`, design && design.after != null && design.after < 2 && `after the clear the castle's own ways up are still cut (${design.after}/2)`, design && design.longest > 25 && `the design walk held the loop ${design.longest}ms`, design && design.leftOnRoutes && `${design.leftOnRoutes} strays left blocking the castle's own routes`, design && design.standFar && design.standFar.length && `strays out of reach of the stand they are dug from: ${design.standFar.join(' ')}`, hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, longest > 25 && `the ring plan held the loop ${longest}ms in one slice`, ringUnserved && `${ringUnserved} cells a ring was planned for still without a stand`, !ringsLaid && tops.length >= 3 && 'no ring planned on the site', droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`, oneWayLeavable && `${oneWayLeavable} one-way cells the planner can leave`].filter(Boolean)
+const fails = [design && design.error && 'the design walk did not run: ' + design.error, design && design.topsMissing && design.topsMissing.length && `the finished castle's walk misses its own ways up: ${design.topsMissing.join(' ')}`, design && design.after != null && design.after < 2 && `after the clear the castle's own ways up are still cut (${design.after}/2)`, design && design.longest > 25 && `the design walk held the loop ${design.longest}ms`, design && design.leftOnRoutes && `${design.leftOnRoutes} strays left blocking the castle's own routes`, design && design.standFar && design.standFar.length && `strays out of reach of the stand they are dug from: ${design.standFar.join(' ')}`, hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, longest > 25 && `the ring plan held the loop ${longest}ms in one slice`, ringUnserved && `${ringUnserved} cells a ring was planned for still without a stand`, !ringsLaid && tops.length >= 3 && 'no ring planned on the site', droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`, oneWayLeavable && `${oneWayLeavable} one-way cells the planner can leave`, accessGain && accessGain.longest > 25 && `the access plan held the loop ${accessGain.longest}ms`, accessGain && accessGain.cells && !accessGain.gained && 'access cells placed and no needy cell gained a stand'].filter(Boolean)
 console.log(fails.length ? `FAIL ${fails.join('; ')}` : 'PASS')
 process.exit(fails.length ? 1 : 0)
 })()

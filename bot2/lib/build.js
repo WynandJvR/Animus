@@ -893,7 +893,8 @@ function nextNeeds (bot, layers = 4, lowY = null) {
     //  kept open, a rest, a closed room - and ranked by its own low y the decor under the band (trapdoors, leaves, chests)
     //  filled the pack first; the band's own stone brick stairs found no slot, the step ran 1s of a 95s round and ended
     //  "waiting on stone_brick_stairs" with 14 in the chest, 2026-10-07. Those rank as the window's top layer)
-    const ly = Number.isFinite(minY) && c.y < minY ? minY + layers : c.y
+    // (a cell that makes the way to the window's stand-less cells ranks with the band's floor: its item first - accessFor)
+    const ly = Number.isFinite(minY) && accessHas(c) ? Math.min(c.y, minY) : Number.isFinite(minY) && c.y < minY ? minY + layers : c.y
     needsOf(bot, c, md, (it, n) => { out[it] = (out[it] || 0) + n; if (lowY && !(lowY[it] <= ly)) lowY[it] = ly })
   }
   return out
@@ -1759,6 +1760,26 @@ async function clearDesignWay (bot, c) {
   return 0
 }
 
+// ACCESS FIRST (designwalk.accessPlan): the window's cells with no stand of my walk in reach, the finished build's own routes
+//  to stands that would reach them, and the build's cells that make those routes - a stair, a ladder, an upper floor's floor
+//  cell - go in before the window's other ready cells (the pick), and their items rank with the band's floor (nextNeeds): a
+//  floor's way up built before its walls, the cells above it a short walk instead of a ring plan or a pillar each. The upper
+//  story read "no stand" cell after cell with its floors unlaid, 2026-10-07. Worked out once a walk search (reach.at), at most
+//  every 30s, yielding; a hint to the order only - every rule of the window (belowWaits, the anchor, the doorway) still decides
+let accessMemo = null; let accessBusy = false
+function accessHas (c) { return !!accessMemo && accessMemo.job === job && accessMemo.cells.has(key(c)) }
+async function accessFor (bot, cells) {
+  if (!design || design.job !== job || !reachCurrent(bot) || reach.capped || accessBusy) return
+  if (accessMemo && accessMemo.job === job && (accessMemo.reachAt === reach.at || Date.now() - accessMemo.at < 30000)) return
+  accessBusy = true; const t0 = Date.now(); const tick = ringTicker()
+  try {
+    const r = await designwalk.accessPlan(designWorld(bot), design, { reachHas: k => reach.cells.has(k), cells, isTodo: (x, y, z) => { const q = job.index.get(`${x},${y},${z}`); return !!q && !q.clear && cellDone(bot, q) !== true }, eyeReaches: ring.eyeReaches, tick })
+    const prev = accessMemo && accessMemo.job === job ? accessMemo.cells.size : -1
+    accessMemo = { job, cells: r.cells, at: Date.now(), reachAt: reach.at }
+    if (r.cells.size !== prev) log('build', `access first: ${r.needy} cells of the window with no stand in my walk, ${r.targets} stands of the finished build would reach them (${r.routed} with a way from my walk) - ${r.cells.size} cells make those ways${r.cells.size ? ' (e.g. ' + [...r.cells].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => (job.index.get(k) || {}).name + '@' + k + ' for ' + n).join(', ') + ')' : ''} - ${Date.now() - t0}ms, longest slice ${tick.longest()}ms`)
+  } catch (e) { log('build', `access plan failed: ${e.message}`) } finally { accessBusy = false }
+}
+
 // ---- THE SCAFFOLD RING (ring.js plans it; laid here, ledgered, kept while it serves) --------------------------------
 // The castle's y129 band: every stand plan "none", led by "a build cell at the cell's height" - the columns beside a wall
 // cell high up are the wall and the room's other build cells - and 1 placed in 15 minutes, 2026-10-07 16:34. A ledge of our
@@ -2515,7 +2536,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // the walk between cells is most of a block's six seconds, and "lower first" sent the bot back and forth across the
     // 50x140 site between two layers (2026-09-27)
     const inReach = c => act.reach(bot, new Vec3(c.x, c.y, c.z), 4.3) ? 1 : 0
-    ready.sort((a, b) => (clickable(b) - clickable(a)) * 100 + (inReach(b) - inReach(a)) * 50 + (a.y - b.y) + world.dist3(a, me) - world.dist3(b, me))
+    // (ACCESS FIRST - accessFor: a cell that makes the finished build's way to the window's stand-less cells, before one in reach)
+    if (ready.length > 1) await accessFor(bot, todo.filter(q => !q.foundation && q.y <= lowestAll + 3))
+    const acc = q => accessHas(q) ? 1 : 0
+    ready.sort((a, b) => (clickable(b) - clickable(a)) * 100 + (acc(b) - acc(a)) * 75 + (inReach(b) - inReach(a)) * 50 + (a.y - b.y) + world.dist3(a, me) - world.dist3(b, me))
     const c = ready[0]
     cellEnd = Date.now() + CELL_REACH_MS // (this cell's reach budget: cellStop)
     const tp = Date.now(); const d0 = world.dist3(c, bot.entity.position)
@@ -3312,7 +3336,20 @@ async function removeScaffold (bot, { shouldStop, maxPasses = 4, keep = null, ex
       if (!act.reach(bot, p, 4.3)) {
         // (near enough, not look-at: the look-at raycast through pews and pillars "stuck" at 5-6b; the server checks distance)
         // a short walk first; then the pillar from the ground beside it; the church door only for what is inside
-        let r = await goSite(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 'scaffold', { doors: false })
+        // A STAND THE WALK SEARCH REACHES, WALKED TO IN LEGS (reachStandFor - as getInReach): the GoalNear 3 is no stand, so
+        //  goSite handed every far block to the walker - "site walker (scaffold): timeout in 30s ... no stand goal", several a
+        //  minute of the day's teardown, 2026-10-07 19:14. The search's "none" in the daily teardown: tried again tomorrow (no
+        //  walker, no pillar - the finish's); its "unknown" (capped, stale, outside the site): the walker as before
+        if (!reachCurrent(bot)) await walkReach(bot).catch(() => null)
+        const rs = reachStandFor(bot, p)
+        if (rs === false && !climb) { miss(p); continue }
+        let r = null
+        if (rs) {
+          r = await goSite(bot, new goals.GoalBlock(rs.x, rs.y, rs.z), 'scaffold', { doors: false })
+          // (its stand not reached: the daily teardown leaves it for tomorrow; the finish's teardown tries the walker and the pillar)
+          if (!r.ok && !act.reach(bot, p, 4.8) && (!climb || /shut in|stopped/.test(r.why || ''))) { if (!climb) miss(p); continue }
+        }
+        if (!r || (!r.ok && !act.reach(bot, p, 4.8))) r = await goSite(bot, new goals.GoalNear(p.x, p.y, p.z, 3), 'scaffold', { doors: false })
         if (!r.ok && !act.reach(bot, p, 4.8)) {
           // (climb:false - the daily teardown: no pillar to take a pillar down; a block out of reach from the ground is
           //  build.finish's. Pillaring for leftovers took 1037s of a day; audit)
