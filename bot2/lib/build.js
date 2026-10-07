@@ -2071,7 +2071,10 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  or a sky column a tower may climb. A stand merely out of my walk from here - an upper floor whose stairs are not built,
       //  a ledge a tower reaches - is no closed room: "84 cells wait for a way in" held the castle's whole upper floor, the
       //  walker never asked, 2026-10-07. Those go their own way and rest on a miss like any; audit)
-      if (probe && probe.out && wayOut(bot, { x: NaN, y: NaN, z: NaN }, probe, false)) { compHeld.delete(key(c)); probe.out = false }
+      // (by WALKING only - rooms.region: the box's edge or a region too big to be a pocket. wayOut's sky column is an escape's
+      //  way out (a tower), never a way in: a roofless pocket in the south strip read "open" by its sky, the builder walked in
+      //  by a drop, was enclosed in it, the walks gave up 14 times in a minute and five places there were refused, 2026-10-07)
+      if (probe && probe.out && rooms.region(roomWorld(bot), job.box, probe, { cap: 300 }).out) { compHeld.delete(key(c)); probe.out = false }
       if (probe && probe.out) {
         holdBack.add(key(c)); compWait.add(key(c)); compHeld.add(key(c))
         if (!compartmentSaid.has(key(c))) { compartmentSaid.add(key(c)); log('build', `${c.name} at ${move.fmt(c)}: every stand for it is in a closed compartment of the build I am not in - it waits for a way in`) }
