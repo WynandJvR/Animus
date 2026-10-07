@@ -1520,7 +1520,8 @@ async function withdrawWindow (needs, lowY = {}) {
   for (const cap of [64, 64 * 4]) {
     if (inv.freeSlots(bot) < 2) return
     const list = order.map(([name, n]) => [name, Math.min(n, cap) - countOf(name)]).filter(([, w]) => w > 0)
-    await base.withdrawMany(bot, list.map(([name, w]) => [name, Math.min(w, base.bankCount(name))]), { keepFree: 2 }).catch(() => ({}))
+    // (three slots kept, not two: the pickups on the way take two, and the band's next anchor - found only by the step - its own)
+    await base.withdrawMany(bot, list.map(([name, w]) => [name, Math.min(w, base.bankCount(name))]), { keepFree: 3 }).catch(() => ({}))
     for (const [name, n] of order) {
       if (inv.freeSlots(bot) < 2) return
       const want = Math.min(n, cap) - countOf(name)
@@ -1547,8 +1548,15 @@ async function roomForBand (heads, waited, needs, y, room) {
   const upper = names.filter(nm => needs[nm] != null && y(nm) > lowHead).sort((a, b) => y(b) - y(a))
   const back = new Map(); let free = inv.freeSlots(bot)
   for (const nm of haul.concat(upper)) { if (free >= room) break; const s = slotsOf(nm); if (s > 0) { back.set(nm, keep(nm)); free += s } }
+  // (and THE BAND'S OWN LAYERS last: the waited item always gets its slot. A pack full of the band layers' other kinds had
+  //  nothing to put back - "put back nothing ... 0 slots free", "0 taken out of the chests" with the anchor's planks in them,
+  //  a trip for a flower instead and the round lost, 2026-10-07. Their spare stacks first (one stack of a kind kept, the
+  //  most stacks first), then whole kinds, the most stacks first: what goes back comes out again with the next withdraw)
+  const band = names.filter(nm => needs[nm] != null && y(nm) <= lowHead && !back.has(nm)).sort((a, b) => slotsOf(b) - slotsOf(a))
+  for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - 1; if (s > 0) { back.set(nm, Math.max(keep(nm), 64)); free += s } }
+  for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - (back.has(nm) ? slotsOf(nm) - 1 : 0); if (s > 0) { back.set(nm, keep(nm)); free += s } }
   if (back.size) await base.depositAll(bot, { keep: (b, i) => back.has(i.name) ? back.get(i.name) : Infinity }).catch(() => false)
-  log('dir', `no room for ${heads.join(', ')} (the band's) - put back ${back.size ? [...back.keys()].join(', ') : 'nothing'} (the haul, then window blocks for higher layers); ${inv.freeSlots(bot)} slots free`)
+  log('dir', `no room for ${heads.join(', ')} (the band's) - put back ${back.size ? [...back.keys()].join(', ') : 'nothing'} (the haul, then window blocks for higher layers, then the band's own spares); ${inv.freeSlots(bot)} slots free`)
 }
 function countOf (name) { return mats.held(bot, name) }
 function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.nextNeeds(bot, WINDOW_LAYERS) : {} }
@@ -1823,7 +1831,7 @@ async function castleWorkInner () {
   const blockedRaw = chain.find(r => r !== 'fuel' && win.raw[r] > 0) || chain.find(r => win.raw[r] > 0) || null
   // (the builder waits on an item whose raw the next layers' shortfall does not hold: said, with both sides - the band
   //  waited on oak_trapdoor for two hours while the rounds gathered leather and wool, 2026-09-29)
-  if (steer && !blockedRaw && steerSaid !== steer) { steerSaid = steer; log('dir', `the builder waits on ${steer} (its raw: ${chain.join(', ') || 'none - in stock or craftable from stock'}), but the next layers' shortfall has none of it: ${Object.keys(win.raw).map(r => win.raw[r] + ' ' + r).join(', ') || 'nothing'}`) }
+  if (steer && !blockedRaw && steerSaid !== steer) { steerSaid = steer; log('dir', `the builder waits on ${steer} (made from ${chain.join(', ') || 'nothing raw'}; ${base.bankCount(steer)} in the chests) - none of it is short, so no trip for it; the next layers are short of: ${Object.keys(win.raw).map(r => win.raw[r] + ' ' + r).join(', ') || 'nothing'}`) } // (said as it is: "its raw ... but the shortfall has none" read as a contradiction - the recipe's raw, covered by stock)
   // (the item the band waits on lies in the chests: out with it and back to the build - not a trip for the next thing on
   //  the list. 63 dirt banked while the round went for gravel, 208s, into someone else's place, 2026-10-03)
   if (steer && !blockedRaw && base.bankCount(steer) > 0) {
