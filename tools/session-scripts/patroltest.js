@@ -40,6 +40,22 @@ const list = es => es.map(e => ({ e, d: e.position.distanceTo(bot.entity.positio
   // the long run's own exchange: 40b under four crossbows (8 points) is not taken; 40b under one pillager is; 25b is the short run's
   check(!reflex.runAffordable(40, four, 20), 'a 40b run under four pillagers (8 armour) leaves us under the hurt line: not taken')
   check(reflex.runAffordable(40, [four[0]], 20), 'a 40b run under one pillager is affordable')
+  // the long run's gate: short runs always; past 28 only outgunned, cover gone and the run affordable
+  check(reflex.longRunOk(20, { coverGone: false, isOutgunned: false, affordable: false }), 'a run within 28: always weighed in')
+  check(!reflex.longRunOk(40, { coverGone: false, isOutgunned: true, affordable: true }), 'past 28 with cover still to be had: no run')
+  check(!reflex.longRunOk(40, { coverGone: true, isOutgunned: true, affordable: false }), 'past 28, its exchange unaffordable: no run')
+  check(reflex.longRunOk(40, { coverGone: true, isOutgunned: true, affordable: true }), 'past 28, outgunned, no cover, affordable: the run')
+  // as the retreat closes the distance the run becomes affordable partway (four pillagers, 8 armour, hp 20)
+  const firstOk = [48, 40, 32, 24, 16, 8].find(dd => reflex.runAffordable(dd, four, 20))
+  check(firstOk != null && firstOk < 40, `retreating under four pillagers the run turns affordable partway (at ${firstOk}b)`)
+  // the way home: a shooter between us and the door bars it; one behind us does not
+  check(!reflex.wayClear({ x: 0, z: 0 }, { x: 30, z: 0 }, [new Vec3(15, 63, 2)]), 'a shooter on the line to the door: no way home')
+  check(reflex.wayClear({ x: 0, z: 0 }, { x: 30, z: 0 }, [new Vec3(-6, 63, 1)]), 'a shooter behind us: the way home is clear')
+  // no cover: the hole first when outgunned, then the retreat, then the shield
+  check(reflex.noCoverAnswer({ isOutgunned: true, holeOk: true, retreat: true }) === 'hole', 'outgunned, a hole can be dug: the hole before the retreat')
+  check(reflex.noCoverAnswer({ isOutgunned: true, holeOk: false, retreat: true }) === 'retreat', 'outgunned, no hole (no pickaxe/block, fluid, a build cell...): the retreat')
+  check(reflex.noCoverAnswer({ isOutgunned: false, holeOk: true, retreat: true }) === 'retreat', 'not outgunned: no hole, the retreat')
+  check(reflex.noCoverAnswer({ isOutgunned: true, holeOk: false, retreat: false }) === 'shield', 'neither: the shield and a step back')
 
   // (2) cornered by the patrol: no wall to put (no block in the pack), the body does not move - the cover flight pins, then
   // the fight; the patrol's nearest swaps and the fight holds its target

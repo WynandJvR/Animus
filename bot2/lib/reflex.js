@@ -822,24 +822,43 @@ function pinnedClose (e, d) { return coverPinned() && d < 6 }
 let safeRun = null // { inside, at, lastP, lastAt } while the run lasts
 let safeDoorAt = 0
 let safeRunRefused = 0 // (a run that stood still: the cover rows for a while instead of the same blocked run again; audit)
-function safehouseRun (e, label) {
-  if (safeRun) { const s = safeRunStep(); if (s === 'go') { fleeTarget = fleeTarget || e; setActive('flee', label + ' - to the safehouse'); return true } return false }
+// THE WAY HOME FROM A SHOOTER: the safehouse's inside cell and how far it is - within the hideout's reach, level enough, not
+// inside already, and no shooter about nearer the door than us near the straight line to it (the run would pass by it; audit).
+// Null: no way home. One reading for the planner's run and the step-by-step retreat (homeRetreat)
+function homeWay (e) {
   const hm = require('./memory').get().hut; const mv = require('./move')
-  if (!hm || !hm.box || !hm.door || busy || Date.now() - safeRunRefused < 20000) return false
+  if (!hm || !hm.box || !hm.door) return null
   const me = bot.entity.position
-  if (mv.insideHut(me.floored())) return false
+  if (mv.insideHut(me.floored())) return null
   // (the recorded home cell when it lies in the hut - its centre may hold furniture; audit)
   const h0 = require('./memory').get().home
   const inside = h0 && mv.insideHut({ x: h0.x, y: h0.y, z: h0.z }) ? { x: h0.x, y: h0.y, z: h0.z } : { x: Math.floor((hm.box.x1 + hm.box.x2) / 2), y: hm.box.y1, z: Math.floor((hm.box.z1 + hm.box.z2) / 2) }
   const dd = Math.hypot(me.x - inside.x - 0.5, me.z - inside.z - 0.5)
-  // (a short run - 28 - while cover here can still win; OUTGUNNED, the hideout's own reach: cover and the blade by turns 38-45b
-  //  from the door under four crossbows was the death the run was made for, 2026-10-07 13:34)
-  // (past 28: only outgunned, once the cover here is pinned - no step out of sight, no wall - and only when the run's own
-  //  exchange leaves us above the hurt line: runAffordable; audit)
-  if (Math.abs(me.y - inside.y) > 5 || dd > HIDEOUT_REACH || (dd > 28 && !(coverPinned() && outgunned(hostiles(24)) && runAffordable(dd, shootersAbout(e))))) return false
-  // (not past the shooters: one nearer the door than us and near the straight line to it - the run would pass by it; audit)
+  if (Math.abs(me.y - inside.y) > 5 || dd > HIDEOUT_REACH) return null
+  if (!wayClear(me, inside, shootersAbout(e).map(s => s.position))) return null
+  return { inside, dd }
+}
+// (pure: no shooter nearer the door than `me` and within 6 of the straight line to it)
+function wayClear (me, inside, shooterPs) {
+  const dd = Math.hypot(me.x - inside.x - 0.5, me.z - inside.z - 0.5)
   const segDist = q => { const ax = inside.x + 0.5 - me.x; const az = inside.z + 0.5 - me.z; const L = ax * ax + az * az || 1; const t = Math.max(0, Math.min(1, ((q.x - me.x) * ax + (q.z - me.z) * az) / L)); return Math.hypot(me.x + t * ax - q.x, me.z + t * az - q.z) }
-  if (!safeRun && shootersAbout(e).some(s => Math.hypot(s.position.x - inside.x - 0.5, s.position.z - inside.z - 0.5) < dd && segDist(s.position) < 6)) return false
+  return !shooterPs.some(q => Math.hypot(q.x - inside.x - 0.5, q.z - inside.z - 0.5) < dd && segDist(q) < 6)
+}
+// COVER CANNOT BE HAD HERE: takeCover's last branch this moment (no step out of sight, no wall) - or the flight pinned. While
+// it holds the long run is weighed (runAffordable), and the retreat toward the door it steers is not mistaken for a free flight
+let noCoverAt = 0
+function coverless () { return coverPinned() || Date.now() - noCoverAt < 1000 }
+// THE LONG RUN'S GATE (pure): a short run - 28 - while cover here can still win; past it only outgunned, cover not to be had,
+// and the run's own exchange affordable. (Cover and the blade by turns 38-45b from the door under four crossbows was the death
+// the run was made for, 2026-10-07 13:34; audit)
+function longRunOk (dd, { coverGone, isOutgunned, affordable }) { return dd <= 28 || (coverGone && isOutgunned && affordable) }
+function safehouseRun (e, label) {
+  if (safeRun) { const s = safeRunStep(); if (s === 'go') { fleeTarget = fleeTarget || e; setActive('flee', label + ' - to the safehouse'); return true } return false }
+  if (busy || Date.now() - safeRunRefused < 20000) return false
+  const way = homeWay(e); if (!way) return false
+  const { inside, dd } = way
+  const me = bot.entity.position; const mv = require('./move')
+  if (dd > 28 && !longRunOk(dd, { coverGone: coverless(), isOutgunned: outgunned(hostiles(24)), affordable: runAffordable(dd, shootersAbout(e)) })) return false
   fleeTarget = e
   if (!safeRun) { log('reflex', `${label} - running for the safehouse ${Math.round(dd)}b off`); safeRun = { inside, at: Date.now(), lastP: me.clone(), lastAt: Date.now() } }
   setActive('flee', `${label} - to the safehouse`)
@@ -900,6 +919,31 @@ function safeRunDoor () {
     if (open) { safeDoorAt = Date.now(); bot.activateBlock(b).catch(() => {}); return }
   }
 }
+// A CAPPED HOLE FROM A SHOOTER - every rule a dig-in has: not busy, a pocket that is one (its walls two and three down all solid, a
+// side to cap against one down: a cave's hole open sideways lets the arrows in and each try digs three deeper), a pickaxe and a
+// block to cap it, never in the safehouse or a hole already, and canDigInHere (nothing within 6, no fluid, no void, no build or
+// foreign cell, not in our own ground; audit)
+function shooterHoleOk () {
+  if (busy || !inv.bestTool(bot, 'pickaxe', 4) || !inv.shelterBlock(bot) || require('./move').insideHut(bot.entity.position.floored()) || enclosed()) return false
+  const p0 = bot.entity.position.floored(); const solidAt = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isSolid(b) }
+  const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+  const pocket = [2, 3].every(dy => sides.every(([dx, dz]) => solidAt(p0.x + dx, p0.y - dy, p0.z + dz))) && sides.some(([dx, dz]) => solidAt(p0.x + dx, p0.y - 1, p0.z + dz))
+  return pocket && canDigInHere()
+}
+function shooterHole (e, why) {
+  fleeTarget = e
+  setActive('dig-in', why)
+  // (and held there while the shooter is about: let go at once, the director walked out through the cap into the
+  //  arrows and the next lap dug another hole - the flee's out-of-sight hold keeps it still till the shooter is gone; audit)
+  runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => {
+    if (!active || active.kind !== 'dig-in') return
+    if (enclosed() && fleeTarget && fleeTarget.isValid && RANGED.has(fleeTarget.name)) setActive('flee', `dug in - holding till the ${fleeTarget.name} is gone`)
+    else clearActive()
+  })
+}
+// WHEN COVER IS NOT TO BE HAD (pure): outgunned with no step out of sight and no wall - a capped hole first, by day too (the
+// night's dig-in row knew it only in the dark); then the retreat toward the door; then the shield and a step back
+function noCoverAnswer ({ isOutgunned, holeOk, retreat }) { return isOutgunned && holeOk ? 'hole' : retreat ? 'retreat' : 'shield' }
 function takeCover (e, label) {
   if (safehouseRun(e, label)) return
   // A WITCH IS OUTRUN, NOT HIDDEN FROM: a splash potion arcs over a wall and a witch walks up to a hole - walled off at 10b,
@@ -926,22 +970,8 @@ function takeCover (e, label) {
     // (a pocket that is one - its walls two and three down all solid, a side to cap against one down: a cave's hole open
     //  sideways lets the arrows in and each try digs three deeper; and nothing that bites within 6 - the hole's 30s hold
     //  blocks every row, the creeper's too; audit)
-    const p0 = bot.entity.position.floored(); const solidAt = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && world.isSolid(b) }
-    const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]]
-    const pocket = [2, 3].every(dy => sides.every(([dx, dz]) => solidAt(p0.x + dx, p0.y - dy, p0.z + dz))) && sides.some(([dx, dz]) => solidAt(p0.x + dx, p0.y - 1, p0.z + dz))
     // (and nothing within 6, a shooter too - canDigInHere's own rule. That close, cover that cannot be had is a fight: pinnedClose)
-    if (lost >= 6 && !busy && pocket && inv.bestTool(bot, 'pickaxe', 4) && inv.shelterBlock(bot) && !require('./move').insideHut(bot.entity.position.floored()) && !enclosed() && canDigInHere()) {
-      fleeTarget = e
-      setActive('dig-in', `${e.name} - cover is not stopping it (${Math.round(lost)} hp in 8s): a capped hole`)
-      // (and held there while the shooter is about: let go at once, the director walked out through the cap into the
-      //  arrows and the next lap dug another hole - the flee's out-of-sight hold keeps it still till the shooter is gone; audit)
-      runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => {
-        if (!active || active.kind !== 'dig-in') return
-        if (enclosed() && fleeTarget && fleeTarget.isValid && RANGED.has(fleeTarget.name)) setActive('flee', `dug in - holding till the ${fleeTarget.name} is gone`)
-        else clearActive()
-      })
-      return
-    }
+    if (lost >= 6 && shooterHoleOk()) return shooterHole(e, `${e.name} - cover is not stopping it (${Math.round(lost)} hp in 8s): a capped hole`)
   }
   fleeTarget = e
   // (A FLIGHT TO COVER THAT DOES NOT MOVE - the edge guard holding every step at a drop - while the shooter still sees us: 78
@@ -973,12 +1003,36 @@ function takeCover (e, label) {
   // NO STEP OUT OF SIGHT AND NO WALL: the shield, raised to the nearest shooter that sees us, while the body backs off - it was
   // lowered on every cover tick, and 25 turns of cover under four crossbows never blocked a bolt with it in the off hand,
   // 2026-10-07 13:34. Held, not re-raised each tick (a shield blocks only 5 ticks after it goes up)
+  noCoverAt = Date.now()
+  // THE RETREAT HOME, STEP BY STEP: no cover here and the door within the hideout's reach with no shooter on the way - walked
+  // toward it on the flee's own walkable, swept-for-drops heading (never over a drop), sprinting; each tick safehouseRun above
+  // weighs the run again as the distance shrinks, and takes it once its own exchange is affordable. Backing off on the spot
+  // with no goal was all there was, 28-48b from the door under a spread patrol (audit, 2026-10-07)
+  // (the hole first, when outgunned: noCoverAnswer)
+  const og = outgunned(hostiles(24)); const holeOk = og && shooterHoleOk()
+  const rh = holeOk ? null : homeRetreat(e)
+  const ans = noCoverAnswer({ isOutgunned: og, holeOk, retreat: !!rh })
+  if (ans === 'hole') return shooterHole(e, `outgunned by ${shootersAbout(e).length} shooters, no cover here: a capped hole`)
+  if (ans === 'retreat') { shieldDown(); bot.setControlState('back', false); return steerTo(rh, { jump: rh.jump, sprint: bot.food > 6 }) }
   for (const k of ['forward', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
   bot.setControlState('back', !pinned)
   const seer = inv.offhandShield(bot) ? shootersAbout(e).filter(s => canSee(s)).sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0] : null
   if (!seer) return shieldDown()
   bot.lookAt(seer.position.offset(0, (seer.height || 1.9) * 0.8, 0), true).catch(() => {})
   shieldUp()
+}
+// the next cell of the retreat: the flee's heading pick, turned toward the door (within 100 degrees of it), walkable and swept
+// for drops; null: no way home, or no safe step toward it
+let retreatSaid = 0
+function homeRetreat (e) {
+  if (busy || Date.now() - safeRunRefused < 20000) return null
+  const way = homeWay(e); if (!way) return null
+  const me = bot.entity.position
+  const toward = Math.atan2(way.inside.z + 0.5 - me.z, way.inside.x + 0.5 - me.x)
+  const h = fleeHeadingPick(e, me, toward, shootersAbout(e))
+  if (!h) return null
+  if (Date.now() - retreatSaid > 10000) { retreatSaid = Date.now(); log('reflex', `no cover here - retreating toward the safehouse ${Math.round(way.dd)}b off, step by step (the run when its exchange allows)`) }
+  return h
 }
 // every shooter about that can reach us - the one picked first: a patrol, never only the one the rows chose (2026-10-03)
 function shootersAbout (t) {
@@ -2295,4 +2349,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, outgunned, runAffordable, HIDEOUT_REACH, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, outgunned, runAffordable, longRunOk, wayClear, noCoverAnswer, HIDEOUT_REACH, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
