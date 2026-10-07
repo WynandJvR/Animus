@@ -66,6 +66,16 @@ check('TOOL_JOB_USES is the largest ask (32)', inv.TOOL_JOB_USES, 32)
   const banked = nm => (nm === 'dark_oak_stairs' || nm === 'stripped_spruce_log') ? 0 : (bank[nm] || 0)
   check('band kinds in no chest reserve nothing', fmt(base.withdrawPlan(bot, wants, nm => near[nm] || 0, 2, banked)), '3 dark_oak_sign, 3 spruce_door')
 }
+// 10. ROOM FOR THE BAND (base.roomPlan): the haul and the higher layers' blocks go back and are not taken again this round;
+// a band layer's own kind banked whole for the room is NOT kept out - the withdraw's priority gives the heads their slots first
+{
+  const needs = { dark_oak_sign: 3, spruce_planks: 128, stone_bricks: 200 }
+  const lowY = { dark_oak_sign: 131, spruce_planks: 127, stone_bricks: 127 }
+  const stacks = { oak_sapling: 1, dark_oak_sign: 1, spruce_planks: 1, stone_bricks: 4 }
+  const r = base.roomPlan({ names: Object.keys(stacks), needs, y: nm => lowY[nm] != null ? lowY[nm] : Infinity, lowHead: 127, slotsOf: nm => stacks[nm], keep: () => 0, free: 0, room: 7 })
+  check('put back: the haul, the upper sign, the band spares, a whole band kind', [...r.back.keys()].join(','), 'oak_sapling,dark_oak_sign,stone_bricks,spruce_planks')
+  check('not taken again this round: the haul and the upper sign only', [...r.noRetake].sort().join(','), 'dark_oak_sign,oak_sapling')
+}
 // 8. the deposit takes the most worn copies first (the haul), the freshest for a spare - by slot, never the type's first slot
 {
   const mkw = () => { const sl = []; sl[9] = Object.assign(tool('iron_pickaxe'), { slot: 9 }); sl[10] = Object.assign(tool('iron_pickaxe', 20), { slot: 10 }); sl[11] = Object.assign(tool('iron_pickaxe', 100), { slot: 11 }); return { slots: sl, inventoryStart: 9, inventoryEnd: 45, deposit: async () => { throw new Error('by type') } } }

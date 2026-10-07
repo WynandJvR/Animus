@@ -767,8 +767,20 @@ function anchorable (bot, c, det) {
   // (nor a cell that cannot go in before the cell under it - it waits on THAT one, which anchors in its stead if it can: as
   //  an anchor it held the band until the step's end gave it a shared miss, one layer a step - oak leaves over an unplanted
   //  tulip, then the leaves over those, "the cell under it waits" ending step after step at the castle's base, 2026-10-06)
-  return !(bot && belowWaits(bot, c))
+  if (bot && belowWaits(bot, c)) return false
+  // (NOR A CELL WITH NO FACE NOW AND NOWHERE FOR A SUPPORT - the step's own readiness (readyNow): every face it could be
+  //  clicked on is a neighbour of the build not placed yet, so it waits on THEM, and they anchor in its stead if they can,
+  //  as the cell under does above. As anchors, 12 stairs at a time held the band with nothing doable until the step's end
+  //  gave each a shared miss - 39 step ends today, 371 cells, 20 of those steps placed nothing, 2026-10-07. Not resting,
+  //  not missed: still in the build's work, so the room rules (closesRoom, closesPocket) keep their way in open)
+  return !bot || readyNow(bot, c)
 }
+// CAN IT GO IN WHEN THE BODY GETS THERE - the step's ready test, one copy: a face to click now (a plan's neighbour solid and
+// clickable, refOk), or a plan whose neighbour is no cell of the build - a temporary support can go there (never for an
+// attached cell or a two-cell one)
+function clickableNow (bot, c) { return plansFor(c).some(p => refOk(bot, c, p)) }
+function supportableNow (c) { return !c.attach && !c.twin && plansFor(c).some(p => !job.index.has(key({ x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] }))) }
+function readyNow (bot, c) { return clickableNow(bot, c) || supportableNow(c) }
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
   let m = Infinity
   for (const c of todo) {
@@ -2109,8 +2121,8 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // cells that can be clicked right now first; one whose every face is another unbuilt cell of this
     // build waits for its neighbours (trying it costs ~20s of failed placing, and a wall of x-axis logs
     // placed out of order was nothing but failures)
-    const clickable = c => plansFor(c).some(p => refOk(bot, c, p))
-    const supportable = c => !c.attach && !c.twin && plansFor(c).some(p => !job.index.has(key({ x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] })))
+    const clickable = c => clickableNow(bot, c)
+    const supportable = c => supportableNow(c)
     const ready = doable.filter(c => !holdBack.has(key(c)) && (clickable(c) || supportable(c)))
     if (!ready.length) {
       // (and what anchors the band there - the lowest cell that holds the layers: the step's end is its reach, not the

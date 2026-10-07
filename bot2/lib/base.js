@@ -299,6 +299,24 @@ function withdrawPlan (bot, wants, here, slots, bank) {
   }
   return out
 }
+// ROOM FOR THE BAND, PLANNED (director.roomForBand's choice, pure): what goes back to the chest - { back: name -> keep, noRetake }.
+// First what the window places none of (the haul), the most slots first; then the window's blocks for layers above the band's,
+// highest first; and THE BAND'S OWN LAYERS last: their spare stacks (one stack kept), then whole kinds - the waited item always
+// gets its slot (a pack full of the band layers' other kinds had nothing to put back, 2026-10-07). noRetake: the haul and the
+// higher layers' kinds put back - the same round's withdraw takes none of them again (signs and doors in and out in one
+// second, 12:29). Never the band's own: banked whole and kept out all round, that kind anchored the next round and another
+// band kind went back for it, a ping-pong (audit). Pure: names - the pack's kinds over their keep (the hands' own and the
+// waited items already left out); y(nm) - its lowest layer; slotsOf(nm) - its stacks over the keep
+function roomPlan ({ names, needs, y, lowHead, slotsOf, keep, free, room }) {
+  const haul = names.filter(nm => needs[nm] == null && !/^shears$|bucket$|^flint_and_steel$/.test(nm)).sort((a, b) => slotsOf(b) - slotsOf(a))
+  const upper = names.filter(nm => needs[nm] != null && y(nm) > lowHead).sort((a, b) => y(b) - y(a))
+  const back = new Map(); const noRetake = new Set()
+  for (const nm of haul.concat(upper)) { if (free >= room) break; const s = slotsOf(nm); if (s > 0) { back.set(nm, keep(nm)); noRetake.add(nm); free += s } }
+  const band = names.filter(nm => needs[nm] != null && y(nm) <= lowHead && !back.has(nm)).sort((a, b) => slotsOf(b) - slotsOf(a))
+  for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - 1; if (s > 0) { back.set(nm, Math.max(keep(nm), 64)); free += s } }
+  for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - (back.has(nm) ? slotsOf(nm) - 1 : 0); if (s > 0) { back.set(nm, keep(nm)); free += s } }
+  return { back, noRetake }
+}
 async function withdrawMany (bot, list, { keepFree = 2, maxWalk = 64 } = {}) {
   const want = new Map(); for (const [nm, n] of list) if (n > 0) want.set(nm, (want.get(nm) || 0) + n)
   const goal = new Map(want); const start = {}; for (const nm of want.keys()) start[nm] = inv.count(bot, nm)
@@ -621,4 +639,4 @@ async function roomToCraft (bot, keep = new Set()) {
   return inv.freeSlots(bot) > 0
 }
 
-module.exports = { SPARE_KIT, toolsKept, depositByWear, withdrawPlan, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+module.exports = { SPARE_KIT, toolsKept, depositByWear, withdrawPlan, roomPlan, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }

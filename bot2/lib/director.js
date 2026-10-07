@@ -1600,7 +1600,7 @@ async function withdrawWindow (needs, lowY = {}) {
   // (ONE PLAN A ROUND: what roomForBand put back for the band is not this round's to take again - the same signs and doors went
   //  into the chest and out of it in the same second, twice, 2026-10-07 12:29/12:31. The band's kinds lead the list, and the
   //  withdraw keeps their slots across the chests - base.withdrawPlan)
-  const plan = order.filter(([name]) => !putBack.has(name) || firsts.includes(name))
+  const plan = order.filter(([name]) => !putBack.has(name))
   // (each pass in ONE round of chest openings - base.withdrawMany, the exact items in the band's order; then, kind by kind, only
   //  what a stand-in must cover - a birch stair for a jungle stair: withdrawOf's pool)
   for (const cap of [64, 64 * 4]) {
@@ -1624,7 +1624,8 @@ async function withdrawWindow (needs, lowY = {}) {
 // (the slots a band's withdraw leaves free - the pickups on the way take two, the band's next anchor its own: the withdraw's
 //  keepFree and the room roomForBand makes above it, one number)
 const BAND_KEEP_FREE = 3
-// (returns the kinds it put back: the round's withdraw does not take them again)
+// (returns the kinds the round's withdraw must not take again - the haul and the higher layers' blocks it put back; never the
+//  band's own kinds, which the withdraw's priority hands back their slots: base.roomPlan)
 async function roomForBand (heads, waited, needs, y, room) {
   if (!heads.length || inv.freeSlots(bot) >= room) return new Set()
   const free0 = inv.freeSlots(bot)
@@ -1635,22 +1636,12 @@ async function roomForBand (heads, waited, needs, y, room) {
   // (never the hands' own: shears, a bucket, flint and steel, food - the next leaf trip or pour wanted them back; and the haul
   //  by the slots it frees, the most first - a pair of shears went before a stack of logs; audit)
   const md = bot.registry || {}
-  const haul = names.filter(nm => needs[nm] == null && !/^shears$|bucket$|^flint_and_steel$/.test(nm) && !(md.foodsByName && md.foodsByName[nm])).sort((a, b) => slotsOf(b) - slotsOf(a))
-  const upper = names.filter(nm => needs[nm] != null && y(nm) > lowHead).sort((a, b) => y(b) - y(a))
-  const back = new Map(); let free = inv.freeSlots(bot)
-  for (const nm of haul.concat(upper)) { if (free >= room) break; const s = slotsOf(nm); if (s > 0) { back.set(nm, keep(nm)); free += s } }
-  // (and THE BAND'S OWN LAYERS last: the waited item always gets its slot. A pack full of the band layers' other kinds had
-  //  nothing to put back - "put back nothing ... 0 slots free", "0 taken out of the chests" with the anchor's planks in them,
-  //  a trip for a flower instead and the round lost, 2026-10-07. Their spare stacks first (one stack of a kind kept, the
-  //  most stacks first), then whole kinds, the most stacks first: what goes back comes out again with the next withdraw)
-  const band = names.filter(nm => needs[nm] != null && y(nm) <= lowHead && !back.has(nm)).sort((a, b) => slotsOf(b) - slotsOf(a))
-  for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - 1; if (s > 0) { back.set(nm, Math.max(keep(nm), 64)); free += s } }
-  for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - (back.has(nm) ? slotsOf(nm) - 1 : 0); if (s > 0) { back.set(nm, keep(nm)); free += s } }
+  const { back, noRetake } = base.roomPlan({ names: names.filter(nm => !(md.foodsByName && md.foodsByName[nm])), needs, y, lowHead, slotsOf, keep, free: inv.freeSlots(bot), room })
   if (back.size) await base.depositAll(bot, { keep: (b, i) => back.has(i.name) ? back.get(i.name) : Infinity }).catch(() => false)
   // (said as it is: the room it found and the room it made - "no room ... 5 slots free" read as a failure with the room made)
   const free1 = inv.freeSlots(bot)
   log('dir', `room for ${heads.join(', ')} (the band's): ${free0} slots free of the ${room} wanted${back.size ? ` - put back ${[...back.keys()].join(', ')} (the haul, then window blocks for higher layers, then the band's own spares)` : ' - nothing to put back'}; ${free1} free now${free1 < room ? ' - still short' : ''}`)
-  return new Set(back.keys())
+  return noRetake
 }
 function countOf (name) { return mats.held(bot, name) }
 function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.nextNeeds(bot, WINDOW_LAYERS) : {} }
