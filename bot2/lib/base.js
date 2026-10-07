@@ -352,7 +352,19 @@ async function depositItem (bot, name, n = 1) {
   return 0
 }
 
-async function depositAll (bot, { keep = keepCount } = {}) {
+// THE DEPOSITS' ONE KEEP: the kit's (keepCount) and what the build has registered - the window's blocks, and the band's
+// waited and anchor items whole (Infinity). Each deposit kept by its own rule: a craft's room-making banked the 16 dark oak
+// planks just taken out for the band's anchor, the step found "dark_oak_planks (not in hand)" and the round was lost,
+// 2026-10-07. (A trip's own pre-deposit - nothing but the kit goes - passes its own keep, as before)
+let keepHook = null
+function setDepositKeep (fn) { keepHook = fn }
+function depositKeepOf (bot, it) {
+  const k = keepCount(bot, it)
+  if (k === Infinity || !keepHook) return k
+  let h = 0; try { h = keepHook(it) || 0 } catch {}
+  return Math.max(k, h)
+}
+async function depositAll (bot, { keep = depositKeepOf } = {}) {
   const want = () => inv.items(bot).filter(i => i.count > 0 && inv.count(bot, i.name) > keep(bot, i))
   let rounds = 0; const skipped = new Set(); let depErr = null
   while (want().length && rounds++ < 6) {
@@ -462,7 +474,11 @@ async function roomToCraft (bot, keep = new Set()) {
   //  unarmoured, 2026-10-03. The caller walks back to its table after: craft.slotForResult)
   if (knownChests(bot).length) {
     if (distHome(bot) >= 48) return false
-    await depositAll(bot, { keep: (b, it) => keep.has(it.name) ? Infinity : keepCount(b, it) }).catch(() => false)
+    // (the shared keep first - the window's blocks stay; still no slot, only the recipe's own and the band's waited items do)
+    await depositAll(bot, { keep: (b, it) => keep.has(it.name) ? Infinity : depositKeepOf(b, it) }).catch(() => false)
+    if (inv.freeSlots(bot) > 0) return true
+    const waited = it => { if (!keepHook) return false; try { return keepHook(it) === Infinity } catch { return false } }
+    await depositAll(bot, { keep: (b, it) => keep.has(it.name) || waited(it) ? Infinity : keepCount(b, it) }).catch(() => false)
     return inv.freeSlots(bot) > 0
   }
   const want = require('./materials').wantedSet(bot)
@@ -477,4 +493,4 @@ async function roomToCraft (bot, keep = new Set()) {
   return inv.freeSlots(bot) > 0
 }
 
-module.exports = { SPARE_KIT, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+module.exports = { SPARE_KIT, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }

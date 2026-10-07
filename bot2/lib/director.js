@@ -1563,9 +1563,14 @@ function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.n
 // THE BUILD'S OWN DRAW is no haul: the castle round withdrew the window's blocks and the deposit rule banked them straight back
 // - "16 oak_leaves taken out ... back to the build", then "home with 66 items to store", then 64 taken out again, a minute a
 // round, 2026-10-04. The window's needs (cached 30s - nextNeeds is a pass over the box) are kept by the deposit
-let winKeepMemo = { at: 0, v: {} }
-function windowKeep () { if (Date.now() - winKeepMemo.at > 30000) { let v = {}; try { v = build.getJob() ? windowNeeds() : {} } catch {} winKeepMemo = { at: Date.now(), v } } return winKeepMemo.v }
-function depositKeep (b, i) { return Math.max(base.keepCount(b, i), windowKeep()[i.name] || 0) }
+// (kept 30s, and afresh whenever the band changes - what it waits on, its anchors: a keep from before the
+//  band rose to y129 had no dark oak planks in it; audit 2026-10-07)
+let winKeepMemo = { at: 0, v: {}, sig: '' }
+function bandSig () { try { return `${mem.get().buildWaiting || ''}|${(build.missingAnchors() || []).join(',')}` } catch { return '' } } // (not the placed count: nextNeeds is a pass over the box, and decide() asks this every loop - body first)
+function windowKeep () { const sig = bandSig(); if (Date.now() - winKeepMemo.at > 30000 || sig !== winKeepMemo.sig) { let v = {}; try { v = build.getJob() ? windowNeeds() : {} } catch {} winKeepMemo = { at: Date.now(), v, sig } } return winKeepMemo.v }
+// (THE ONE KEEP, registered with base: every deposit keeps the window's blocks, and the band's waited and anchor items whole)
+function bandKeep (i) { const w = mem.get().buildWaiting; let anchors = []; try { anchors = build.missingAnchors() || [] } catch {} if (i.name === w || anchors.includes(i.name)) return Infinity; return windowKeep()[i.name] || 0 }
+function depositKeep (b, i) { return base.depositKeepOf(b, i) }
 function depositHaulSize () { let n = 0; const seen = new Set(); for (const it of inv.items(bot)) { if (seen.has(it.name)) continue; seen.add(it.name); const k = depositKeep(bot, it); if (k !== Infinity) n += Math.max(0, inv.count(bot, it.name) - k) } return n }
 // the nearest natural wood growing around here (what the castle's wood cells will be made of)
 function nearestWood () {
@@ -2249,6 +2254,7 @@ function focus () {
 function recent () { const now = Date.now(); return recentDecisions.map(r => `${Math.round((now - r.at) / 60000)}m ago: ${r.name} - ${r.why}`) }
 async function start (b) {
   bot = b
+  base.setDepositKeep(bandKeep) // (the deposits' one keep: base.depositKeepOf)
   // the planner exists from the start: until the first plan, unsourced() answered "sourced" for everything (audit #36)
   try { mats.getPlanner(bot) } catch {}
   // respawned inside the safehouse: the door shut before anything else (a door left open under a patrol was a window
