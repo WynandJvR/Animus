@@ -1155,8 +1155,8 @@ async function escapeUpInner (bot) {
       const pairCost = (x, y, z) => [0, 1].reduce((t, dy) => t + (air(x, y + dy, z) ? 0 : finished(x, y + dy, z) ? 10 : 1), 0)
       // (and shut in by our own finished cells 2 min by day: one block of our own build, put back by the builder, beats a lost
       //  day - a closet with no door and finished walls only waited to dusk; audit 2026-10-07)
-      if (!finishedWait || world.dist3(finishedWait.at, f0) > 3 || Date.now() - finishedWait.seen > 60000) finishedWait = { at: { x: f0.x, y: f0.y, z: f0.z }, t: Date.now() }
-      finishedWait.seen = Date.now() // (a wait not seen for a minute is over: back here later, it starts again)
+      if (!finishedWait || world.dist3(finishedWait.at, f0) > 3 || Date.now() - finishedWait.seen > 300000) finishedWait = { at: { x: f0.x, y: f0.y, z: f0.z }, t: Date.now() }
+      finishedWait.seen = Date.now() // (a wait not seen for 5 min is over - the escape re-runs spaced out by back-offs; audit)
       const urgent = () => { const rf = require('./reflex'); return bot.health <= rf.hurtLine() || world.phase(bot) !== 'day' || rf.hostiles(16).some(h => h.e.name !== 'bat') || Date.now() - finishedWait.t > 120000 }
       // 1. the doors the room touches, nearest first: walked to, crossed (crossDoor opens a closed one)
       {
