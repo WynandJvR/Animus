@@ -505,7 +505,30 @@ function planFor (bot, needs, { noInFlight = false } = {}) {
   // (fuel is counted in coals - eight smelts each; a lava bucket, pack or bank, is a hundred smelts: twelve coals. Only
   //  the planner's count - never the 'fuel' class itself, or a torch would be crafted of a lava bucket; 2026-09-28)
   const lava = () => L.inv.count(bot, 'lava_bucket') + ((L.base.bankCounts() || {}).lava_bucket || 0)
-  return getPlanner(bot).plan(needs, { stock: n => stock(bot, n), inFlight, fuelCredit: lava() * 12 })
+  const res = scaffoldReserve(bot)
+  return getPlanner(bot).plan(needs, { stock: n => Math.max(0, stock(bot, n) - (res[n] || 0)), inFlight, fuelCredit: lava() * 12 })
+}
+// THE SCAFFOLD'S OWN FILLER IS NO BUILD STOCK: the builder keeps SCAFFOLD_WANT filler for its supports, pillars and towers
+//  (build.ensureScaffold), and a plan that counted it twice was never short of what the scaffold eats. Coarse dirt (2 dirt + 2
+//  gravel) read covered in the next layers by the 8 dirt in the pack - the scaffold's - so no trip ever went for dirt, the
+//  evening crafts made one craft a night and the 58 coarse dirt cells waited 'detached', 2026-10-07. Each filler kind but
+//  cobblestone (its smelt queue has its own keep-back) is reserved for what the other kinds' spare - beyond the build's own
+//  need of them - does not cover. -> { name: count }
+function scaffoldReserve (bot) {
+  const out = {}
+  try {
+    const b = L.build; const F = b.FILLER_ITEMS; const want = b.SCAFFOLD_WANT
+    if (!F || !want || !b.getJob || !b.getJob()) return out
+    const need = (b.cachedStatus(bot) || {}).need || {}
+    const names = new Set(Object.keys(Object.assign({}, L.inv.counts(bot), L.base.bankCounts() || {})).filter(n => F.test(n)))
+    const spare = {}; for (const n of names) spare[n] = Math.max(0, stock(bot, n) - (need[n] || 0))
+    for (const n of names) {
+      if (n === 'cobblestone') continue
+      let others = 0; for (const m of names) if (m !== n) others += spare[m]
+      out[n] = Math.min(stock(bot, n), Math.max(0, want - others))
+    }
+  } catch {}
+  return out
 }
 
 // The species to craft a wooden form in: the wood we hold the most of (any wood stands in).
@@ -629,6 +652,6 @@ function pickRaw (winRaw, totRaw, { blockedRaw = null, feasible = () => true, pe
 
 module.exports = { spareWool, reservedSpecies, isReservedWood,
   makePlanner, nodeOf, PREFER, RAW_COST, SMELT_INPUTS, CLASSES, WOODS, LOG_ANY, PLANKS_ANY, FUEL_ANY, RED_FLOWER, WOOD_FORM,
-  accepts, poolRe, hasRoute, unsourced, held, banked, stock, withdrawPool, planFor, getPlanner, formFor, makeCrafts, craftNode, pickRaw,
+  accepts, poolRe, hasRoute, unsourced, held, banked, stock, withdrawPool, planFor, scaffoldReserve, getPlanner, formFor, makeCrafts, craftNode, pickRaw,
   resetPlanner, exactWood, speciesOf, wanted, wantedSet, rawCost, copperAlt, copperBase, woodFamilyAlt, flowerClassOf, DYE_PLANTS, COMPOSTABLE, COMPOST_PER_MEAL, STRIPPED_LOG, COLOURS
 }

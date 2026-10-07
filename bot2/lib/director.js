@@ -1924,7 +1924,11 @@ async function castleWorkInner () {
   //  cobblestone left at all the builder "waited on glass" and every trip went looking for sand, 2026-09-27)
   const steer = blockedOn && build.infillItem(blockedOn) && Object.keys(mats.planFor(bot, windowNeeds()).raw).some(r => r === 'cobblestone') ? null : blockedOn
   const chain = steer ? Object.keys(mats.getPlanner(bot).plan({ [steer]: 1 }).raw) : []
-  const blockedRaw = chain.find(r => r !== 'fuel' && win.raw[r] > 0) || chain.find(r => win.raw[r] > 0) || null
+  let blockedRaw = chain.find(r => r !== 'fuel' && win.raw[r] > 0) || chain.find(r => win.raw[r] > 0) || null
+  // (THE BUILDER WAITS ON IT AND ITS RAW IS SHORT - in the whole build, if not on the next layers' paper: that raw is the
+  //  window's too. The builder waited on coarse dirt all evening, its dirt 34 short in the whole build and 'covered' in the
+  //  window, and the look-ahead never got to dirt - the cheapest raw sorts last, 2026-10-07)
+  if (!blockedRaw && steer && !(base.bankCount(steer) > 0)) { const r0 = chain.find(r => r !== 'fuel' && (tot.raw[r] || 0) > 0); if (r0) { blockedRaw = r0; win.raw[r0] = Math.max(win.raw[r0] || 0, Math.min(tot.raw[r0], 64)) } }
   // (the builder waits on an item whose raw the next layers' shortfall does not hold: said, with both sides - the band
   //  waited on oak_trapdoor for two hours while the rounds gathered leather and wool, 2026-09-29)
   if (steer && !blockedRaw && steerSaid !== steer) { steerSaid = steer; log('dir', `the builder waits on ${steer} (made from ${chain.join(', ') || 'nothing raw'}; ${base.bankCount(steer)} in the chests) - none of it is short, so no trip for it; the next layers are short of: ${Object.keys(win.raw).map(r => win.raw[r] + ' ' + r).join(', ') || 'nothing'}`) } // (said as it is: "its raw ... but the shortfall has none" read as a contradiction - the recipe's raw, covered by stock)

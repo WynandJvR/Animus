@@ -1493,7 +1493,9 @@ async function escapeUpInner (bot, { proven: provenBy = false } = {}) {
     const have = want && !oriented && !/_(stairs|slab|wall|fence|fence_gate|door|trapdoor|pane|button|plate|carpet|torch|lantern)$|^(glass_pane|iron_bars|ladder|vine)$/.test(want) ? bot.inventory.items().find(i => i.name === want || (tc.itemAlt && tc.itemAlt.test(i.name))) : null
     const ownItem = have ? have.name : null
     if (ownItem) log('move', `climbing out: the cell I stand in at ${fmt(f)} is the build's ${ownItem} - putting it in from below`)
-    if (await gather.towerUp(bot, ownItem ? { allowZones: ['*'], builder: true, item: ownItem } : { allowZones: ['*'] })) continue // (an escape: any zone, never a build cell but with its own block)
+    // (into the castle's own walking space only when survival needs it - escapeUrgent: hurt, night, a threat, stuck past the
+    //  wait; calm, the step cut in the side or the wait - never a block of ours on its ladder or its stairs)
+    if (await gather.towerUp(bot, ownItem ? { allowZones: ['*'], builder: true, item: ownItem } : { allowZones: ['*'], protectedOk: escapeUrgent(bot) })) continue // (an escape: any zone, never a build cell but with its own block)
     // no towering here (in water a jump never clears a block; or nothing to place): a step cut into the side - the two
     // cells over a solid side block cleared, and up onto it
     if (!await stepUpSide(bot)) { log('move', `climbing out: no way up from ${fmt(bot.entity.position)} (no tower: ${gather.towerWhy() || 'refused'}; no side to cut a step in)`); return false }
@@ -1748,7 +1750,7 @@ async function surface (bot, { shouldStop } = {}) {
       if (!qb || !world.isAirish(qb) || inZone(q, 1) || isProtected(qb, 'fill') || world.dropAt(bot, q.x + 0.5, q.y, q.z + 0.5) <= world.SAFE_DROP) continue
       if (await act.place(bot, q, filler.name, { noWalk: true, allowZones: ['*'] }).catch(() => false)) require('./litter').note(bot, q, filler.name)
     }
-    if (!await require('./gather').towerUp(bot, { allowZones: ['*'] })) break
+    if (!await require('./gather').towerUp(bot, { allowZones: ['*'], protectedOk: true })) break // (surfacing from under the rock: survival's)
   }
   if (!isUnderground(bot)) { log('move', `surfaced at y${Math.floor(bot.entity.position.y)} (climbed ${Math.floor(bot.entity.position.y) - y0})`); return true }
   // (a stair dug up through the rock first - rock both sides, no open column top to step off; a tower only if that fails. The

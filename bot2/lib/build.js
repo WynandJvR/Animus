@@ -1303,7 +1303,10 @@ async function placeSupport (bot, sp, j, { noPillar = false } = {}) {
   const record = p => { supportsLaid++; mem.update(m => { m.scaffold = m.scaffold || []; m.scaffold.push({ x: p.x, y: p.y, z: p.z }) }) }
   // (a support is a fill: never into a cell of the build nor a waiting hole's last open face - the protector's one
   //  question; act.place does not ask it, it places the build's own cells; audit)
-  const refused = p => { const b = world.at(bot, p.x, p.y, p.z); return !!b && move.isProtected(b, 'fill') }
+  // (and never in the finished build's walking space - the support itself nor any block of its pillar: a support pillar stood
+  //  on the castle's ladder top - cobblestone at -2289,130/131/132,-577, three ledger entries in a row, the ladder to the upper
+  //  floor capped for a day, 2026-10-07; only the support cell was asked, by its caller)
+  const refused = p => { const b = world.at(bot, p.x, p.y, p.z); return (!!b && move.isProtected(b, 'fill')) || walkProtected(p) }
   if (refused(sp)) return false
   // 1) straight on: any solid neighbour of the support cell will do (usually the wall we are building)
   const hasNeighbour = ALL_FACES.some(([dx, dy, dz]) => { const nb = world.at(bot, sp.x + dx, sp.y + dy, sp.z + dz); return nb && world.isSolid(nb) })
