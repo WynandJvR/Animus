@@ -391,11 +391,26 @@ async function shearTrip (bot, s, n, ctx = {}) {
   if (!await ensureShears(bot, ctx)) return 'blocked'
   // (the SPARES for the trip's leaves out of the chest before it leaves home - a pair is ~238 cuts: the one pair taken broke
   //  in the forest with four more in the chest, the trip tried to make new ones out there and ended at dusk, 2026-10-04)
+  // (by the CUTS left in the pairs, not by the pairs: a nearly spent pair out of the chest counted as one, it broke 22 leaves
+  //  into a 229-leaf trip, and the new pair's two ingots sent the bot to dig a new mine 150b off, 2026-10-07 01:43. At home:
+  //  the bank's pairs first, then new pairs made here - two ingots each, three at most a trip)
   if (s.leaves) {
-    const want = Math.max(1, Math.min(3, Math.ceil(n / 230)))
-    const good = () => inv.items(bot).filter(i => i.name === 'shears' && inv.durabilityLeft(bot, i) > 2).length
-    for (let i = 0; i < 6 && good() < want && base().bankCount('shears') > 0; i++) { if (!await base().withdraw(bot, 'shears', 1).catch(() => 0)) break }
+    const cutsLeft = () => inv.items(bot).filter(i => i.name === 'shears').reduce((t, i) => t + Math.max(0, Math.min(inv.durabilityLeft(bot, i), 1e6) - 2), 0)
+    for (let i = 0; i < 6 && cutsLeft() < n && base().bankCount('shears') > 0; i++) { if (!await base().withdraw(bot, 'shears', 1).catch(() => 0)) break }
     for (const it of inv.items(bot).filter(i => i.name === 'shears' && inv.durabilityLeft(bot, i) <= 2)) await bot.tossStack(it).catch(() => {})
+    if (cutsLeft() < n && base().distHome(bot) < 64) {
+      const pair = (world.data(bot).itemsByName.shears || {}).maxDurability || 238
+      // (SPARES ONLY FROM FREE INGOTS: pack and bank less the gear's share (ctx.ironKeep - the director's gearIronKeep; none
+      //  given, none free), and never a gather - with too few, ensure falls through to an iron mine trip for a spare. The
+      //  one pair ensureShears makes when none is held stays as it was; audit)
+      const free = Math.max(0, inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') - (ctx.ironKeep ? (ctx.ironKeep() || 0) : Infinity))
+      const more = Math.min(3, Math.ceil((n - cutsLeft()) / (pair - 2)), Math.floor(free / 2))
+      if (more > 0) {
+        const before = inv.count(bot, 'shears')
+        await craft().ensure(bot, 'shears', before + more, Object.assign({}, ctx, { noWithdraw: false })).catch(() => false)
+        log('forage', `spare shears for ${n} ${s.drops}: ${inv.count(bot, 'shears') - before} of ${more} made at home (${cutsLeft()} cuts in the pack, ${free} ingots free of the gear's)`)
+      } else log('forage', `spare shears for ${n} ${s.drops}: none made - ${free} ingots free of the gear's (${cutsLeft()} cuts in the pack)`)
+    }
   }
   const label = typeof s.drops === 'string' ? s.drops : 'grass'
   const target = inv.count(bot, s.drops) + n
@@ -414,6 +429,9 @@ async function shearTrip (bot, s, n, ctx = {}) {
     if (inv.freeSlots(bot) <= 1) { await base().makeRoom(bot, 3); if (inv.freeSlots(bot) <= 1) return inv.count(bot, s.drops) >= target || 'cut' }
     // (the pairs the trip's leaves wear out, in one iron run: a pair is ~238 cuts, and 2 ingots a run made a 3-minute detour
     //  for every 160-240 leaves of a 1600-leaf shortfall, 2026-10-04; three at most)
+    // (worn out out there with no iron in the pack: the trip ends - never a mine dug from wherever the leaves were for two
+    //  ingots; the spares are made at home before the next trip)
+    if (!shearsHeld(bot) && base().distHome(bot) >= 64 && inv.count(bot, 'iron_ingot') < 2) { log('forage', `the shears wore out ${Math.round(base().distHome(bot))}b from home with no iron in the pack - the trip ends here`); return inv.count(bot, s.drops) >= target || 'cut' }
     if (!shearsHeld(bot) && !await ensureShears(bot, ctx, s.leaves ? Math.max(1, Math.min(3, Math.ceil((target - inv.count(bot, s.drops)) / 230))) : 1)) return inv.count(bot, s.drops) >= target || 'cut'
     if (s.leaves && !noCrown) {
       const tree = crownTree(bot, s, crownSkip)

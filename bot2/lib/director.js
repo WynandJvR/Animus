@@ -2011,7 +2011,8 @@ async function gatherForInner (raw, short) {
     log('dir', `emptied the pack for the ${raw} trip: ${before} -> ${inv.freeSlots(bot)} free slots`)
   }
   const batch = Math.min(short, tripRoom())
-  const ctx = { shouldStop: dayStop }
+  // (ironKeep: the gear's ingots - gearIronKeep - for a trip's own crafts to leave alone: the spare shears; audit)
+  const ctx = { shouldStop: dayStop, ironKeep: () => gearIronKeep().iron_ingot }
   switch (raw) {
     // clay: a big batch - the walk to the water costs more than the digging (up to 64 blocks, 256 balls)
     case 'clay_ball': return clay.gather(bot, Math.min(short, 256), ctx)

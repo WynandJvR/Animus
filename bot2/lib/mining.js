@@ -135,7 +135,7 @@ function chooseEntrance (bot, oreLv = null) {
 // tunnel. mem.mine's top-level fields are the ACTIVE level's view (every reader - gather, move, build, director, litter,
 // reflex, commands, api - reads entrance/cursor/level as before); mem.mine.levels holds each level's own copy, and
 // setActive/saveMine are the one place they are synced.
-const LEVEL_FIELDS = ['stairTop', 'stairsEnd', 'stairsDir', 'dir', 'cursor', 'level', 'stairsDone', 'leg', 'legPos', 'shiftDir', 'blocks', 'oreY', 'faceFails', 'caveRun', 'farShift']
+const LEVEL_FIELDS = ['stairTop', 'stairsEnd', 'stairsDir', 'dir', 'cursor', 'level', 'stairsDone', 'leg', 'legPos', 'shiftDir', 'blocks', 'oreY', 'faceFails', 'caveRun', 'farShift', 'faceHeadings']
 const clone = v => v == null || typeof v !== 'object' ? v : JSON.parse(JSON.stringify(v))
 function copyFields (from, to) { for (const f of LEVEL_FIELDS) { if (from[f] === undefined) delete to[f]; else to[f] = clone(from[f]) } return to }
 // (a flight is straight: the stairs step one along and one down, and only a tunnel ever turns)
@@ -920,7 +920,24 @@ async function mineFor (bot, itemName, target, ctx = {}) {
     if (craft().GATHER[itemName] && craft().GATHER[itemName].web && m.stairsDone) { saveMine(m); log('mine', `the stairs are down at y${m.cursor.y} - to the cobwebs`); return await takeKnownOre(bot, itemName, target, ctx) }
     if (!ok) {
       if (++fails >= 3) {
-        if (turnSide >= 2) { log('mine', `boxed in at ${move.fmt(m.cursor)} - ahead, left and right all blocked - abandoning this mine`); abandonMine(m); return false }
+        if (turnSide >= 2) {
+          // A FACE BOXED IN IS NOT A LOST MINE: the stairs down are the work (a 90-block flight, ~8 minutes) - back to their
+          //  foot and the tunnel another way, never under the stairs (back along them takes their floor). Water beside the
+          //  face boxed the y15 tunnel in, the whole mine was given up, and the next iron run dug a new one from the surface
+          //  for 2 ingots, 2026-10-07 01:35-01:44. Each heading once; with none left, as before
+          const foot = m.stairsDone && m.stairsEnd
+          const sd = m.stairsDir || m.dir
+          const tried = (m.faceHeadings = m.faceHeadings || [{ x: sd.x, z: sd.z }])
+          const next = foot ? DIRS.find(d => !(d.x === -sd.x && d.z === -sd.z) && !tried.some(t => t.x === d.x && t.z === d.z)) : null
+          if (next) {
+            tried.push({ x: next.x, z: next.z })
+            log('mine', `boxed in at ${move.fmt(m.cursor)} - back to the stairs' foot at ${move.fmt(foot)}, the tunnel heading ${next.x},${next.z} (${tried.length - 1} of ${DIRS.length - 2} other ways)`)
+            m.cursor = clone(foot); m.dir = { x: next.x, z: next.z }; m.legPos = 0; m.leg = 0; m.shiftDir = null; m.caveRun = 0; m.farShift = false
+            saveMine(m); fails = 0; turnFrom = null; turnSide = 0
+            continue
+          }
+          log('mine', `boxed in at ${move.fmt(m.cursor)} - ahead, left and right all blocked${foot ? ', every way from the stairs\' foot tried' : ''} - abandoning this mine`); abandonMine(m); return false
+        }
         // stairs blocked (water, lava, a cave) well above the working depth: still under the rock, this is a depth like
         // any for cobble - tunnel here and keep the stairs already dug. On a cave-riddled mountain five new staircases
         // in an hour ended "blocked, far above the working depth" (2026-09-24). Only a staircase still near the surface
