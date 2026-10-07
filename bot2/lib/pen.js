@@ -49,8 +49,12 @@ const SEE = 40
 // (a flock remembered farther from home than this is not led home. 96 at first: the flocks round home were killed for wool
 //  before there were shears, and the nearest left were 238-277 out - the pen stood empty. Two led home once, then bred, is
 //  the one long walk a player makes; it starts only with the daylight for it: leadTicks)
-const LURE_REACH = 320
 const leadTicks = d => Math.round(d * 30) + 1200 // (a sheep's pace with the waits, ~1.5s a block, and the walk out)
+// (the reach is the lead a whole working day holds - leadTicks within the daylight, ~360 blocks - never a fixed 320: the
+//  flock is walked home only with the day left for it, wildKnown's own test, so the farthest one a morning can bring is
+//  the bound; operator 2026-10-07)
+const DAY_TICKS = 12000
+const LURE_REACH = Math.floor((DAY_TICKS - 1200) / 30)
 const FENCE_RE = /_fence$/
 const GATE_RE = /_fence_gate$/
 
@@ -361,7 +365,8 @@ async function stockInner (bot, { shouldStop } = {}, ctx = {}) {
   //  sky, at the home's own ground level or near it)
   const home0 = mem.get().home
   const onTop = p => { let surf = true; try { surf = require('./reflex').onSurface({ position: p }) } catch {} return surf && (!home0 || p.y > home0.y - 12) } // (the column's top ground, leaves and logs no ground - a forest flock is on top; audit)
-  const leadable = p => !inBuild(p) && onTop(p)
+  // (never someone else's: a sheep standing in another player's place is their flock - foreign.js; anti-grief)
+  const leadable = p => !inBuild(p) && onTop(p) && !move.inForeign(p)
   let wild = food().animals(bot, /^sheep$/, 48).filter(e => leadable(e.position))
   if (!wild.length) {
     const home = mem.get().home || bot.entity.position

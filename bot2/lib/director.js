@@ -31,6 +31,7 @@ const forage = require('./forage')
 const boat = require('./boat')
 const orchard = require('./orchard')
 const pen = require('./pen')
+const canefarm = require('./canefarm')
 const litter = require('./litter')
 const foreign = require('./foreign')
 let litterSeeded = false // (the pillars from before the ledger: looked for once a run, once the orchard's zone is set)
@@ -172,7 +173,7 @@ function note (name, ok) {
 // succeed" four times over, the watchdog's alarm, a backoff for nothing (late in the day, 25-64 from home; audit
 // 2026-09-28). One gate: a day chore whose stop holds waits, said once. (Survival - food, graves, tools, the bed - is
 // never held here; the castle's step does its home work first and minds its own stop.)
-const DAY_TASKS = new Set(['fillCraters', 'fillFreshCraters', 'farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
+const DAY_TASKS = new Set(['fillCraters', 'fillFreshCraters', 'farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'caneFarm', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
 const lateSaid = new Map()
 // held(name): may decide() offer it now? Not while backing off from failures (cooling), nor a day chore once its stop holds.
 // (cooling keeps its one meaning - "it failed recently": the recover rule reads cooling('food') as that evidence; audit)
@@ -729,6 +730,11 @@ function decide () {
     const o = orchard.orchard()
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, sc, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots; ${demandTrees.squares} squares and ${demandTrees.singles} singles wanted)` }
   }
+  // cane to hand and room for it at the water by home: the cane farm (canefarm.js - its trigger and planter one rule)
+  {
+    const cane = inv.count(bot, 'sugar_cane') + base.bankCount('sugar_cane')
+    if (dHome < 64 && world.phase(bot) === 'day' && !held('caneFarm') && canefarm.plantable(bot, cane)) return { name: 'caneFarm', why: `${cane} sugar cane to hand - planting the cane farm at the water by home (${canefarm.info().spots} of ${canefarm.CANE_MAX} stalks)` }
+  }
   // the sheep pen: built while the build wants wool, then stocked and bred (pen.work: the one rule for this and the task)
   // (a gap in a stocked pen's fence is the gate's errand - the flock walks out; audit)
   // (ahead of the build only the pen's short jobs at home - a gate, the shearing, the breeding - or anything when the build's
@@ -1219,6 +1225,11 @@ const TASKS = {
   async fixWater () { return farm.fixWater(bot, { shouldStop: dayStop }) },
   async harvest () { return farm.harvest(bot, { shouldStop: dayStop }) },
   async pen () { const w = pen.work(bot, penArgs()); return w ? pen.run(bot, w.kind, { shouldStop: dayStop }) : true },
+  async caneFarm () {
+    const want = canefarm.PER_RUN - inv.count(bot, 'sugar_cane')
+    if (want > 0 && base.bankCount('sugar_cane') > 0) await base.withdraw(bot, 'sugar_cane', Math.min(want, base.bankCount('sugar_cane'))).catch(() => 0)
+    return (await canefarm.plant(bot, { shouldStop: dayStop })) > 0
+  },
   async plant () {
     for (const [n, c] of Object.entries(base.bankCounts())) if (orchard.ANY_SAP_RE.test(n) && c > 0) await base.withdraw(bot, n, c).catch(() => 0)
     return (await orchard.plant(bot, { demand: demandTrees, shouldStop: dayStop })) > 0
@@ -2128,7 +2139,19 @@ async function gatherForInner (raw, short) {
       if (cut >= 2) { const r = await base.goHome(bot, { shouldStop: dayStop }); if (r.ok) return (await smelt.burnForCharcoal(bot, w, cut)) > 0 }
       return ok
     }
-    case 'wool': case 'white_wool': return food.woolFor(bot, Math.min(short, 16), ctx)
+    // THE PEN BEFORE THE OPEN RANGE: a wool trip is the pen's work first when it has any - a flock remembered within a
+    // day's lead walked home (stock), the penned sheep bred with the farm's wheat or shorn. The wild shear-or-kill trip
+    // took the wool once and left nothing to grow back: the castle pen stood empty with a flock remembered 269b out, its
+    // lead never chosen while the build had work (pen.work's trips run only in the build's gaps), 2026-10-07. The same
+    // trip slot between build rounds, by day (pen.work's own daylight rule for a lead), the open range when it has none
+    case 'wool': case 'white_wool': {
+      const w = pen.pen() ? pen.work(bot, penArgs()) : null
+      if (w && w.kind !== 'build') {
+        log('dir', `${raw}: the pen first - ${w.why}`)
+        if (await pen.run(bot, w.kind, ctx).catch(e => { log('dir', `the pen's ${w.kind} threw: ${e.message}`); return false })) return true
+      }
+      return food.woolFor(bot, Math.min(short, 16), ctx)
+    }
     case 'red_flower': return gather.pickPlants(bot, /^(poppy|red_tulip|rose_bush)$/, /^(poppy|red_tulip|rose_bush)$/, Math.min(short, 16), ctx)
     default:
       // A SPECIES' LOGS (an exact-wood build asks for spruce_log, not 'log'): the orchard's grown trees of THAT species first
