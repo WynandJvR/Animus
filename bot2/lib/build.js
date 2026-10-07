@@ -1549,12 +1549,13 @@ function detourTooLong (bot, p, len = null) {
 function canWalkTo (bot, p) { return !reachCurrent(bot) || reach.capped || (reach.cells.has(key(p)) && !detourTooLong(bot, p)) }
 // A STAND THE WALK SEARCH REACHES within a player's reach of p (the eye within 4.3 of its centre), the nearest to me: the
 // stand; false when the search is current and has none; null when it is no answer (stale, capped, none from here)
-function reachStandFor (bot, p) {
+// (detour: true - a stand the search reaches by a long way round counts too: the legs refuse that route, the walker walks it)
+function reachStandFor (bot, p, { detour = false } = {}) {
   if (!reachCurrent(bot) || reach.capped) return null
   const me = bot.entity.position; let best = null; let bd = Infinity
   for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 2; dy++) {
     const s0 = { x: p.x + dx, y: p.y + dy, z: p.z + dz }
-    if (!reach.cells.has(key(s0)) || detourTooLong(bot, s0)) continue
+    if (!reach.cells.has(key(s0)) || (!detour && detourTooLong(bot, s0))) continue
     const ex = p.x - s0.x; const ey = p.y + 0.5 - world.eyeAt(bot, s0); const ez = p.z - s0.z // (the eye from the floor's real top: world.eyeAt)
     if (ex * ex + ey * ey + ez * ez > 4.3 * 4.3) continue
     const d = world.dist3(s0, me); if (d < bd) { bd = d; best = s0 }
@@ -1633,6 +1634,10 @@ async function pillarTo (bot, c, first, stop = cellStop) {
   return false
 }
 let lastPlaceFail = ''
+// (getInReach's short cut past the look-at walker: taken once a cell - its next try walks - and never when the step has
+//  nothing else to try; audit)
+const noStandOnce = new Set()
+let stepTry = null // ({ k, alone }: the build step's own try of the cell - only that caller knows a "not tried"; hut.js and the rest never get the short cut)
 // (where a try's time goes, for the step profile: the walk into reach (with its pillars), the digs clearing the cell - the
 //  rest is the place itself; 22% of castle time went to placing at ~2s a block, 2026-09-28 - measured, not guessed)
 const placeProf = { reach: 0, dig: 0 }
@@ -1761,6 +1766,29 @@ async function placeCell (bot, c, j = job) {
       if (r0 && r0.why === 'shut in') return why('shut in - the escape has the body')
       if (act.reach(bot, pos, 4.3)) return true
       if (cellOutOfTime()) return why(`could not get within reach (its stand ${move.fmt(rs)} in my walk not reached: ${r0 ? r0.why : '?'}; its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`)
+    }
+    // NO STAND IN MY WALK AND NO PILLAR GOT THERE - the cell rests, said, never the open-ended look-at walk: with the search
+    // current and answering "none", that walk timed out or stuck 15 of 21 times (567s against 74s for its 6 arrivals) since
+    // 14:04, the body led down slopes and into pockets, 2026-10-07. A pillar went up first for a cell above (above). The walk
+    // waits for a change - a block placed near it, another band, the rest's own end (a miss like any); the look-at walker
+    // stays only where the search has no answer (unknown, capped)
+    // (bounded - the look-at walker is also the only way in for a cell that needs a bridge or a dig, so the short cut is taken
+    //  ONCE a cell (noStandOnce), never on a cell with a miss of its own already, never for the band's last ready cell or the
+    //  job's last cells (stepTry.alone), only in the build step's own try, and it is NOT TRIED, not a miss: no fail counted, nothing rested round it, the room
+    //  rule's work list keeps it (the step holds it back for this step only); audit)
+    // (and a stand cut only by the detour rule - reached the long way round, which the legs refuse - is walked to: the walker
+    //  to that stand, not the open look-at goal)
+    if (rs === false) {
+      const far = reachStandFor(bot, pos, { detour: true })
+      if (far) {
+        const r1 = await goSite(bot, new goals.GoalBlock(far.x, far.y, far.z), 'place', { shouldStop: cellStop, why: `its stand ${move.fmt(far)} only the long way round` })
+        if (r1 && r1.why === 'shut in') return why('shut in - the escape has the body')
+        if (act.reach(bot, pos, 4.3)) return true
+        if (cellOutOfTime()) return why(`could not get within reach (its stand ${move.fmt(far)} the long way round not reached: ${r1 ? r1.why : '?'})${whereFrom()}`)
+      } else if (stepTry && stepTry.k === key(c) && !stepTry.alone && !noStandOnce.has(key(c)) && !failsOf(c)) {
+        noStandOnce.add(key(c))
+        return why(`not tried: no stand in my walk reaches it${pillared ? ', and the pillar did not get there' : ''} - the look-at walk next time${whereFrom()}`)
+      }
     }
     const goal = faces ? new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces, LOS: true }) : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 })
     // (why the walker walks, said with its outcome: the next sample tells the cells the search has no stand for from the
@@ -2272,7 +2300,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     }
     if (wallsMeIn(bot, c)) { holdBack.add(key(c)); log('build', `${c.name} at ${move.fmt(c)} would wall me in from ${move.fmt(world.feetPos(bot))} - later`); tpick = Date.now(); continue }
     const hadItem = c.pour ? inv.items(bot).some(i => i.name === c.item) : true // (a pour's bucket before the try: spent into a leak is the cell's miss; audit)
-    const ok = await placeCell(bot, c)
+    stepTry = { k: key(c), alone: ready.filter(q => !holdBack.has(key(q)) && key(q) !== key(c)).length === 0 || todo.length <= 20 }
+    let ok; try { ok = await placeCell(bot, c) } finally { stepTry = null }
+    // (NOT TRIED - getInReach's one short cut past the look-at walk: no fail, no rest, no own way; held back this step only;
+    //  the next step's try walks; audit)
+    if (!ok && /^not tried\b/.test(lastPlaceFail || '')) { holdBack.add(key(c)); log('build', `${c.name} at ${move.fmt(c)}: ${lastPlaceFail}`); tpick = Date.now(); continue }
     // (a walk stopped by the step's own stop - dusk, survival - is no verdict on the cell: no miss, no rest, no own way; an
     //  own miss lets the cell be covered over; audit 2026-10-06)
     // (and SHUT IN - the escape has the body, or waits out its finished-wall rule: no cell's fault; counted a miss, every cell
