@@ -1886,6 +1886,7 @@ async function castleWorkInner () {
   let carrying = 0
   for (const name of Object.keys(next)) carrying += countOf(name)
   let blockedOn = null
+  let detachedOn = null // (the step's missing item that holds no band - none in stock, its holes kept open: the steer below)
   // (starved of stone: straight to the mine, not a build step over the few cells in hand - eight minutes placed one
   //  block 58 away while the next layers were 1900 cobblestone short, and the mine got the last three, 2026-09-27)
   const winShort = mats.planFor(bot, next).raw.cobblestone || 0
@@ -1900,6 +1901,7 @@ async function castleWorkInner () {
     if (roundPh) roundPh.placed = (roundPh.placed || 0) + (r.placed || 0) // (the step's own count: the cached status lags)
     log('dir', `build step: placed ${r.placed}${r.blockedOn ? (r.blockedHolds ? ', waiting on ' + r.blockedOn : `, ${r.blockedOn} missing (detached - holding nothing)`) : ''}`) // (a wait nobody is in is not named as one: "waiting on oak_trapdoor" for two hours held nothing, 2026-09-29; audit)
     blockedOn = r.blockedHolds ? r.blockedOn : null // (what the round steers by: only what holds the band)
+    detachedOn = !r.blockedHolds && r.blockedOn && !build.infillItem(r.blockedOn) ? r.blockedOn : null
     // (infill - glass, bars, lanterns - waited on while the structure still rises is no morning's errand: the sand
     //  for 50 windows took every morning's best hours while 30k blocks of wall could go up; it comes last)
     // (and only an item that holds the band: one with none in stock is named when nothing else is missing, and its trip
@@ -1929,6 +1931,14 @@ async function castleWorkInner () {
   //  window's too. The builder waited on coarse dirt all evening, its dirt 34 short in the whole build and 'covered' in the
   //  window, and the look-ahead never got to dirt - the cheapest raw sorts last, 2026-10-07)
   if (!blockedRaw && steer && !(base.bankCount(steer) > 0)) { const r0 = chain.find(r => r !== 'fuel' && (tot.raw[r] || 0) > 0); if (r0) { blockedRaw = r0; win.raw[r0] = Math.max(win.raw[r0] || 0, Math.min(tot.raw[r0], 64)) } }
+  // (and the step's DETACHED item - missing, holding no band, its cells kept open as waiting holes: the same rule. The coarse
+  //  dirt's cells waited 'detached - holding nothing' round after round and the round never steered at all: only a band's wait
+  //  did, 2026-10-07 20:28-20:38. Its raw short in the whole build is the window's - after the band's own, never instead)
+  if (!blockedRaw && detachedOn && detachedOn !== steer) {
+    let chainD = []; try { chainD = Object.keys(mats.getPlanner(bot).plan({ [detachedOn]: 1 }).raw) } catch {}
+    const r0 = chainD.find(r => r !== 'fuel' && (win.raw[r] || 0) > 0) || chainD.find(r => r !== 'fuel' && (tot.raw[r] || 0) > 0)
+    if (r0) { blockedRaw = r0; win.raw[r0] = Math.max(win.raw[r0] || 0, Math.min(tot.raw[r0] || 0, 64)); log('dir', `the step's missing ${detachedOn} (none in stock, its cells kept open) is made of ${chainD.join(', ')} - ${r0} short ${tot.raw[r0] || win.raw[r0]} in the whole build: the window's raw`) }
+  }
   // (the builder waits on an item whose raw the next layers' shortfall does not hold: said, with both sides - the band
   //  waited on oak_trapdoor for two hours while the rounds gathered leather and wool, 2026-09-29)
   if (steer && !blockedRaw && steerSaid !== steer) { steerSaid = steer; log('dir', `the builder waits on ${steer} (made from ${chain.join(', ') || 'nothing raw'}; ${base.bankCount(steer)} in the chests) - none of it is short, so no trip for it; the next layers are short of: ${Object.keys(win.raw).map(r => win.raw[r] + ' ' + r).join(', ') || 'nothing'}`) } // (said as it is: "its raw ... but the shortfall has none" read as a contradiction - the recipe's raw, covered by stock)
