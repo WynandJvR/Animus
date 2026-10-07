@@ -124,8 +124,23 @@ for (const p of stands) {
 }
 console.log(`${deadEnds} dead ends the walk steps into (no planner move out); ${deadMissed} the walk model reads as open; ${dropped} dropped by rooms.deadEnd, ${droppedLeavable} of them leavable`)
 console.log(`${modelOnly} stands the model alone reads as closed, kept (${Object.entries(modelOnlyBy).map(([c, n]) => n + ' ' + c).join(', ')})`)
+// WEDGE CELLS: a floor, the feet free, and a block with a box in the HEAD cell that does not fill it - a closed gate, a fence,
+// a wall, a shut trapdoor, a campfire over the head. A body can stand in such a cell beside the block (0.3 wide, the block a
+// plane), and the planner's steps out of it are checked on the cells they go to, never on the one they leave: the first step
+// east ran through a gate's plane at head height, "stuck x3" for 3 minutes, 2026-10-07 13:19. The model must never call
+// one a stand (the walker seats the body out of one first: move.seatBody); the planner's moves out of them are counted
+let wedges = 0; let wedgeStands = 0; let wedgeMoves = 0
+for (let x = 0; x < S.x; x++) for (let y = 1; y < S.y - 2; y++) for (let z = 0; z < S.z; z++) {
+  const fl = at(x, y - 1, z); const ft = at(x, y, z); const hd = at(x, y + 1, z)
+  if (!fl || !world.isSolid(fl) || !ft || !world.bodyPassable(ft) || !hd || hd.boundingBox !== 'block' || world.isOpenTrapdoor(hd) || /_door$|ladder/.test(hd.name)) continue
+  const full = (hd.shapes || []).some(q => q[0] <= 0 && q[1] <= 0 && q[2] <= 0 && q[3] >= 1 && q[4] >= 1 && q[5] >= 1)
+  if (full) continue
+  wedges++; if (W.st(x, y, z)) wedgeStands++
+  wedgeMoves += plannerNext({ x, y, z }).filter(m => m.x !== x || m.z !== z).length
+}
+console.log(`${wedges} wedge cells (a part block at the head over a floor); ${wedgeStands} the model calls a stand; the planner offers ${wedgeMoves} steps out of them through their own block`)
 // (the gate: no step the planner refuses, but a ladder's - the climbs are modelled on their own)
 const hard = Object.entries(byClass).filter(([c]) => !/ladder/.test(c)).reduce((t, [, n]) => t + n, 0)
-const fails = [hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
+const fails = [hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
 console.log(fails.length ? `FAIL ${fails.join('; ')}` : 'PASS')
 process.exit(fails.length ? 1 : 0)

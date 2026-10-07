@@ -853,7 +853,46 @@ async function goToInner (bot, goal, opts, a) {
   }
   return r
 }
+// A BODY WEDGED BESIDE A BLOCK OF ITS OWN COLUMN - a closed gate, a fence, a wall, a shut trapdoor at the feet or the head
+// of the cell the planner starts it in (world.standCell): the planner's every step from that node is checked on the cells
+// it goes TO, never on the one it leaves, and the first step east ran through the gate's plane at head height - the body
+// stood 0.3 beside it, "stuck x3" walk after walk on the castle's west rim for 3 minutes, 2026-10-07 13:19. The walk model
+// never calls such a cell a stand (world.standable); the body is seated first in a cell it overlaps that is one - the walk
+// then starts where the planner and the model agree. True when it moved
+const WEDGE_EXEMPT_RE = /_door$/
+// (never against a reflex - one runner: a fight, a flight, the edge's hold own the body; this asks before it moves and at
+//  every tick, and lets go the moment one takes it. No waitReflex - a reflex walking through goTo would wait on itself; audit)
+async function seatBody (bot) {
+  if (!bot.entity || !bot.entity.onGround || world.feetInWater(bot) || reflexActive()) return false
+  const sc = world.standCell(bot)
+  if (world.standable(bot, sc.x, sc.y, sc.z)) return false
+  const wedging = b => !!b && b.boundingBox === 'block' && !world.isOpenTrapdoor(b) && !world.CLIMBABLE_RE.test(b.name) && !WEDGE_EXEMPT_RE.test(b.name)
+  if (![0, 1].some(dy => wedging(world.at(bot, sc.x, sc.y + dy, sc.z)))) return false
+  const p = bot.entity.position; const cells = []
+  for (const x of [Math.floor(p.x - 0.3), Math.floor(p.x + 0.3)]) for (const z of [Math.floor(p.z - 0.3), Math.floor(p.z + 0.3)]) if ((x !== sc.x || z !== sc.z) && !cells.some(c => c.x === x && c.z === z)) cells.push({ x, y: sc.y, z })
+  const to = cells.filter(c => world.standable(bot, c.x, c.y, c.z)).sort((a, b) => Math.hypot(a.x + 0.5 - p.x, a.z + 0.5 - p.z) - Math.hypot(b.x + 0.5 - p.x, b.z + 0.5 - p.z))[0]
+  if (!to) return false
+  const what = [0, 1].map(dy => world.at(bot, sc.x, sc.y + dy, sc.z)).find(wedging)
+  log('move', `wedged beside the ${what.name} in my own cell ${fmt(sc)} - seating into ${fmt(to)} before the walk`)
+  const t0 = Date.now()
+  try {
+    while (Date.now() - t0 < 1500) {
+      if (reflexActive() || !bot.entity) break
+      const q = bot.entity.position; const dx = to.x + 0.5 - q.x; const dz = to.z + 0.5 - q.z
+      if (Math.hypot(dx, dz) < 0.2) break
+      await bot.look(Math.atan2(-dx, -dz), 0, true).catch(() => {})
+      if (reflexActive()) break
+      bot.setControlState('sprint', false); bot.setControlState('forward', true)
+      await sleep(50)
+    }
+  } finally {
+    // (only our own keys: a reflex that took over set its own - the forward and sprint we held are ours to drop, never its)
+    if (!reflexActive()) { bot.setControlState('forward', false); bot.setControlState('sprint', false) }
+  }
+  return true
+}
 async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, allowZones, label, shouldStop, dryHead }) {
+  await seatBody(bot).catch(() => false)
   // (time the reflexes hold the body is not the walk's time: a fight past the deadline turned into a "timeout" verdict on
   //  the goal - the deadline moves on by every wait; audit)
   // (bounded: at most twice the walk's own time added - a reflex that held on through every wait made one 30s walk forty
@@ -1081,6 +1120,31 @@ async function escapeUpInner (bot, { proven: provenBy = false } = {}) {
     // (the ground flag settles first: mineflayer reads onGround false a tick at a time while standing - "came down our pillar:
     //  from X to X" three times, 2026-10-03)
     await gather.landed(bot, 600)
+    // OUR OWN GATE, TRAPDOOR OR DOOR SHUT IN THE BODY'S CELLS - opened, never dug, before any climb or wall: a closed gate of the
+    // build at head height beside the body held it on the castle's rim 3 minutes, the climb refused the campfire over it, and
+    // the operator dug the gate, 2026-10-07 13:22. Opened, the gate is no wall (a gate's open state is no part of done; the
+    // finish sets it as drawn - build.setGates). The cells the hitbox overlaps, at the feet and the head
+    {
+      const j0 = (() => { try { return require('./build').getJob() } catch { return null } })()
+      const p = bot.entity.position; const sc = world.standCell(bot); const seen = new Set(); let opened = 0
+      // (never what the body STANDS on: a shut bottom trapdoor of a neighbour cell holding the feet on the rim reads in the feet
+      //  layer when the centre cell has no floor - opened, a fall of 12; audit. gather.standingOn, and any closed trapdoor at
+      //  the feet whose top is at or under them)
+      const under = new Set(gather.standingOn(bot).map(c => c.x + ',' + c.y + ',' + c.z))
+      const holdsFeet = (b, q) => under.has(q.x + ',' + q.y + ',' + q.z) || (/_trapdoor$/.test(b.name) && q.y + world.floorTop(b) <= p.y + 0.01)
+      for (const x of [Math.floor(p.x - 0.3), Math.floor(p.x + 0.3)]) for (const z of [Math.floor(p.z - 0.3), Math.floor(p.z + 0.3)]) for (const dy of [0, 1]) {
+        const q = { x, y: sc.y + dy, z }; const k = q.x + ',' + q.y + ',' + q.z; if (seen.has(k)) continue; seen.add(k)
+        const b = world.at(bot, q.x, q.y, q.z)
+        if (!b || !/_fence_gate$|_trapdoor$|_door$/.test(b.name) || /^iron_/.test(b.name) || inForeign(q)) continue
+        if (!(j0 && j0.index && j0.index.has(k))) continue // (ours: a cell of the build)
+        let open = null; try { open = String(b.getProperties().open) } catch {}
+        if (open !== 'false' || holdsFeet(b, q)) continue
+        const ok = await act.useOn(bot, q, null, { accept: b2 => { try { return String(b2.getProperties().open) === 'true' } catch { return false } }, noWalk: true, allowZones: ['build', 'base'] }).catch(() => false)
+        log('move', `stuck at ${fmt(f0)}: our shut ${b.name} at ${fmt(q)} is in my own cells - ${ok ? 'opened it' : 'it would not open'}`)
+        if (ok) opened++
+      }
+      if (opened) { clearGiveUps(f0); return true }
+    }
     if (onTop()) {
       log('move', `stuck on blocks of ours at ${fmt(f0)} with no step that is not over a drop - digging down through them`)
       // (THE descent - gather.climbDownPillar: the block the body stands on while it is ours, each drop to the next solid
