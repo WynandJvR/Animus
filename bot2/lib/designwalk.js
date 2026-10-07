@@ -72,15 +72,40 @@ function routeTo (graph, k) {
 // walk already reaches (reachHas), every stand after it: a floor under it (solid, or a ladder - or the stand itself in a
 // ladder), and its feet and head cells open or OUR strays in the walking space (isOurs: the snapshot diff, at(x,y,z): the
 // live world). -> { strays: [{x,y,z}], blocked: reason | null }. Only a route blocked by nothing but our strays is ours to open
-function routeBlockers (graph, d, { reachHas, at, isOurs, isProtected }) {
-  const route = routeTo(graph, typeof d === 'string' ? d : key(d))
-  let from = 0; for (let i = route.length - 1; i >= 0; i--) if (reachHas(route[i])) { from = i; break }
+// (A ROUTE STAND IS MET ONE UP OR DOWN: the design stands on its own finished floor - a carpet, a slab - and the walk on the
+//  floor as it is now, a block lower or higher in the same column. Matched on its own height only, no stand of any route was
+//  ever "in my walk": every walk-back began at the route's far start, on the site's old ground outside, and every route was
+//  declined there - "grass_block at -2299,118,-585 - not ours", 32 times, the ladder cap left standing, 2026-10-07 18:04-18:14)
+const near = (has, k) => { const s = parse(k); return [0, -1, 1].some(dy => has(`${s.x},${s.y + dy},${s.z}`)) }
+// THE DESIGN'S ROUTE TO d FROM WHERE THE WALK ALREADY GOES: a search in the finished build's own steps (w, its world) from
+// every design stand the walk reaches (reachHas, met one up or down) to d - the shortest way in from the body's side, never
+// the graph's one route from the ground outside (whose far start the site's levelling had moved). -> [keys] or null
+async function routeFrom (w, graph, reachHas, d, { tick = async () => {}, cap = 20000 } = {}) {
+  const W = rooms.walkModel(w, () => false, { opens: true })
+  const dk = typeof d === 'string' ? d : key(d)
+  const prev = new Map(); const q = []
+  for (const k of graph.parent.keys()) if (near(reachHas, k)) { prev.set(k, null); q.push(parse(k)) }
+  if (prev.has(dk)) return [dk]
+  for (let i = 0; i < q.length && prev.size < cap; i++) {
+    for (const n of W.next(q[i])) { const k = key(n); if (prev.has(k)) continue; prev.set(k, key(q[i])); if (k === dk) { const out = []; let cur = k; while (cur != null) { out.push(cur); cur = prev.get(cur) } return out.reverse() } q.push(n) }
+    if (i % 32 === 0) await tick()
+  }
+  return null
+}
+function routeBlockers (graph, d, { reachHas, at, isOurs, isProtected, route: given = null }) {
+  const route = given || routeTo(graph, typeof d === 'string' ? d : key(d))
+  let from = -1; for (let i = route.length - 1; i >= 0; i--) if (near(reachHas, route[i])) { from = i; break }
+  if (from < 0) return { strays: [], blocked: 'no stand of its route in my walk' }
   const open = b => !!b && (world.bodyPassable(b) || world.isOpenTrapdoor(b) || /_door$|_fence_gate$|_carpet$|^ladder$|_trapdoor$/.test(b.name))
   const strays = []
   for (const k of route.slice(from + 1)) {
     const s = parse(k)
     const fl = at(s.x, s.y - 1, s.z); const ft = at(s.x, s.y, s.z)
-    if (!(ft && /^ladder$/.test(ft.name)) && !(fl && (world.isSolid(fl) || /^ladder$/.test(fl.name)))) return { strays, blocked: `no floor yet under ${k}` }
+    // (a floor: solid, or a ladder - the stand itself in a ladder; or, its own thin floor not laid yet (a carpet's cell open),
+    //  the block under that: the body stands one lower, as the walk would)
+    const fl2 = at(s.x, s.y - 2, s.z)
+    const floorOk = (ft && /^ladder$/.test(ft.name)) || (fl && (world.isSolid(fl) || /^ladder$/.test(fl.name))) || (fl && world.isAirish(fl) && fl2 && world.isSolid(fl2))
+    if (!floorOk) return { strays, blocked: `no floor yet under ${k}` }
     for (const dy of [0, 1]) {
       const q = { x: s.x, y: s.y + dy, z: s.z }; const b = at(q.x, q.y, q.z)
       if (open(b)) continue
@@ -90,4 +115,4 @@ function routeBlockers (graph, d, { reachHas, at, isOurs, isProtected }) {
   }
   return { strays, blocked: null }
 }
-module.exports = { designWorld, designGraph, protectedOf, routeTo, routeBlockers, parse, key }
+module.exports = { designWorld, designGraph, protectedOf, routeTo, routeFrom, routeBlockers, parse, key }

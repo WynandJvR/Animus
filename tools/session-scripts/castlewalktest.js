@@ -280,20 +280,27 @@ try {
   // (2) THE CLEAR, on the finished castle with our strays where they stood live (the ladder's cap, the hall corridor's dirt,
   //     the hall's andesite): the selection (designwalk.routeBlockers) from where the walk reaches, the strays taken out,
   //     and the tops reached after
-  const strayAt = new Map([['-2289,130,-577', 'cobblestone'], ['-2266,122,-591', 'dirt'], ['-2266,123,-592', 'dirt'], ['-2272,123,-593', 'andesite'], ['-2271,123,-593', 'andesite']])
+  const strayAt = new Map([['-2289,130,-577', 'cobblestone'], ['-2289,131,-577', 'cobblestone'], ['-2266,122,-591', 'dirt'], ['-2266,123,-592', 'dirt'], ['-2272,123,-593', 'andesite'], ['-2271,123,-593', 'andesite']])
   const strayBlocks = new Map([...strayAt].map(([k0, n]) => [k0, Block.fromProperties(n, {}, 0)]))
-  const liveAt = (x, y, z) => strayBlocks.get(`${x},${y},${z}`) || wD.at(x, y, z)
+  // (and as it stands live: its carpets not laid yet - the stands a block lower than the design's, as at 18:04 when every
+  //  route was declined at its far start; designwalk.routeBlockers meets a route stand one up or down)
+  const airB = Block.fromProperties('air', {}, 0)
+  const grassB = Block.fromProperties('grass_block', {}, 0)
+  // (and the ground round it a block higher than the snapshot's - the site's levelling and foundation: grass where it was air -
+  //  so the route's outside stretch stands a block off the design's own)
+  const outside = (x, z) => x < box.x1 || x > box.x2 || z < box.z1 || z > box.z2
+  const liveAt = (x, y, z) => { const sb = strayBlocks.get(`${x},${y},${z}`); if (sb) return sb; const b = wD.at(x, y, z); if (outside(x, z) && world.isAirish(b)) { const u = wD.at(x, y - 1, z); if (u && world.isSolid(u) && !world.isAirish(u) && world.isAirish(wD.at(x, y + 1, z)) && /grass|dirt|stone|sand|gravel|andesite|diorite|granite/.test(u.name)) return grassB } return /_carpet$/.test(b.name) ? airB : b }
   const wL = Object.assign({}, wD, { at: liveAt, standable: (x, y, z) => world.standable({ blockAt: v => liveAt(v.x, v.y, v.z) }, x, y, z) })
   sl = Date.now(); const gL = await dw.designGraph(wL, box, { x1: R0.x1, x2: R0.x2, z1: R0.z1, z2: R0.z2, y1: R0.y1, y2: R0.y2 }, { tick: tickD })
   const before = tops.filter(k0 => gL.parent.has(k0))
   const selected = new Map()
-  for (const k0 of tops) { const r = dw.routeBlockers(g, k0, { reachHas: kk => gL.parent.has(kk), at: liveAt, isOurs: q => strayBlocks.has(key(q)), isProtected: q => prot.has(key(q)) }); for (const q of r.strays) selected.set(key(q), q); if (r.blocked) console.log('  route to ' + k0 + ': ' + r.blocked) }
+  for (const k0 of tops) { const rt = await dw.routeFrom(wD, g, kk => gL.parent.has(kk), k0, { tick: tickD }); const r = dw.routeBlockers(g, k0, { route: rt || undefined, reachHas: kk => gL.parent.has(kk), at: liveAt, isOurs: q => strayBlocks.has(key(q)), isProtected: q => prot.has(key(q)) }); for (const q of r.strays) selected.set(key(q), q); if (r.blocked) console.log('  route to ' + k0 + ': ' + r.blocked) }
   for (const k0 of selected.keys()) strayBlocks.delete(k0)
   sl = Date.now(); const gA = await dw.designGraph(wL, box, { x1: R0.x1, x2: R0.x2, z1: R0.z1, z2: R0.z2, y1: R0.y1, y2: R0.y2 }, { tick: tickD })
   const after = tops.filter(k0 => gA.parent.has(k0))
   // (left blocking: the strays the selection would still find past the walk's reach after the clear - none; the others stand
   //  off the way the walk takes, and the teardown's rule takes them: never kept in a protected cell)
-  const leftOnRoutes = tops.reduce((t, k0) => t + dw.routeBlockers(g, k0, { reachHas: kk => gA.parent.has(kk), at: liveAt, isOurs: q => strayBlocks.has(key(q)), isProtected: q => prot.has(key(q)) }).strays.length, 0)
+  let leftOnRoutes = 0; for (const k0 of tops) { const rt = await dw.routeFrom(wD, g, kk => gA.parent.has(kk), k0, { tick: tickD }); leftOnRoutes += dw.routeBlockers(g, k0, { route: rt || undefined, reachHas: kk => gA.parent.has(kk), at: liveAt, isOurs: q => strayBlocks.has(key(q)), isProtected: q => prot.has(key(q)) }).strays.length }
   const strayInProt = [...strayAt.keys()].filter(k0 => prot.has(k0)).length
   design = { stands: g.stands, prot: prot.size, ms: msD, longest: longestD, floors: floors.length, unreachedFloors: unreachedFloors.length, topsMissing, before: before.length, after: after.length, selected: selected.size, leftOnRoutes, strayInProt }
   console.log(`design walk: ${g.stands} stands of the finished castle, ${prot.size} protected cells - ${msD}ms, longest slice ${longestD}ms; its own ways up reached: ${tops.length - topsMissing.length}/${tops.length}; upper groups of 20+ stands: ${floors.length - unreachedFloors.length} of ${floors.length} reached by the walk model`)

@@ -1693,16 +1693,22 @@ async function clearDesignWay (bot, c) {
   const ds = []
   for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 1; dy++) {
     const s = { x: c.x + dx, y: c.y + dy, z: c.z + dz }; const k = key(s)
-    if (!design.parent.has(k) || reach.cells.has(k)) continue
+    if (!design.parent.has(k) || [0, -1, 1].some(dy => reach.cells.has(`${s.x},${s.y + dy},${s.z}`))) continue // (met one up or down: designwalk.routeBlockers)
     if (!ring.eyeReaches({ x: s.x + 0.5, y: s.y, z: s.z + 0.5 }, { x: c.x + 0.5, y: c.y, z: c.z + 0.5 })) continue
     ds.push(s)
   }
   ds.sort((a, b) => world.dist3(a, c) - world.dist3(b, c))
+  // (said ONCE a call - what was considered and why each was declined, counted; a call a cluster: ringFor marks the cluster)
+  const declined = {}; let dwWorld = null
   for (const d of ds.slice(0, 6)) {
     if (designTried.has(key(d) + '@' + planBand)) continue
     designTried.add(key(d) + '@' + planBand)
-    const { strays, blocked } = designwalk.routeBlockers(design, d, { reachHas: k => reach.cells.has(k), at: (x, y, z) => world.at(bot, x, y, z), isOurs: q => isStray(bot, q.x, q.y, q.z), isProtected: q => walkProtected(q) })
-    if (blocked || !strays.length) { if (blocked) log('build', `the castle's own way to ${key(d)} (for ${c.name} at ${move.fmt(c)}): ${blocked} - not ours to clear`); continue }
+    // (the design's way in from where my walk already goes: designwalk.routeFrom; none - the outside route's walk-back)
+    if (!dwWorld) dwWorld = designWorld(bot)
+    const rt = await designwalk.routeFrom(dwWorld, design, k => reach.cells.has(k), d, { tick: ringTicker() })
+    if (!rt) { declined['no way to it in the finished build from my walk'] = (declined['no way to it in the finished build from my walk'] || 0) + 1; continue }
+    const { strays, blocked } = designwalk.routeBlockers(design, d, { route: rt, reachHas: k => reach.cells.has(k), at: (x, y, z) => world.at(bot, x, y, z), isOurs: q => isStray(bot, q.x, q.y, q.z), isProtected: q => walkProtected(q) })
+    if (blocked || !strays.length) { const r = blocked ? blocked.replace(/-?\d+,-?\d+,-?\d+/g, 'X') : 'open already'; declined[r] = (declined[r] || 0) + 1; continue }
     log('build', `the castle's own way up to ${key(d)} (for ${c.name} at ${move.fmt(c)}) is blocked only by our own strays: ${strays.map(q => (world.at(bot, q.x, q.y, q.z) || {}).name + '@' + key(q)).join(' ')} - taking them out`)
     let n = 0; const t0 = Date.now()
     for (const q of strays.slice(0, 12)) {
@@ -1716,6 +1722,7 @@ async function clearDesignWay (bot, c) {
     reach = null; await walkReach(bot).catch(() => null)
     return n
   }
+  log('build', `the castle's own way for ${c.name} at ${move.fmt(c)}: ${ds.length} of its stands in reach out of my walk${ds.length ? ` - declined: ${Object.entries(declined).map(([r, k]) => k + ' ' + r).join(', ') || 'all tried this band'}` : ''}`)
   return 0
 }
 
