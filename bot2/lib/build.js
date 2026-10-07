@@ -1041,7 +1041,7 @@ async function goSite (bot, goal, label, opts0 = {}) {
   // planner's own long walks to stands the search called reachable timed out at 30s with no door involved - 27s a try in
   // reach, 2 of 13 placed, 2026-10-02 analysis. From where I stand (the search redone if it started elsewhere); a leg that
   // fails hands the rest to the walker below
-  let walkerWhy = 'no stand goal' // (why the walker walks: said with its outcome below)
+  let walkerWhy = opts0.why || 'no stand goal' // (why the walker walks: said with its outcome below)
   if (job && goal && goal.x != null && goal.constructor && goal.constructor.name === 'GoalBlock') {
     const tgt = { x: goal.x, y: goal.y, z: goal.z }
     const f0 = world.feetPos(bot)
@@ -1751,8 +1751,21 @@ async function placeCell (bot, c, j = job) {
       if (await pillarTo(bot, c, undefined) && act.reach(bot, pos, 4.3)) return true
       if (cellOutOfTime()) return why(`could not get within reach (no stand in my walk; the pillar did not get there, its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`)
     }
+    // A STAND THE WALK SEARCH REACHES, WALKED TO IN LEGS (reachStandFor - the eye within a player's reach of the cell): the
+    // look-at goal below is no stand, so goSite handed it straight to the walker - dig and place allowed, 30s, no route - and
+    // it timed out 35 times since 11:30 (1074s, 51% of its tries), the body ending 6-12 under the cell or in a pocket, while
+    // a stand the legs could walk to was there for some of them, 2026-10-07. The legs first, the look-at walk only after
+    const rs = reachStandFor(bot, pos)
+    if (rs) {
+      const r0 = await goSite(bot, new goals.GoalBlock(rs.x, rs.y, rs.z), 'place', { shouldStop: cellStop })
+      if (r0 && r0.why === 'shut in') return why('shut in - the escape has the body')
+      if (act.reach(bot, pos, 4.3)) return true
+      if (cellOutOfTime()) return why(`could not get within reach (its stand ${move.fmt(rs)} in my walk not reached: ${r0 ? r0.why : '?'}; its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`)
+    }
     const goal = faces ? new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces, LOS: true }) : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 })
-    const r = await goSite(bot, goal, 'place', { shouldStop: cellStop })
+    // (why the walker walks, said with its outcome: the next sample tells the cells the search has no stand for from the
+    //  ones it cannot answer)
+    const r = await goSite(bot, goal, 'place', { shouldStop: cellStop, why: rs ? `its stand ${move.fmt(rs)} in my walk was not enough` : rs === false ? 'no stand in my walk reaches it' : 'the walk search has no answer from here' })
     if (r.why === 'shut in') return why('shut in - the escape has the body') // (no miss of the cell's: the step ends)
     if (!r.ok && cellOutOfTime() && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`) // (never "stopped": that word ends the step)
     // (a cell high over us: the planner won't tower toward a "see this face" goal - it never found one for the nave's
