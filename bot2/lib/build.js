@@ -825,9 +825,15 @@ function cachedStatus (bot) {
   if (statusCache.key !== key) statusCache = { key, st: status(bot), at: Date.now() }
   return statusCache.st
 }
+// LOST CELLS: a cell read done on the last pass and not done now - what took it, said where it happened. The done count
+// fell 6065 -> 5974 over 14 minutes of building with no dig logged, 2026-10-07: each cell carries the last pass's verdict
+// (c._done - no strings, no sets: this runs on every block change in the box), and the losses are said, a few a pass
+// (and each cell once in 10 minutes); one that only went UNKNOWN (its section unloaded) is counted apart - no loss
+const lostSaid = new Map() // key -> when said
 function status (bot) {
   if (!job) return null
   let done = 0; let unknown = 0; let total = 0
+  let lostN = 0; let lostUnknown = 0; const lostEx = []
   const md = world.data(bot)
   const need = {}
   // (the foundation is no part of the blueprint: out of total/done - the watchdog's blocks an hour, the brain's "how
@@ -835,6 +841,11 @@ function status (bot) {
   const fd = { placed: 0, left: 0 }
   for (const c of job.cells) {
     const d = cellDone(bot, c)
+    if (c._done && d !== true && c._job === job) {
+      if (d === null) lostUnknown++
+      else { lostN++; if (lostEx.length < 5) { const k = key(c); if (Date.now() - (lostSaid.get(k) || 0) > 600000) { lostSaid.set(k, Date.now()); const b = world.at(bot, c.x, c.y, c.z); let pr = ''; try { pr = b ? JSON.stringify(b.getProperties()) : '' } catch {} lostEx.push(`lost ${c.name}${c.want ? JSON.stringify(c.want) : ''} at ${move.fmt(c)}: now ${b ? b.name + (pr && pr !== '{}' ? pr : '') : '?'}`) } } }
+    }
+    c._done = d === true; c._job = job
     if (c.foundation) { if (d === true) fd.placed++; else { fd.left++; needsOf(bot, c, md, (it, n) => { need[it] = (need[it] || 0) + n }) } continue }
     total++
     if (d === true) { done++; continue }
@@ -843,6 +854,8 @@ function status (bot) {
   }
   const out = { name: job.name, total, done, unknown, need }
   if (job.foundation && (fd.placed || fd.left)) out.foundation = Object.assign(fd, { dropped: job.foundation.dropped || 0 })
+  if (lostN || lostUnknown > 50) { log('build', `status: ${lostN} done cell${lostN === 1 ? '' : 's'} not done any more${lostUnknown ? `, ${lostUnknown} unloaded (no loss)` : ''}, ${done}/${total} - near ${move.fmt(bot.entity.position)}`); for (const e of lostEx) log('build', e) }
+  if (lostSaid.size > 2000) lostSaid.clear()
   return out
 }
 // Items for the cells from the lowest unfinished layer up to `layers` above it (the window the builder
