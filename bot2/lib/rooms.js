@@ -155,4 +155,36 @@ function closesRoom (w, c, { box, jobUnbuilt, work, standsOf }) {
   return null
 }
 
-module.exports = { walkModel, region, doorwayAxis, closesRoom, doorPanel, edgeOf, OPP, CW, CCW }
+// THE LAST OPENING, ANY CELL: closesRoom's rule without its doorway shape - placing c turns a walk region that leads out
+// into one that does not (c the last opening: a gap in a wall, a hole in a floor, a step's head room), and that region holds
+// a cell of the build placeable only from within. The room rule asked it of doorway feet and lintels alone; the castle's
+// upper rooms were closed by a wall cell, a floor slab, a stair, and 84 cells waited "for a way in", 2026-10-07. The sides:
+// every cell a body stands in beside c, above or below its level by one, and the cell over c (c its floor). Small rooms
+// only (cap): a big hall is no pocket. { side, cell, size } or null
+function closesPocket (w, c, { box, work, standsOf, cap = 300 }) {
+  if (/_door$|_fence_gate$/.test(c.name || '')) return null
+  if (/_trapdoor$/.test(c.name || '') && ((c.want && String(c.want.open) === 'true') || (c.props && String(c.props.open) === 'true'))) return null
+  const isC = (x, y, z) => x === c.x && y === c.y && z === c.z
+  const W = walkModel(w, isC)
+  const sides = [{ x: c.x, y: c.y + 1, z: c.z }]
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, -1, 1]) sides.push({ x: c.x + dx, y: c.y + dy, z: c.z + dz })
+  const memo = new Map(); const memo0 = new Map()
+  for (const s of sides) {
+    if (!W.st(s.x, s.y, s.z)) continue
+    const r = region(w, box, s, { memo, isC, cap })
+    if (r.out) continue
+    // (closed already without c: c is not its last opening - holding it opens nothing)
+    if (!region(w, box, s, { memo: memo0, cap }).out) continue
+    let x1 = Infinity; let x2 = -Infinity; let y1 = Infinity; let y2 = -Infinity; let z1 = Infinity; let z2 = -Infinity
+    for (const k of r.cells) { const [x, y, z] = k.split(',').map(Number); if (x < x1) x1 = x; if (x > x2) x2 = x; if (y < y1) y1 = y; if (y > y2) y2 = y; if (z < z1) z1 = z; if (z > z2) z2 = z }
+    for (const q of work) {
+      if (q.x < x1 - 3 || q.x > x2 + 3 || q.z < z1 - 3 || q.z > z2 + 3 || q.y < y1 - 1 || q.y > y2 + 4) continue
+      if (isC(q.x, q.y, q.z)) continue
+      const stands = standsOf(q).filter(p => !isC(p.x, p.y, p.z) && !isC(p.x, p.y + 1, p.z))
+      if (stands.length && stands.every(p => r.cells.has(key(p)))) return { side: s, cell: q, size: r.cells.size }
+    }
+  }
+  return null
+}
+
+module.exports = { walkModel, region, doorwayAxis, closesRoom, closesPocket, doorPanel, edgeOf, OPP, CW, CCW }

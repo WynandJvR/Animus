@@ -2052,6 +2052,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       await walkReach(bot) // (fresh for where I stand now - cheap when I am still in the last one)
       const probe = clusterStand(bot, c, ready, badStands, reachOf)
       if (probe && !probe.out) compHeld.delete(key(c))
+      // (a CLOSED compartment is one whose stand's own walk region does not lead out - wayOut from the stand: the box's edge,
+      //  or a sky column a tower may climb. A stand merely out of my walk from here - an upper floor whose stairs are not built,
+      //  a ledge a tower reaches - is no closed room: "84 cells wait for a way in" held the castle's whole upper floor, the
+      //  walker never asked, 2026-10-07. Those go their own way and rest on a miss like any; audit)
+      if (probe && probe.out && wayOut(bot, { x: NaN, y: NaN, z: NaN }, probe, false)) { compHeld.delete(key(c)); probe.out = false }
       if (probe && probe.out) {
         holdBack.add(key(c)); compWait.add(key(c)); compHeld.add(key(c))
         if (!compartmentSaid.has(key(c))) { compartmentSaid.add(key(c)); log('build', `${c.name} at ${move.fmt(c)}: every stand for it is in a closed compartment of the build I am not in - it waits for a way in`) }
@@ -2104,13 +2109,18 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // cell of the build placeable only from within. Held this step with a SHARED miss (never tried - no licence to cover)
     if (!c.attach) {
       const jobUnbuilt = (x, y, z) => { const q = job.index.get(`${x},${y},${z}`); return !!q && !q.clear && cellDone(bot, q) !== true }
-      const work = todo.filter(q => !q.clear && Math.abs(q.x - c.x) <= 12 && Math.abs(q.z - c.z) <= 12 && Math.abs(q.y - c.y) <= 4)
+      // (the work that keeps an opening open is work that CAN go in: never a cell no route can source, nor one its own misses
+      //  have rested three times and more - kept for those, a small room's opening stayed open for good and the build could
+      //  never read done; audit 2026-10-07. Out of stock stays: its stock comes)
+      const work = todo.filter(q => !q.clear && Math.abs(q.x - c.x) <= 12 && Math.abs(q.z - c.z) <= 12 && Math.abs(q.y - c.y) <= 4 && !cellUnsourced(q) && !(((cellFails.get(key(q)) || {}).n || 0) >= 3 && !(cellFails.get(key(q)) || {}).shared))
       const tRoom = Date.now()
-      const held = rooms.closesRoom(roomWorld(bot), c, { box: job.box, jobUnbuilt, work, standsOf: q => standsOf(bot, q) })
+      const held = rooms.closesRoom(roomWorld(bot), c, { box: job.box, jobUnbuilt, work, standsOf: q => standsOf(bot, q) }) || (work.some(q => Math.abs(q.x - c.x) <= 6 && Math.abs(q.z - c.z) <= 6 && Math.abs(q.y - c.y) <= 4 && key(q) !== key(c)) ? rooms.closesPocket(roomWorld(bot), c, { box: job.box, work, standsOf: q => standsOf(bot, q) }) : null) // (and any cell that is a pocket's last opening: rooms.closesPocket - asked only with work near it: its searches are the step's "doorway checks" time)
       roomMs += Date.now() - tRoom
-      if (held) {
+      // (THE ENDGAME lets the opening go in - the few cells left, the detached rule's own test: the interior cell is covered
+      //  and on the swap list, the endgame's way; held, a last room could keep the build from ever reading done; audit)
+      if (held && todo.length < Math.min(200, job.cells.length * 0.03)) { noteToSwap(held.cell, (world.at(bot, held.cell.x, held.cell.y, held.cell.z) || {}).name || 'air') } else if (held) {
         holdBack.add(key(c)); { const prev = cellFails.get(key(c)); cellFails.set(key(c), { n: failed.get(key(c)) + 1, at: Date.now(), shared: prev ? !!prev.shared : true }) }
-        if (!doorwaySaid.has(key(c))) { doorwaySaid.add(key(c)); log('build', `keeping the doorway at ${move.fmt(c)} open (${c.name} waits) - the room behind it still has ${held.cell.name} at ${move.fmt(held.cell)} to place, from inside only`) }
+        if (!doorwaySaid.has(key(c))) { doorwaySaid.add(key(c)); log('build', `keeping the opening at ${move.fmt(c)} open (${c.name} waits) - the room behind it still has ${held.cell.name} at ${move.fmt(held.cell)} to place, from inside only`) }
         tpick = Date.now(); continue
       }
     }
