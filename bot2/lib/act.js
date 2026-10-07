@@ -224,6 +224,8 @@ function inBody (bot, pos, tall = false) {
 // Step to the middle of the cell we stand in (off an edge that leans into the cell beside it).
 async function centre (bot) {
   const c = bot.entity.position.floored()
+  // (never onto a cell that is no stand - a fire, a fence top, air: centred over a lit campfire the body stood in it, 2026-10-07)
+  if (!world.standable(bot, c.x, c.y, c.z)) return
   const t0 = Date.now()
   while (Date.now() - t0 < 1500) {
     const p = bot.entity.position
@@ -306,7 +308,19 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     const clash = () => inBody(bot, pos) || (second && inBody(bot, second)) || grows.some(q => inBody(bot, q))
     if (clash()) {
       if (noWalk) return false
-      await move.goTo(bot, new goals.GoalInvert(grows.length ? new goals.GoalNear(pos.x, pos.y, pos.z, 1.8) : new goals.GoalBlock(pos.x, pos.y, pos.z)), { timeoutMs: 5000, dig: false, place: false })
+      // (STEP ASIDE ONTO A CHOSEN CELL: a stand the world's own rule calls standable - a floor, never a fire, a fence top or
+      //  a door - in a column clear of the block's cells, the nearest. The old "anywhere but this cell" goal was met with
+      //  the head in the cell, the body went to centre() over a lit campfire's column and burned to death, 2026-10-07)
+      const clashCols = [pos].concat(second ? [second] : [], grows)
+      const clear = q => !clashCols.some(c0 => c0.x === q.x && c0.z === q.z && q.y <= c0.y && q.y + 1 >= c0.y)
+      const me = bot.entity.position.floored(); let st = null; let sd = Infinity
+      for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = -1; dy <= 1; dy++) {
+        const q = { x: me.x + dx, y: me.y + dy, z: me.z + dz }
+        if (!clear(q) || !world.standable(bot, q.x, q.y, q.z)) continue
+        { const fb = world.at(bot, q.x, q.y, q.z); if (fb && world.HOT_RE.test(fb.name)) continue } // (never fire at the feet - it does not block the body; audit) // (standable: a solid floor right under - no drop)
+        const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy); if (d < sd) { sd = d; st = q }
+      }
+      if (st) await move.goTo(bot, new goals.GoalBlock(st.x, st.y, st.z), { timeoutMs: 5000, dig: false, place: false, label: 'step aside to place' })
       if (clash()) await centre(bot)
       if (clash()) { log('act', `place ${itemName} at ${move.fmt(pos)}: I stand where it (or a pane/fence beside it) would be`); return false }
     }

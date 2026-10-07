@@ -162,7 +162,9 @@ const BLOCK_ITEM = { tripwire: 'string', redstone_wire: 'redstone', water: 'wate
 // Does prop `k` count toward a cell of `name` being done?
 function counts (name, k) {
   if (k === 'type') return /_slab$/.test(name)
-  if (k === 'open') return /_trapdoor$|_fence_gate$/.test(name)
+  // (a FENCE GATE's open is the walk's, as a door's: the planner opens a gate on its way and leaves it so - "lost
+  //  spruce_fence_gate ... now open:true", the done count falling under the builder; the finish sets them as drawn: setGates)
+  if (k === 'open') return /_trapdoor$/.test(name)
   if (k === 'level') return !!CAULDRON_FILL[name] || /^(water|lava)$/.test(name)
   if (k === 'persistent') return /_leaves$/.test(name)
   return true
@@ -2992,9 +2994,27 @@ async function finish (bot, { shouldStop } = {}) {
   did += await finishSite(bot, { shouldStop })
   did += await removeScaffold(bot, { shouldStop })
   did += await clearSite(bot, { finishing: true, shouldStop })
+  did += await setGates(bot, { shouldStop })
   surveyCache = null
   if (complete(bot)) { log('build', `${job.name} complete: every block in place, no scaffold, the ground made good`); mem.set('siteCheck', { at: Date.now(), complete: true }) }
   return did > 0
+}
+
+// THE GATES AS DRAWN, at the finish: a gate's open state is no part of "done" (counts) - the walks open them - so the last
+// round sets each one the blueprint draws open or shut, a click from beside it
+async function setGates (bot, { shouldStop } = {}) {
+  let n = 0
+  for (const c of job.cells) {
+    if (shouldStop && shouldStop()) break
+    if (!/_fence_gate$/.test(c.name) || !c.props || c.props.open == null) continue
+    const b = world.at(bot, c.x, c.y, c.z); if (!b || b.name !== c.name) continue
+    let open = null; try { open = String(b.getProperties().open) } catch {}
+    if (open == null || open === String(c.props.open)) continue
+    if (!act.reach(bot, new Vec3(c.x, c.y, c.z), 4.3)) { const r = await goSite(bot, new goals.GoalNear(c.x, c.y, c.z, 3), 'gate', { place: false, shouldStop }).catch(() => null); if (!r || !act.reach(bot, new Vec3(c.x, c.y, c.z), 4.5)) continue }
+    try { await bot.activateBlock(bot.blockAt(new Vec3(c.x, c.y, c.z))); n++ } catch {}
+  }
+  if (n) log('build', `set ${n} gate${n > 1 ? 's' : ''} open or shut as the blueprint draws them`)
+  return n
 }
 
 function getJob () { return job }
