@@ -1092,6 +1092,10 @@ function escapeUrgent (bot) { const rf = require('./reflex'); return bot.health 
 async function escapeUpInner (bot, { proven: provenBy = false } = {}) {
   const act = require('./act'); const gather = require('./gather')
   const f0 = bot.entity.position.floored()
+  // CAN THE BODY MOVE AT ALL - no escape acts on a frozen body: not simulated (no physics ticks) or pinned by the server (it
+  // answers every move with a teleport back) is the body layer's (body.js re-arms, main.js relogs), never a wall to break or
+  // a climb - 11 minutes of breaking out and climbing on a body the server held still, 2026-10-07 14:45
+  { const bd = require('../body'); if (!bd.simulating() || bd.pinned()) { log('move', `stuck at ${fmt(f0)}: the body cannot move (${!bd.simulating() ? 'not simulated' : 'pinned by the server'}) - no escape on a frozen body; the body layer resyncs`); return false } }
   // ON A PILLAR OF OUR OWN IN THE OPEN - every side a drop: down through it, the way it went up. The climb only rises: a
   // walk's escape towered 10 in the open by the castle's west wall, the bot stood on the top with a drop all round, every
   // walk gave up and each "climb out" climbed nothing ("from y129 to y129"), 2026-09-30. Our blocks by the ledger only

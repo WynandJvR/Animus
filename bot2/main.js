@@ -48,6 +48,7 @@ try { body.setNoteSink && body.setNoteSink(m => log('body', m)); body.install(bo
 //  second, the 30s clock never ran out and a bot in its night bunker was held for 30 minutes, 2026-09-24)
 let pinnedSince = 0
 let freeSince = 0
+let pinUnsafeSaid = false
 setInterval(() => {
   try {
     // in a boat the physics is off by design (mineflayer stops it on mount; lib/boat.js drives the boat): no
@@ -62,7 +63,14 @@ setInterval(() => {
     }
     freeSince = 0
     if (!pinnedSince) pinnedSince = Date.now()
-    if (Date.now() - pinnedSince > 30000) { log('body', `pinned by the server for ${Math.round((Date.now() - pinnedSince) / 1000)}s at ${bot.entity && bot.entity.position.floored()} - relogging to fetch the world fresh`); pinnedSince = 0; bot.quit('pinned - relog') }
+    // (never mid-fall: a relog in the air lands the login where the server last held the body, the fall unfinished. Nothing
+    //  else waits - a pinned body cannot flee a hostile nor climb out of lava or water, and a wait on those can last for good,
+    //  the old freeze; lava and water argue for the relog sooner. Said once a pin, re-asked each second; audit)
+    if (Date.now() - pinnedSince > 30000) {
+      const e = bot.entity
+      const unsafe = !e ? 'no body' : (!e.onGround && e.velocity && e.velocity.y < -0.2) ? 'falling' : ''
+      if (unsafe) { if (!pinUnsafeSaid) { pinUnsafeSaid = true; log('body', `pinned by the server for ${Math.round((Date.now() - pinnedSince) / 1000)}s - the relog waits: ${unsafe}`) } } else { log('body', `pinned by the server for ${Math.round((Date.now() - pinnedSince) / 1000)}s at ${bot.entity && bot.entity.position.floored()} - relogging to fetch the world fresh`); pinnedSince = 0; pinUnsafeSaid = false; bot.quit('pinned - relog') }
+    }
   } catch {}
 }, 1000).unref()
 

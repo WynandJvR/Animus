@@ -82,6 +82,17 @@ const EDITS = [
   // "stuck x3, next node -2265.703125,125,-576.5", a trap at the castle's east passage twice a day, 2026-10-07. A feet block
   // the movements call non-physical is no floor: the block under it is (the upstream fallback). One rule - the movements'
   // own verdict, never a list of names (castlewalktest counts the class)
+  // THE WAY BACK AFTER A PLACE OUTLIVED THE PATH: placing a block under a node beside it (LOSWhenPlacingBlocks), the
+  // pathfinder walks back to the node's centre - returningPos - and every tick until it gets there it does nothing else:
+  // no plan, no goal, forward held toward it. resetPath (a new goal, setGoal(null), a stuck reset) never cleared it, so a
+  // return the body could not make - the server pinned it a step short - held the body 11 minutes: every walk "stuck x3,
+  // next -, 0 nodes", the escape acting on a frozen body, until a relog, 2026-10-07 14:45. A reset abandons the return
+  ['mineflayer-pathfinder/index.js', "    placing = false\n    pathUpdated = false\n", "    placing = false\n    returningPos = null // (bot2: a reset abandons the walk back to a placed node - it held every walk after it)\n    pathUpdated = false\n"],
+  // ...and THE RETURN ITSELF NEVER ARRIVED ON A LOW FLOOR: moveToBlock judged "centred" by the 3D distance to the node, whose
+  // y is the cell's - on a bottom slab the feet stand 0.5 under it, the distance never fell under 0.2, and the forward key
+  // was held at the node's middle for good (the 14:45 body stood on a spruce slab, y 125.50 against a node at 126). The
+  // centring it is for is across the floor: judged on x and z
+  ['mineflayer-pathfinder/index.js', "    if (bot.entity.position.distanceSquared(targetPos) > minDistanceSq) {\n", "    if ((bot.entity.position.x - targetPos.x) ** 2 + (bot.entity.position.z - targetPos.z) ** 2 > minDistanceSq) { // (bot2: centred across the floor - a slab's feet stand under the node's y)\n"],
   ['mineflayer-pathfinder/index.js', "      let np = getPositionOnTopOf(b)\n", "      let np = (b && b.shapes.length && stateMovements && (() => { try { return stateMovements.getBlock(b.position, 0, 0, 0).physical === false } catch { return false } })()) ? null : getPositionOnTopOf(b) // (bot2: a block the movements walk through is no floor)\n"]
 ]
 function patchGates () {
