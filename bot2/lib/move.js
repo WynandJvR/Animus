@@ -1409,7 +1409,19 @@ async function controlledDrop (bot) {
   const reflex = require('./reflex'); const gather = require('./gather')
   await gather.landed(bot, 600)
   if (!bot.entity.onGround || bot.vehicle || world.feetInWater(bot)) return false
-  if (safeJiggles(bot).length) return false
+  // (a STEP the body can take - a cell beside standable at its level, one up with head room, or down within SAFE_DROP - means
+  //  no drop; never the jiggle's test here: a heading into a wall reads "no drop" to it, and on a one-block perch beside the
+  //  castle wall (drops north and east, the wall west) the drop never ran - silently - while every walk failed, 2026-10-07 05:15)
+  {
+    const p0 = bot.entity.position; const fx = Math.floor(p0.x); const fy0 = Math.floor(p0.y + 0.01); const fz = Math.floor(p0.z)
+    const headRoom = world.isAirish(world.at(bot, fx, fy0 + 2, fz))
+    const air = (x, y, z) => world.isAirish(world.at(bot, x, y, z))
+    // (down: the body passes into the column at its own height - feet and head - then falls to the first floor within SAFE_DROP;
+    //  a head-high block there is no way: the perch's north had leaves at the head and a floor a block down)
+    const down = (x, z) => { if (!air(x, fy0, z) || !air(x, fy0 + 1, z)) return false; for (let d = 1; d <= world.SAFE_DROP; d++) { if (!air(x, fy0 - d, z)) return world.standable(bot, x, fy0 - d + 1, z) } return false }
+    const step = [[1, 0], [-1, 0], [0, 1], [0, -1]].find(([dx, dz]) => world.standable(bot, fx + dx, fy0, fz + dz) || (headRoom && world.standable(bot, fx + dx, fy0 + 1, fz + dz)) || down(fx + dx, fz + dz))
+    if (step) { log('move', `no controlled drop from ${fmt(p0)}: a step to ${fx + step[0]},${fz + step[1]} (not a drop)`); return false }
+  }
   if (bot.health < DROP_HP) { log('move', `no controlled drop from ${fmt(bot.entity.position)}: hp ${Math.round(bot.health)} under ${DROP_HP}`); return false }
   if (Date.now() - lastDropAt < DROP_EVERY_MS) { log('move', `no controlled drop from ${fmt(bot.entity.position)}: one ${Math.round((Date.now() - lastDropAt) / 1000)}s ago (one in ${DROP_EVERY_MS / 60000} min)`); return false }
   dropTries = dropTries.filter(t => Date.now() - t < DROP_EVERY_MS)
