@@ -720,6 +720,7 @@ function creeperStrike () {
 // put and room to put it; else away. Running straight off across the open slope took four bolts and the bot, twice, under
 // a pillager patrol (2026-10-02; audit)
 const wallTried = new Set()
+function poisoned () { try { const ef = bot.registry.effectsByName; const id = ef && ef.Poison && ef.Poison.id; return id != null && !!(bot.entity.effects && bot.entity.effects[id]) } catch { return false } }
 function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
 const coverTrail = [] // { t, x, z, id }: where a flight to cover has been, the last 2s
 let pinnedCover = null // { id, until }: the shooter whose cover flight is pinned
@@ -2057,7 +2058,11 @@ function install (b) {
     lastHurtAt = Date.now()
     // the server names who hurt us (damage_event's source entity - the skeleton, not its arrow); none for a fall,
     // drowning, a cactus. (It used to be the nearest hostile: a fall beside a zombie was "hit by the zombie".)
-    lastHurtBy = source && source !== bot.entity ? source : null
+    // (a POISON tick names no one - it is the witch's splash of a moment ago: "no one" let the witch go from every row while the
+    //  ticks took 20 -> 6 behind the safehouse door, not a reflex line till hp 1, 2026-10-07 05:43. While poisoned, the last
+    //  one who hurt us stays named)
+    const prevBy = lastHurtBy
+    lastHurtBy = source && source !== bot.entity ? source : (poisoned() && prevBy && prevBy.isValid ? prevBy : null)
     if (lastHurtBy && RANGED.has(lastHurtBy.name) && lastRelease && Date.now() - lastRelease.at < 60000 && lastRelease.ids.includes(lastHurtBy.id)) {
       for (const id of lastRelease.ids) noRelease.set(id, Date.now() + 180000)
       log('reflex', `released into sight again - the ${lastHurtBy.name} hit me ${Math.round((Date.now() - lastRelease.at) / 1000)}s after the release: holding till they go (3 min)`)

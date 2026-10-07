@@ -276,6 +276,29 @@ function bedObtainable () {
   return sheep.length > 0 || food.animals(bot, /^sheep$/, 48).length > 0
 }
 
+// THE FAR SIDE OF THE ROOM: a night or a wait in the safehouse is spent at the interior cell farthest from the door, never in
+// the doorway the walk in left us in. A witch at the door splashed the bot standing one block inside it - a splash reaches
+// 4 blocks from where it breaks, through the door, at full strength that close - poison and harming, 20 -> 0, the iron helmet
+// and chestplate lost with it, 2026-10-07 05:43; across the room the same splash is a fifth of it
+// (once a night - and never asleep: the walk ran under a sleeping body every pass; audit)
+let deepTried = null
+async function deepInHut () {
+  if (bot.isSleeping) return
+  const night = day.dayNo(bot); const at = world.feetPos(bot); const k = `${night}:${at.x},${at.z}`
+  if (deepTried === k) return
+  deepTried = k
+  const p = mem.get().hutPlan; if (!p || !p.interior || !p.door || !move.insideHut(world.feetPos(bot))) return
+  const y = p.home.y; let best = null
+  for (let x = p.interior.x1; x <= p.interior.x2; x++) for (let z = p.interior.z1; z <= p.interior.z2; z++) {
+    if (!world.standable(bot, x, y, z)) continue
+    const d = Math.hypot(x - p.door.x, z - p.door.z)
+    if (!best || d > best.d) best = { x, z, d }
+  }
+  const f = world.feetPos(bot)
+  if (!best || (f.x === best.x && f.z === best.z) || Math.hypot(f.x - p.door.x, f.z - p.door.z) >= best.d - 0.01) return
+  const r = await move.goTo(bot, new goals.GoalBlock(best.x, y, best.z), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'to the far side of the safehouse' }).catch(() => null)
+  if (!r || !r.ok) log('dir', `couldn't get to the far side of the safehouse (${best.x},${y},${best.z}) - ${r ? r.why || 'not reached' : 'the walk threw'}`)
+}
 // Items in the pack beyond the kit we keep on us.
 function haulSize () {
   let n = 0
@@ -902,6 +925,7 @@ const TASKS = {
     // and the doorway walled up: a zombie on hard breaks the door
     if (move.insideHut(world.feetPos(bot))) await hut.sealDoor(bot).catch(e => log('dir', 'seal threw: ' + e.message))
     while (!shelter.morning(bot) && !taskCancelled()) {
+      await deepInHut()
       // the bed is in this room: keep trying to sleep (mobs close by make the server refuse for a while)
       const bedB = shelter.bedBlock(bot)
       if (bedB && world.isNight(bot) && !bot.isSleeping && world.dist3(bedB.position, bot.entity.position) < 5) {
@@ -1025,6 +1049,7 @@ const TASKS = {
     const t0 = Date.now()
     if (!await hut.enterHut(bot, { shouldStop: () => taskCancelled() })) return false
     await hut.sealDoor(bot).catch(() => false)
+    await deepInHut()
     // the bow off the chest in here: with it the camp outside is shot at, not waited out (pillagers never burn - a
     // patrol camped the door, 2026-09-25)
     if (!reflex.bowReady() && base.bankCount('bow') > 0 && base.bankCount('arrow') > 0) {
