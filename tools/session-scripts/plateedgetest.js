@@ -6,8 +6,10 @@
 const path = require('path')
 const bot2 = path.join(__dirname, '..', '..', 'bot2')
 const world = require(path.join(bot2, 'lib', 'world'))
-const registry = require('prismarine-registry')('26.2')
-const Block = require('prismarine-block')(registry)
+// (resolved from bot2's own node_modules: run from anywhere, no NODE_PATH needed)
+const fromBot2 = m => require(require.resolve(m, { paths: [bot2] }))
+const registry = fromBot2('prismarine-registry')('26.2')
+const Block = fromBot2('prismarine-block')(registry)
 
 // the edge a single thin box touches: [dx, dz], or null when it is no thin horizontal plate
 function edgeOfShape (shapes) {

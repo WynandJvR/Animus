@@ -1039,6 +1039,7 @@ async function escapeUp (bot) {
   escaping = true
   try { return await escapeUpInner(bot) } finally { escaping = false }
 }
+let finishedWait = null // (where and since when the escape has waited, shut in by finished cells of our build)
 async function escapeUpInner (bot) {
   const act = require('./act'); const gather = require('./gather')
   const f0 = bot.entity.position.floored()
@@ -1146,28 +1147,60 @@ async function escapeUpInner (bot) {
           }
         }
       }
-      let exit = null // { c, dx, dz, d }
+      // THE WAY OUT, IN ORDER (operator 2026-10-07): the region's own DOOR, crossed - opened, never dug; then a wall of cells
+      // the builder has not finished (unplaced, filler, the wrong block) or plain ground; a FINISHED cell of the build only
+      // last, and only when survival needs it - a closet of open trapdoors beside the castle's spruce door was broken out
+      // through two finished oak trapdoors the builder had to put back, 2026-10-07 03:30
+      const finished = (x, y, z) => { const c = cellAt(x, y, z); const b = world.at(bot, x, y, z); return !!c && !!b && !world.isAirish(b) && build.cellDone(bot, c) === true }
+      const pairCost = (x, y, z) => [0, 1].reduce((t, dy) => t + (air(x, y + dy, z) ? 0 : finished(x, y + dy, z) ? 10 : 1), 0)
+      // (and shut in by our own finished cells 2 min by day: one block of our own build, put back by the builder, beats a lost
+      //  day - a closet with no door and finished walls only waited to dusk; audit 2026-10-07)
+      if (!finishedWait || world.dist3(finishedWait.at, f0) > 3 || Date.now() - finishedWait.seen > 60000) finishedWait = { at: { x: f0.x, y: f0.y, z: f0.z }, t: Date.now() }
+      finishedWait.seen = Date.now() // (a wait not seen for a minute is over: back here later, it starts again)
+      const urgent = () => { const rf = require('./reflex'); return bot.health <= rf.hurtLine() || world.phase(bot) !== 'day' || rf.hostiles(16).some(h => h.e.name !== 'bat') || Date.now() - finishedWait.t > 120000 }
+      // 1. the doors the room touches, nearest first: walked to, crossed (crossDoor opens a closed one)
+      {
+        const doors = []
+        for (const [key, d] of room) {
+          const [cx, cy, cz] = key.split(',').map(Number)
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            if (![0, 1].some(dy => { const b = world.at(bot, cx + dx, cy + dy, cz + dz); return !!b && /_door$/.test(b.name) && !/iron_door/.test(b.name) })) continue
+            const past = { x: cx + 2 * dx, y: cy, z: cz + 2 * dz }
+            if (room.has(kk(past)) || !world.standable(bot, past.x, past.y, past.z)) continue // (a door inside the room, or onto nothing)
+            doors.push({ c: { x: cx, y: cy, z: cz }, past, d })
+          }
+        }
+        for (const dr of doors.sort((a, b) => a.d - b.d).slice(0, 2)) {
+          if (dr.d > 0) await goTo(bot, new goals.GoalBlock(dr.c.x, dr.c.y, dr.c.z), { timeoutMs: 15000, stuckMs: 5000, dig: false, place: false, label: 'to the door out' }).catch(() => null)
+          const crossed = await crossDoor(bot, new goals.GoalBlock(dr.past.x, dr.past.y, dr.past.z)).catch(() => false)
+          const now = bot.entity.position.floored()
+          if (crossed && !room.has(kk(now))) { log('move', `enclosed at ${fmt(f0)} - out through the door beside ${fmt(dr.c)} to ${fmt(now)}`); clearGiveUps(f0); return true }
+        }
+        if (doors.length) log('move', `enclosed at ${fmt(f0)}: the room's door${doors.length > 1 ? 's' : ''} did not let me through - a wall next`)
+      }
+      // 2. the cheapest wall to open: no finished cell first, then nearest, then the fewest blocks
+      let exit = null // { c, dx, dz, d, cost }
       for (const [key, d] of room) {
-        if (exit && d >= exit.d) continue
         const [cx, cy, cz] = key.split(',').map(Number)
         for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
           const wx = cx + dx; const wz = cz + dz; const bx = cx + 2 * dx; const bz = cz + 2 * dz
           if (room.has(kk({ x: wx, y: cy, z: wz })) || (air(wx, cy, wz) && air(wx, cy + 1, wz))) continue // (not a wall)
           if (!ours(wx, cy, wz) || !ours(wx, cy + 1, wz) || !safe(bx, cy, bz) || room.has(kk({ x: bx, y: cy, z: bz }))) continue
-          exit = { c: { x: cx, y: cy, z: cz }, dx, dz, d }; break
+          const cost = pairCost(wx, cy, wz)
+          const cand = { c: { x: cx, y: cy, z: cz }, dx, dz, d, cost }
+          const better = (a, b) => ((a.cost >= 10) - (b.cost >= 10)) || (a.d - b.d) || (a.cost - b.cost)
+          if (!exit || better(cand, exit) < 0) exit = cand
         }
       }
-      // (a door a few steps further beats a wall: it comes back whole and the builder re-places it - the old pick's order; audit)
-      if (exit) {
-        for (const [key, d] of room) {
-          if (d > exit.d + 4) continue
-          const [cx, cy, cz] = key.split(',').map(Number)
-          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            const b = world.at(bot, cx + dx, cy, cz + dz)
-            if (!b || !/_door$/.test(b.name) || !ours(cx + dx, cy, cz + dz) || !ours(cx + dx, cy + 1, cz + dz) || !safe(cx + 2 * dx, cy, cz + 2 * dz) || room.has(kk({ x: cx + 2 * dx, y: cy, z: cz + 2 * dz }))) continue
-            if (!exit.door || d < exit.d) exit = { c: { x: cx, y: cy, z: cz }, dx, dz, d, door: true }
-          }
-        }
+      // (the sides beside the body, the same order)
+      for (const sd0 of sides) sd0.cost = pairCost(f0.x + sd0.dx, f0.y, f0.z + sd0.dz)
+      sides.sort((a, b) => ((a.cost >= 10) - (b.cost >= 10)) || (a.cost - b.cost))
+      // 3. a finished cell only when it must be: hurt, the night, a threat about - otherwise the builder's walk model is
+      //    asked again later (the closet reads as a way out once its trapdoors are read right) and the bot waits
+      const best = exit || sides[0] || null
+      if (best && best.cost >= 10) {
+        if (!urgent()) { log('move', `enclosed at ${fmt(f0)}: the only way out is through a FINISHED cell of the build - not breaking it with no danger (hp ${Math.round(bot.health)}, ${world.phase(bot)}, no threat); waiting`); return false }
+        log('move', `enclosed at ${fmt(f0)}: BREAKING A FINISHED CELL of the build to get out - hp ${Math.round(bot.health)}, ${world.phase(bot)}${require('./reflex').hostiles(16).some(h => h.e.name !== 'bat') ? ', a threat about' : ''} (the builder puts it back)`)
       }
       let sd = sides[0]
       let start = { x: f0.x, y: f0.y, z: f0.z }
@@ -1188,6 +1221,8 @@ async function escapeUpInner (bot) {
         for (let n = 0; n < 3; n++) {
           const p0 = { x: at.x + sd.dx, y: at.y, z: at.z + sd.dz }
           if (!ours(p0.x, p0.y, p0.z) || !ours(p0.x, p0.y + 1, p0.z)) break
+          // (a finished cell further in, the same rule: only when survival needs it)
+          if (pairCost(p0.x, p0.y, p0.z) >= 10 && !urgent()) { log('move', `enclosed: a finished cell of the build at ${fmt(p0)} next - not breaking it with no danger`); break }
           for (const dy of [1, 0]) {
             const b = world.at(bot, p0.x, p0.y + dy, p0.z)
             if (b && !world.isAirish(b)) { escOpened.push({ x: p0.x, y: p0.y + dy, z: p0.z }); log('move', `enclosed: taking our own ${b.name} at ${fmt({ x: p0.x, y: p0.y + dy, z: p0.z })}`); const mine = !!cellAt(p0.x, p0.y + dy, p0.z); await act.dig(bot, { x: p0.x, y: p0.y + dy, z: p0.z }, { own: mine, force: mine, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false) }

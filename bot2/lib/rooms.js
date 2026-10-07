@@ -43,17 +43,26 @@ function walkModel (w, isC = () => false, { opens = false, avoid = null } = {}) 
   //  refused that step and the leg timed out where it began, 2026-10-06)
   const panelOf = b => { if (!b) return null; const v = w.plateEdge(b); if (v) return edgeOf(v[0], v[1]); if (opens && /_door$/.test(b.name) && !/^iron_door$/.test(b.name)) return null; if (/_door$/.test(b.name)) return doorPanel(b); return null }
   const edgeShut = (x, y, z, dx, dz) => [w.at(x, y, z), w.at(x, y + 1, z)].some(b => panelOf(b) === edgeOf(dx, dz))
+  // A PLATE CELL IS PASSED ALONG ITS PLATE: a cell with an open trapdoor's or door's plate at the feet or the head is entered
+  // and left only parallel to the plate - never toward it nor away from it, so no turn inside it. Stepped into face-on and
+  // turned in, the 0.6 body met the plate's end at the cell's corner: the closet of open shutters behind the south
+  // courtyard's door was a way in to the search, the body wedged at its plates walk after walk, two break-outs and a trap,
+  // 2026-10-07. (A doorway's open door hangs along the passage: walked through as before)
+  const platesAt = (x, y, z) => { const out = []; for (const yy of [y, y + 1]) { if (isC(x, yy, z)) continue; const v = w.plateEdge(w.at(x, yy, z)); if (v) out.push(v) } return out }
+  const along = (x, y, z, dx, dz) => platesAt(x, y, z).every(v => v[0] * dx + v[1] * dz === 0)
   const next = p => {
     const out = []
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const x = p.x + dx; const z = p.z + dz
       if (edgeShut(p.x, p.y, p.z, dx, dz)) continue
       if (edgeShut(x, p.y, z, -dx, -dz)) continue
+      if (!along(p.x, p.y, p.z, dx, dz)) continue // (out of a plate cell: along its plate only)
       for (let dy = 1; dy >= -w.SAFE_DROP; dy--) {
         const y = p.y + dy
         if (dy === 1 && !air(p.x, p.y + 2, p.z)) continue // (a step up wants the head room to jump)
         if (dy < 0) { let open = true; for (let yy = y + 2; yy <= p.y + 1; yy++) if (!air(x, yy, z)) open = false; if (!open) break } // (a drop wants its column open)
         if (!st(x, y, z)) continue
+        if (!along(x, y, z, dx, dz)) break // (into a plate cell: along its plate only - nor any lower cell of that column)
         // (and never a rise past a jump: floor top to floor top over 1.25 - onto a fence, a wall or a closed gate from the
         //  ground beside it: the body cannot, the planner does not; w.floorTop - the world's floorTop - absent: whole blocks)
         if (dy > -1 && topAt(x, y - 1, z) - (climb(p.x, p.y, p.z) ? p.y : topAt(p.x, p.y - 1, p.z)) > 1.25) continue // (on a ladder the climb lifts the body: its base is its own cell's)
