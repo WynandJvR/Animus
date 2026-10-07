@@ -724,8 +724,11 @@ function creeperStrike () {
 const wallTried = new Set()
 function poisoned () { try { const ef = bot.registry.effectsByName; const id = ef && ef.Poison && ef.Poison.id; return id != null && !!(bot.entity.effects && bot.entity.effects[id]) } catch { return false } }
 function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
+const douseTried = new Map() // (a lit fire's cell -> until when the shovel's douse is not tried again)
 const coverTrail = [] // { t, x, z, id }: where a flight to cover has been, the last 2s
 let pinnedCover = null // { id, until }: the shooter whose cover flight is pinned
+let hotStuck = null // { k, since, last }: the fire the body has been on, across its bounces (the hot row)
+function campfireLit (b) { try { const v = b.getProperties().lit; return v === true || v === 'true' } catch { return true } }
 let holdSaidAt = 0 // (the out-of-sight hold's line, every 30s while it lasts: a hold must be visible in the log)
 // A RELEASE THAT WALKED BACK INTO THE ARROWS: the hidden-step release, then the task's walk into sight, a hit, cover, the hold,
 // released again - hp each lap with no end (the 2026-10-02 case; audit). A ranged hit from one of the shooters about at a
@@ -1643,13 +1646,25 @@ function tick () {
   //  cell at once, whatever put it there
   {
     const fx = Math.floor(me.x); const fy = Math.floor(me.y + 0.01); const fz = Math.floor(me.z)
-    const hot = b => !!b && world.HOT_RE.test(b.name) // (world's one list - the diagonal step reads its twin)
+    // (world's one list - the diagonal step reads its twin; a campfire put OUT burns nothing - see the douse below)
+    const hot = b => !!b && world.HOT_RE.test(b.name) && !(/campfire$/.test(b.name) && !campfireLit(b))
     const here = world.at(bot, fx, fy, fz); const under = world.at(bot, fx, fy - 1, fz)
     if (!bot.vehicle && (hot(here) || (bot.entity.onGround && hot(under)))) {
+      // (THE SAME FIRE, STILL: each bounce off it cleared the row and the next landing began it again - the clock runs across
+      //  the bounces; past 1.5s on it the step has failed, whatever the cell said)
+      const fk = fx + ',' + fz; const hb0 = hot(here) ? here : under
+      if (!hotStuck || hotStuck.k !== fk || now - hotStuck.last > 1500) hotStuck = { k: fk, since: now, last: now }
+      hotStuck.last = now
+      const stuckOn = now - hotStuck.since > 1500
+      // (a cell the body can ENTER from the fire's top: its column clear of full blocks from the body's own height (the fire's
+      //  top) to the head's - and a cell two off only through an open one between. The cell picked was two west past a plank
+      //  at head height: steered into it 26s, a step never taken, hp 19 -> 0 on the castle's campfire row, 2026-10-07 08:00)
+      const openCol = (x, z, y0) => { for (let yy = y0; yy <= fy + 2; yy++) { const c = world.at(bot, x, yy, z); if (c && c.boundingBox === 'block') return false } return true }
       let best = null; let bd = Infinity
       for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (const dy of [0, 1, -1]) {
-        if (!dx && !dz) continue
+        if ((!dx && !dz) || stuckOn) continue
         const x = fx + dx; const y = fy + dy; const z = fz + dz
+        if ((Math.abs(dx) === 2 || Math.abs(dz) === 2) && !openCol(fx + Math.sign(dx), fz + Math.sign(dz), fy)) continue // (two off: through the one between)
         if (!world.standable(bot, x, y, z) || hot(world.at(bot, x, y, z)) || world.dropAt(bot, x + 0.5, y, z + 0.5) > world.SAFE_DROP) continue
         // (the way there at the body's OWN height too: stood on a campfire's top (y+0.44) the body passes at that level - a
         //  cell a step down with a wall at the body's height was picked, steered into for 14s, and the bot burned on the
@@ -1678,7 +1693,21 @@ function tick () {
         }
         return f
       }
-      const hb = hot(here) ? here : under
+      const hb = hb0
+      // (A CAMPFIRE PUT OUT: a shovel's click on it - a player's way, the fire stays a block of the build and the body stands on
+      //  it unburnt. Ahead of any drop or break when no step off is enterable)
+      const shovel = !best && /campfire$/.test(hb.name) ? inv.items(bot).find(i => /_shovel$/.test(i.name)) : null
+      const dk = `${hb.position.x},${hb.position.y},${hb.position.z}`
+      if (shovel && !require('./move').inForeign(hb.position) && !(douseTried.get(dk) > Date.now())) {
+        if (!douseTried.has(dk + ':at') || Date.now() - douseTried.get(dk + ':at') > 60000) douseTried.set(dk + ':at', Date.now()) // (a douse a minute ago is a new one)
+        // (a douse that has not put it out in 4s gives the break and the drop their turn for 10s; audit)
+        if (Date.now() - douseTried.get(dk + ':at') > 4000) { douseTried.set(dk, Date.now() + 10000); douseTried.delete(dk + ':at') }
+        if (!active || active.kind !== 'hot') { setActive('hot', 'off a burning floor'); log('reflex', `standing on a lit ${hb.name} at ${hb.position.x},${hb.position.y},${hb.position.z}${stuckOn ? ' 1.5s, no step off taken' : ', no cell to step off to'} - putting it out with the ${shovel.name}`) }
+        try { bot.pathfinder.setGoal(null) } catch {}
+        for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
+        if (!busy) runBusy('put the fire out', async () => { if (!bot.heldItem || bot.heldItem.name !== shovel.name) await bot.equip(shovel, 'hand'); await bot.activateBlock(world.at(bot, hb.position.x, hb.position.y, hb.position.z)) }, 2500)
+        return
+      }
       const shortFall = best ? null : fallTo(world.SAFE_DROP)
       // (never their campfire: refused, it was chosen again every tick and the jump-off below never ran - foreign.js, audit)
       const breakIt = !best && !shortFall && !!hb && hb.hardness != null && hb.hardness >= 0 && !require('./move').inForeign(hb.position)
@@ -1698,7 +1727,11 @@ function tick () {
       else if (breakIt) { if (!busy) runBusy('break the fire', () => require('./act').digBlock(bot, hb, { own: true }).catch(() => false), 4000, null, stopDig) }
       else { bot.setControlState('jump', true); bot.setControlState('forward', true) }
       return
-    } else if (active && active.kind === 'hot') return clearActive()
+    } else if (active && active.kind === 'hot') {
+      // (in the air over the fire - a bounce - the row holds: cleared, the eat row bit a loaf mid-bounce and the clock restarted)
+      if (!bot.entity.onGround && (hot(under) || hot(world.at(bot, fx, fy - 2, fz)))) return
+      return clearActive()
+    }
   }
 
   const hs = hostiles(24)
