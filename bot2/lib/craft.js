@@ -57,7 +57,11 @@ const GATHER = {
   red_tulip: { blocks: /^red_tulip$/, tool: null, tier: 0, plant: true },
   rose_bush: { blocks: /^rose_bush$/, tool: null, tier: 0, plant: true },
   flint: { blocks: /^gravel$/, tool: 'shovel', tier: 0 },
-  sugar_cane: { blocks: /^sugar_cane$/, tool: null, tier: 0 },
+  // SUGAR CANE CUT A PLAYER'S WAY: a block with cane under it, the stalk's foot left standing - it grows back (a block about
+  // every 18 minutes of a loaded day) and its patch is kept for the next trip (pickPlants keeps a spot whose plant is still
+  // there). The ground skill's rule - no water beside the block - took nothing: cane grows only at the water's edge, and the
+  // castle's 606 cane (63 bookshelves' paper) had never been gathered, 2026-10-07
+  sugar_cane: { blocks: /^sugar_cane$/, tool: null, tier: 0, plant: true, filter: (bot, b) => { const dn = bot.blockAt(b.position.offset(0, -1, 0)); return !!dn && dn.name === 'sugar_cane' } },
   apple: { blocks: /^(oak_leaves|dark_oak_leaves)$/, tool: null, tier: 0 },
   // picked where they grow (forage.js keeps the trips and the searched-out memory; every other dye flower is read off
   // the recipe graph there). filter(bot, b): which of them to take. force: a plant act.dig's natural list lacks.
