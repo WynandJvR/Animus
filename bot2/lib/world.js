@@ -127,6 +127,29 @@ function standable (bot, x, y, z) {
   return true
 }
 
+// A LIT FIRE: HOT_RE, and a campfire put out burns nothing (unknown state: lit)
+function campfireLit (b) { try { const v = b.getProperties().lit; return v === true || v === 'true' } catch { return true } }
+function hotBlock (b) { return !!b && HOT_RE.test(b.name) && !(/campfire$/.test(b.name) && !campfireLit(b)) }
+// WHAT BURNS A BODY IN THIS CELL: a hot block in the feet cell itself, or the one under it - only when the feet cell's block
+// HOLDS the body: its top at the feet. A lit campfire under a SHUT TRAPDOOR is the castle's chimney: the body stands on the
+// trapdoor 0.75 over the fire's top, unburnt - read as "standing on campfire", the hot reflex stepped it off onto the next
+// chimney and the lip reflex put it back, two minutes at hp 20, 2026-10-07 15:38. A box that does not hold the body (a ladder,
+// an open trapdoor's plate, a pane's or bars' edge, a gate wedged beside us: its top is not at the feet) leaves the block under
+// it in play - magma under a ladder burns (audit). `feet`: the body's own y when it is there; a stand weighed (the reflex's
+// targets, the planner's nodes) rests on the feet block's top when that is a floor under a full block high, else on the cell's
+// bottom. Null: nothing burns there. (Here, not in reflex.js: the planner's cost reads it too - one predicate, no cycle)
+function burnsAt (bot, x, y, z, feet = null) {
+  const here = at(bot, x, y, z)
+  if (hotBlock(here)) return here
+  if (here && here.boundingBox === 'block') {
+    const top = floorTop(here)
+    const rest = feet != null ? feet : (isSolid(here) && !isOpenTrapdoor(here) && top < 1 ? y + top : y)
+    if (Math.abs(y + top - rest) <= 0.01) return null
+  }
+  const under = at(bot, x, y - 1, z)
+  return hotBlock(under) ? under : null
+}
+
 function feetPos (bot) { return bot.entity.position.floored() }
 // THE CELL THE BODY STANDS IN, as the pathfinder reckons it (its start node, mineflayer-pathfinder index.js:84): on a
 // bottom slab, a stair, a path block the feet are inside the block's own cell - floored, one below the stand every plan
@@ -370,5 +393,5 @@ module.exports = { standCell, isOpenTrapdoor, plateEdge, LANTERN_RE, FURNITURE_R
   data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, floorTop, eyeAt, feetPos, eyeBlock,
   headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
   groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,
-  bodyPassable, CLIMBABLE_RE, WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE, HOT_RE, CONTACT_HURT_RE
+  bodyPassable, CLIMBABLE_RE, WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE, HOT_RE, CONTACT_HURT_RE, hotBlock, burnsAt
 }

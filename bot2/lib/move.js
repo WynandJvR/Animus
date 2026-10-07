@@ -227,7 +227,9 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
     // (and never a step whose FLOOR is one: the feet cell's rule (blocksToAvoid) kept the campfire out of the feet, but its
     //  0.44 top passed the floor test - a walk planned to stand ON it, stepped up without a jump, and the bot burned twice;
     //  the same rule standable() holds; audit)
-    if (v === undefined) { const f = world.at(bot, p.x, p.y - 1, p.z); v = (f && world.HOT_RE.test(f.name)) || world.HOT_RE.test(block.name) ? 100 : [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, p.x + dx, p.y, p.z + dz); return !!b && world.HOT_RE.test(b.name) }) ? 30 : 0; hotNear.set(key, v) }
+    // (what burns the body there is world.burnsAt's reading, the hot reflex's own: the chimney campfire under a shut trapdoor is
+    //  no fire under the trapdoor's stand - priced as one, the castle's chimney ledges were walked round; audit 2026-10-07)
+    if (v === undefined) { v = world.burnsAt(bot, p.x, p.y, p.z) || world.HOT_RE.test(block.name) ? 100 : [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, p.x + dx, p.y, p.z + dz); return !!b && world.HOT_RE.test(b.name) }) ? 30 : 0; hotNear.set(key, v) }
     return v
   })
   // (never a DIAGONAL step past a drop that hurts: the body's 0.6 hitbox sweeps the corner cell of a diagonal, and a

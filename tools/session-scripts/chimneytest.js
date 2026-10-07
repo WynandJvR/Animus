@@ -15,7 +15,10 @@ const memory = require(LIB + 'memory.js'); memory.get = () => ({})
 // `fire3`, x=4 stone y62 (plain ground at the feet level 63), x=5 wall.
 let campfireAt1 = 'chimney' // 'chimney' | 'open' (no trapdoor: the campfire itself is the top)
 let fire3 = true
+// (and a row at z = 3 for the feet-cell boxes that do NOT hold the body: magma at y62 under a ladder (x=1), an open trapdoor
+//  (x=2), and a shut one (x=3, which does hold it))
 const cell = (x, y, z) => {
+  if (z === 3 && x >= 1 && x <= 3) return y <= 61 ? 'stone' : y === 62 ? 'magma_block' : y === 63 ? (x === 1 ? 'ladder' : 'spruce_trapdoor') : 'air'
   if (y < 56) return 'stone'
   if (x <= 0) return y < 56 ? 'stone' : 'air'
   if (x >= 5) return y <= 65 ? 'stone' : 'air'
@@ -33,8 +36,9 @@ const blockAt = p => {
   const x = Math.floor(p.x); const y = Math.floor(p.y); const z = Math.floor(p.z)
   const n = cell(x, y, z); const b = md.blocksByName[n]
   const solid = n !== 'air' && n !== 'fire'
-  const props = n === 'campfire' ? { lit: true } : n === 'spruce_trapdoor' ? { open: false, half: 'bottom' } : {}
-  const shapes = n === 'campfire' ? [[0, 0, 0, 1, 0.4375, 1]] : n === 'spruce_trapdoor' ? [[0, 0, 0, 1, 0.1875, 1]] : solid ? [[0, 0, 0, 1, 1, 1]] : []
+  const open = n === 'spruce_trapdoor' && z === 3 && x === 2
+  const props = n === 'campfire' ? { lit: true } : n === 'spruce_trapdoor' ? { open, half: 'bottom' } : {}
+  const shapes = n === 'campfire' ? [[0, 0, 0, 1, 0.4375, 1]] : n === 'spruce_trapdoor' ? (open ? [[0, 0, 0.8125, 1, 1, 1]] : [[0, 0, 0, 1, 0.1875, 1]]) : n === 'ladder' ? [[0, 0, 0.8125, 1, 1, 1]] : solid ? [[0, 0, 0, 1, 1, 1]] : []
   return { name: n, type: b.id, stateId: b.defaultState, position: new Vec3(x, y, z), boundingBox: solid ? 'block' : 'empty', shapes, getProperties: () => props, transparent: !solid, hardness: solid ? 2 : 0 }
 }
 const handlers = {}; const cs = {}
@@ -56,6 +60,13 @@ check(!reflex._burnsAt(1, 63, 0), 'the trapdoor cell itself: nothing burns the b
 check(!reflex._safeStand(3, 63, 0), 'a cell with fire in it: no safe stand')
 check(reflex._safeStand(4, 63, 0), 'plain ground: a safe stand')
 check(!reflex._safeStand(0, 63, 0), 'the lip column: no stand')
+
+// boxes in the feet cell that do NOT hold the body: magma under them still burns (live feet on the magma's top: y 63.0)
+check(!!reflex._burnsAt(1, 63, 3, 63.0), 'magma under a LADDER: it burns the body standing in the ladder cell')
+check(!!reflex._burnsAt(2, 63, 3, 63.0), "magma under an OPEN trapdoor's plate: it burns")
+check(!reflex._burnsAt(3, 63, 3, 63.1875), 'magma under a SHUT trapdoor, the body on the trapdoor: nothing burns')
+check(!world.burnsAt(bot, 3, 63, 3) && !world.burnsAt(bot, 1, 63, 0), "the planner's node on a shut trapdoor (over magma, over a lit campfire): not priced as fire")
+check(!!world.burnsAt(bot, 1, 63, 3) && !!world.burnsAt(bot, 2, 63, 3), "the planner's node in a ladder / open-trapdoor cell over magma: fire")
 
 // 1. on the chimney's trapdoor: no hot row
 for (let i = 0; i < 4; i++) tick()
