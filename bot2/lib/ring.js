@@ -22,6 +22,7 @@ const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]]
 // known: edgeOk; the room rules last, only for the blocks the walkway takes: refused)
 function blockOk (w, r) {
   const b = w.at(r.x, r.y, r.z); if (!b || !w.isAirish(b) || w.jobHas(r.x, r.y, r.z)) return false
+  if (w.protected && w.protected(r.x, r.y, r.z)) return false // (never in the finished build's walking space: designwalk.js)
   for (const dy of [1, 2]) { const u = w.at(r.x, r.y + dy, r.z); if (!u || !w.isAirish(u) || w.jobHas(r.x, r.y + dy, r.z)) return false }
   if (w.hot(r.x, r.y + 1, r.z) || SIDES.some(([dx, dz]) => w.hot(r.x + dx, r.y + 1, r.z + dz))) return false
   return true
@@ -116,7 +117,7 @@ async function planRingAt (w, cells, opts, y, st) {
         for (let yy = y; yy >= y - 6; yy--) if (opts.stand(n.x, yy, n.z)) { fy = yy; break }
         if (fy == null || fy > y) continue
         let free = true
-        for (let yy = fy; yy <= y + 2 && free; yy++) { const b = w.at(n.x, yy, n.z); if (!b || !w.isAirish(b) || w.jobHas(n.x, yy, n.z)) free = false }
+        for (let yy = fy; yy <= y + 2 && free; yy++) { const b = w.at(n.x, yy, n.z); if (!b || !w.isAirish(b) || w.jobHas(n.x, yy, n.z) || (yy <= y && w.protected && w.protected(n.x, yy, n.z))) free = false }
         if (!free) continue
         const tower = []; for (let yy = fy; yy <= y; yy++) tower.push({ x: n.x, y: yy, z: n.z })
         let bad = false; for (const t of tower.concat([r])) if (await refused(t)) { bad = true; break }

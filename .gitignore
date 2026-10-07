@@ -82,3 +82,6 @@ tools/session-scripts/rollback/
 tools/session-scripts/last-deploy.txt
 tools/session-scripts/lint/node_modules/
 tools/session-scripts/.deploying
+
+# design walk cache (finished-blueprint walk graph - live coords)
+bot2/design-*.json

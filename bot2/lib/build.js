@@ -469,6 +469,7 @@ async function setJob (bot, name, origin, { exactWood: exact = true, prefs } = {
   log('build', `job "${name}" at ${move.fmt(origin)}: ${cells.length} blocks, box ${box.x1}..${box.x2} ${box.y1}..${box.y2} ${box.z1}..${box.z2}`)
   site = loadSite(job)
   if (!site) ensureSnapshot(bot) // at once when the chunks are here; else before any work starts
+  design = null; designBot = bot; designFor(bot) // (the finished build's walking space: in the background, yielding)
   return job
 }
 
@@ -1394,6 +1395,9 @@ function feetFor (bot, c, rej = null) {
     let clear = true; let why = ''
     for (let y = gy + 1; y <= c.y + 1 && clear; y++) { const b = world.at(bot, x, y, z); if (job.index.has(key({ x, y, z }))) { clear = false; why = y > c.y - 1 ? 'a build cell at the cell\'s height' : 'a build cell below the cell' } else if (!b || !world.isAirish(b)) { clear = false; why = 'a block in the column' } }
     if (!clear) { no(why); continue }
+    // (the tower's own blocks - the foot's column up to under the stand that reaches the cell - never in the finished build's
+    //  walking space: designwalk.js)
+    { let prot = false; for (let y = gy + 1; y <= c.y - 2 && !prot; y++) if (walkProtected({ x, y, z })) prot = true; if (prot) { no('the castle\'s own walking space'); continue } }
     // (on the floor or the ground, not up on a ledge of the build: the walk to a window ledge at y128 stuck every time)
     const raised = gy > job.box.y1 ? 25 : 0
     // (and below the build's floor, off its rim, last: the slope under the south rim - feet at y112-115 for a y125 cell -
@@ -1637,6 +1641,84 @@ async function pillarTo (bot, c, first, stop = cellStop) {
   return false
 }
 let lastPlaceFail = ''
+// ---- THE DESIGN'S OWN WALKING SPACE (designwalk.js) ------------------------------------------------------------------
+// The finished build's walk graph over the site as it was: its stands' feet and head cells (none of the build's own) are
+// never a block of ours - no stepping stone, tower, temporary support or ring block - and a stray of ours found in one is
+// taken out before any ring is planned for the floor it cuts off. Computed once a job (yielding slices), kept on disk by the
+// blueprint's hash. null until ready: until then nothing is protected (as before)
+const designwalk = require('./designwalk')
+let design = null; let designBusy = false; let designBot = null
+function designFile (j) { return path.join(path.dirname(mem.FILE), `design-${String(j.name).replace(/[^A-Za-z0-9_-]/g, '_')}-${j.origin.x}_${j.origin.y}_${j.origin.z}.json`) }
+function walkProtected (p) {
+  if ((!design || design.job !== job) && !designBusy && job && site && designBot) designFor(designBot)
+  return !!design && design.job === job && design.protected.has(`${p.x},${p.y},${p.z}`)
+}
+// the build as its blueprint draws it, finished, over the site as it was (designwalk.designWorld)
+function designWorld (bot) { return designwalk.designWorld(bot.registry, (x, y, z) => { const c = job.index.get(`${x},${y},${z}`); return c && !c.clear ? c : null }, job.box, snapName) }
+async function designFor (bot) {
+  if (designBusy || !job || !site) return design
+  designBusy = true; const j = job; const t0 = Date.now()
+  try {
+    const tick = ringTicker()
+    // (the blueprint's hash, in slices: the cells and the box)
+    const h = require('crypto').createHash('sha1'); h.update(JSON.stringify(j.box))
+    for (let i = 0; i < j.cells.length; i += 2000) { h.update(j.cells.slice(i, i + 2000).map(c => `${c.x},${c.y},${c.z},${c.name},${JSON.stringify(c.props || {})};`).join('')); await tick() }
+    const hash = h.digest('hex')
+    let cached = null; try { cached = JSON.parse(fs.readFileSync(designFile(j), 'utf8')) } catch {}
+    if (cached && cached.hash === hash) {
+      if (job !== j) return null // (another job meanwhile)
+      design ={ job: j, hash, protected: new Set(cached.protected), parent: new Map(cached.parent) }
+      log('build', `design walk: ${design.parent.size} stands, ${design.protected.size} protected cells (from disk) in ${Date.now() - t0}ms`)
+      return design
+    }
+    const r = site.region
+    const g = await designwalk.designGraph(designWorld(bot), j.box, { x1: r.x1, x2: r.x2, z1: r.z1, z2: r.z2, y1: r.y1, y2: r.y2 }, { tick })
+    const prot = designwalk.protectedOf(g, j.box, (x, y, z) => { const c = j.index.get(`${x},${y},${z}`); return !!c && !c.clear })
+    if (job !== j) return null // (another job meanwhile)
+    design = { job: j, hash, protected: prot, parent: g.parent }
+    try { fs.writeFileSync(designFile(j), JSON.stringify({ hash, protected: [...prot], parent: [...g.parent] })) } catch {}
+    log('build', `design walk: ${g.stands} stands of the finished build, ${prot.size} protected cells - ${Date.now() - t0}ms, longest slice ${tick.longest()}ms`)
+    return design
+  } catch (e) { log('build', `design walk failed: ${e.message}`); return null } finally { designBusy = false }
+}
+// THE CASTLE'S OWN WAY UP, BLOCKED ONLY BY OUR STRAYS: a stand of the finished build in reach of c, its route in the design
+// graph walked back from it to where the walk already reaches; on that stretch every floor stands (as the world is now)
+// and every feet and head cell is open or one of OUR strays (the snapshot diff: open before the work, no cell of the
+// build, nobody else's) - those are taken out, from the reachable end. Anything else in the way (an unbuilt floor, a block
+// not ours): not this route. Returns the strays taken out (0: none, or no such route)
+const designTried = new Set()
+async function clearDesignWay (bot, c) {
+  if (!design || design.job !== job || !reachCurrent(bot) || reach.capped) return 0
+  // the design's stands in reach of c, the nearest first
+  const ds = []
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 1; dy++) {
+    const s = { x: c.x + dx, y: c.y + dy, z: c.z + dz }; const k = key(s)
+    if (!design.parent.has(k) || reach.cells.has(k)) continue
+    if (!ring.eyeReaches({ x: s.x + 0.5, y: s.y, z: s.z + 0.5 }, { x: c.x + 0.5, y: c.y, z: c.z + 0.5 })) continue
+    ds.push(s)
+  }
+  ds.sort((a, b) => world.dist3(a, c) - world.dist3(b, c))
+  for (const d of ds.slice(0, 6)) {
+    if (designTried.has(key(d) + '@' + planBand)) continue
+    designTried.add(key(d) + '@' + planBand)
+    const { strays, blocked } = designwalk.routeBlockers(design, d, { reachHas: k => reach.cells.has(k), at: (x, y, z) => world.at(bot, x, y, z), isOurs: q => isStray(bot, q.x, q.y, q.z), isProtected: q => walkProtected(q) })
+    if (blocked || !strays.length) { if (blocked) log('build', `the castle's own way to ${key(d)} (for ${c.name} at ${move.fmt(c)}): ${blocked} - not ours to clear`); continue }
+    log('build', `the castle's own way up to ${key(d)} (for ${c.name} at ${move.fmt(c)}) is blocked only by our own strays: ${strays.map(q => (world.at(bot, q.x, q.y, q.z) || {}).name + '@' + key(q)).join(' ')} - taking them out`)
+    let n = 0; const t0 = Date.now()
+    for (const q of strays.slice(0, 12)) {
+      if ((stepStop && stepStop()) || Date.now() - t0 > 90000) break
+      if (!isStray(bot, q.x, q.y, q.z)) continue // (asked again at the dig: never a block not ours)
+      if (!act.reach(bot, new Vec3(q.x, q.y, q.z), 4.3)) await goSite(bot, new goals.GoalNear(q.x, q.y, q.z, 3), 'clear our stray', { place: false, shouldStop: stepStop }).catch(() => null)
+      if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { force: true, own: true, allowZones: ['build', 'base'], timeoutMs: 10000 }).catch(() => false)) n++
+      else log('build', `our stray at ${key(q)} on the castle's own way would not come out (${act.lastDigWhy() || '?'})`)
+    }
+    log('build', `the castle's own way up to ${key(d)}: ${n} of ${strays.length} strays taken out`)
+    reach = null; await walkReach(bot).catch(() => null)
+    return n
+  }
+  return 0
+}
+
 // ---- THE SCAFFOLD RING (ring.js plans it; laid here, ledgered, kept while it serves) --------------------------------
 // The castle's y129 band: every stand plan "none", led by "a build cell at the cell's height" - the columns beside a wall
 // cell high up are the wall and the room's other build cells - and 1 placed in 15 minutes, 2026-10-07 16:34. A ledge of our
@@ -1666,6 +1748,7 @@ function ringWorld (bot) {
     jobHas: (x, y, z) => !!job && job.index.has(`${x},${y},${z}`),
     airDown: (x, y, z) => { for (let k = 0; k <= 32; k++) { const b = world.at(bot, x, y - k, z); if (!b || world.isLavaBlock(b)) return null; if (!world.isAirish(b)) return k } return null },
     hot: (x, y, z) => { const b = world.at(bot, x, y, z); const u = world.at(bot, x, y - 1, z); return (!!b && world.HOT_RE.test(b.name)) || (!!u && world.HOT_RE.test(u.name)) },
+    protected: (x, y, z) => walkProtected({ x, y, z }),
     SAFE_DROP: world.SAFE_DROP
   }
 }
@@ -1968,6 +2051,10 @@ async function placeCell (bot, c, j = job) {
         // NO STAND AND NO PILLAR FOOT: a ring - the layer's walkway of our own filler (ring.js), laid once a cell a band; the
         // cell is then NOT TRIED this step (no miss): the next pick finds the ring's top in the walk
         ringTried.add(key(c) + '@' + planBand)
+        // (the castle's OWN way up first: a route of the finished build to a stand for c, blocked only by our strays - taken out,
+        //  and the cell tried again with the walk it opens; a ring only where the design has no such way)
+        const cleared = await clearDesignWay(bot, c)
+        if (cleared) return why(`not tried: ${cleared} of our strays taken off the castle's own way up - its stand comes with the next pick${whereFrom()}`)
         const laid = await ringFor(bot, c)
         if (laid) {
           const rs2 = reachStandFor(bot, pos)
@@ -2032,6 +2119,7 @@ async function placeCell (bot, c, j = job) {
       for (const p of plans) {
         const sp = { x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] }
         if (j.index.has(key(sp))) continue
+        if (walkProtected(sp)) continue // (never in the finished build's walking space: designwalk.js)
         if (c.pour && p.off[1] === 1) continue // (a pour against an underside wants an eye below it - never from the floor beside; audit)
         if (c.hole && p.off[1] === -1) continue // (never into the pocket under a hole - sealed by the floor, out of the teardown's reach; audit)
         if (sp.x === me.x && sp.z === me.z && (sp.y === me.y || sp.y === me.y + 1)) continue
@@ -3105,7 +3193,7 @@ function siteTeardownPlan (bot) {
   let nearLeft = null
   if (left.length && left.length < Math.min(200, job.cells.length * 0.03)) { /* (a share as well: on a small build 200 left is still layers of work; audit) */ nearLeft = new Set(); for (const c of left) for (let dx = -6; dx <= 6; dx++) for (let dz = -6; dz <= 6; dz++) nearLeft.add((c.x + dx) + ',' + (c.z + dz)) }
   globalBot = bot; const rings = ringHolds() // (a ring's blocks while it still serves a cell: kept, whatever the band - ring.js)
-  const keep = p => (p.y >= bandY && (!nearLeft || nearLeft.has(p.x + ',' + p.z))) || sups.has(key(p)) || isStep(p) || rings.has(key(p))
+  const keep = p => !walkProtected(p) && ((p.y >= bandY && (!nearLeft || nearLeft.has(p.x + ',' + p.z))) || sups.has(key(p)) || isStep(p) || rings.has(key(p))) // (a stray in the finished build's walking space is never kept: designwalk.js)
   // (and our ledger's blocks under the snapshot's region - it starts 2 under the base: the rim bank's columns at y112-116
   //  were never in the site diff, so never taken; audit)
   const r = site.region
@@ -3533,7 +3621,7 @@ async function costReport (bot, name, prefs = null) {
   return { name, total, typicalUnitSec: med, kinds: rows.length, blocks: rows.reduce((a, r) => a + r.count, 0), flagged: rows.filter(r => r.flag), top: rows.slice(0, 12) }
 }
 
-module.exports = { boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, walkReach, reachStandFor, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { walkProtected, designFor, boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, walkReach, reachStandFor, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,

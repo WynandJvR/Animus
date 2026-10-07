@@ -231,7 +231,75 @@ for (const c0 of tops) {
 }
 console.log(`ring: ${tops.length} upper wall-top cells (${unstood} with no stand in reach); ${ringsLaid} rings planned (${ringBlocks} blocks); ${ringServed} cells served with a reachable stand in reach, ${ringUnserved} not${ringEx.length ? ' (' + ringEx.join(' ') + ')' : ''}; planning ${planMs}ms for ${refusals} room-rule questions, longest slice ${longest}ms`)
 const hard = Object.entries(byClass).filter(([c]) => !/ladder/.test(c)).reduce((t, [, n]) => t + n, 0)
-const fails = [hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, longest > 25 && `the ring plan held the loop ${longest}ms in one slice`, ringUnserved && `${ringUnserved} cells a ring was planned for still without a stand`, !ringsLaid && tops.length >= 3 && 'no ring planned on the site', droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
+// THE FINISHED CASTLE'S OWN WALKING SPACE (designwalk.js) - the blueprint, finished, over the site's snapshot as it was:
+// (1) its walk graph from the ground round it reaches every upper floor (every group of 20+ stands 5+ over the base);
+// (2) the dump's blocks standing in that space - strays, by definition (the space is open in the design and no cell of the
+//     build) - and after the clear's own selection (each upper floor's route: the strays on it, where nothing but strays
+//     blocks it) none left on those routes; (3) the computation's longest slice (body first)
+let design = null; const fs = require('fs')
+try {
+  process.env.BOT2_LOG_FILE = process.env.BOT2_LOG_FILE || path.join(require('os').tmpdir(), 'castlewalktest.log')
+  const memory = require(path.join(bot2, 'lib', 'memory')); const fakeMem = { stats: {} }; memory.get = () => fakeMem; memory.set = (k0, v) => { fakeMem[k0] = v; return v }; memory.update = f => f(fakeMem); memory.save = () => {}
+  const bp = require(path.join(bot2, 'lib', 'blueprint')); const dw = require(path.join(bot2, 'lib', 'designwalk'))
+  const sch = await bp.load('mini-castle-medieval', '26.2', {})
+  const O = { x: -2299, y: 119, z: -615 }; const sz = sch.size
+  const box = { x1: O.x, y1: O.y, z1: O.z, x2: O.x + sz.x - 1, y2: O.y + sz.y - 1, z2: O.z + sz.z - 1 }
+  const cellsD = new Map()
+  for (let y = 0; y < sz.y; y++) for (let z = 0; z < sz.z; z++) for (let x = 0; x < sz.x; x++) { const b = sch.getBlock(new Vec3(x, y, z)); if (b && b.name !== 'air') cellsD.set(`${O.x + x},${O.y + y},${O.z + z}`, { name: b.name, props: b.getProperties() }) }
+  const siteF = path.join('C:/mc-bot-lab/bot2', `site-mini-castle-medieval-${O.x}_${O.y}_${O.z}.json`)
+  const site = JSON.parse(fs.readFileSync(fs.existsSync(path.join(bot2, path.basename(siteF))) ? path.join(bot2, path.basename(siteF)) : siteF, 'utf8'))
+  const R0 = site.region
+  const snapName = (x, y, z) => (x < R0.x1 || x > R0.x2 || y < R0.y1 || y > R0.y2 || z < R0.z1 || z > R0.z2) ? undefined : site.palette[site.layers[y - R0.y1].charCodeAt((z - R0.z1) * (R0.x2 - R0.x1 + 1) + (x - R0.x1)) - 48]
+  const wD = dw.designWorld(registry, (x, y, z) => cellsD.get(`${x},${y},${z}`) || null, box, snapName)
+  let sl = Date.now(); let longestD = 0
+  const tickD = async () => { const d = Date.now() - sl; if (d > longestD) longestD = d; if (d > 8) { await new Promise(r => setImmediate(r)); sl = Date.now() } }
+  const tD = Date.now()
+  const g = await dw.designGraph(wD, box, { x1: R0.x1, x2: R0.x2, z1: R0.z1, z2: R0.z2, y1: R0.y1, y2: R0.y2 }, { tick: tickD })
+  const msD = Date.now() - tD
+  const prot = dw.protectedOf(g, box, (x, y, z) => cellsD.has(`${x},${y},${z}`))
+  // (1) the upper floors: groups of the design's stands 5+ over the base, joined by its own steps
+  const WD = rooms.walkModel(wD, () => false, { opens: true })
+  const upper = new Set()
+  for (let y = box.y1 + 5; y <= box.y2; y++) for (let x = box.x1; x <= box.x2; x++) for (let z = box.z1; z <= box.z2; z++) if (WD.st(x, y, z)) upper.add(`${x},${y},${z}`)
+  // (joined both ways: a step down one way is a step up the other - the floor is the group, whichever way the walk enters it)
+  const adj = new Map(); for (const k0 of upper) adj.set(k0, [])
+  for (const k0 of upper) for (const n of WD.next(dw.parse(k0))) { const nk = key(n); if (upper.has(nk)) { adj.get(k0).push(nk); adj.get(nk).push(k0) } }
+  const seenU = new Set(); const floors = []
+  for (const k0 of upper) {
+    if (seenU.has(k0)) continue
+    const comp = [k0]; seenU.add(k0)
+    for (let i = 0; i < comp.length; i++) for (const nk of adj.get(comp[i])) if (!seenU.has(nk)) { seenU.add(nk); comp.push(nk) }
+    if (comp.length >= 20) floors.push(comp)
+  }
+  const unreachedFloors = floors.filter(f => !f.some(k0 => g.parent.has(k0)))
+  // (1) THE CASTLE'S OWN WAYS UP: the top of its staircase from the hall to the y129 landing, and of its ladder to the west
+  //     upper floor - the two ways the live upper story was cut off on, 2026-10-07 (the other upper groups: counted - roofs,
+  //     battlements and rooms the walk model does not enter are not all floors a body is meant to reach)
+  const tops = ['-2274,130,-582', '-2289,130,-577']
+  const topsMissing = tops.filter(k0 => !g.parent.has(k0))
+  // (2) THE CLEAR, on the finished castle with our strays where they stood live (the ladder's cap, the hall corridor's dirt,
+  //     the hall's andesite): the selection (designwalk.routeBlockers) from where the walk reaches, the strays taken out,
+  //     and the tops reached after
+  const strayAt = new Map([['-2289,130,-577', 'cobblestone'], ['-2266,122,-591', 'dirt'], ['-2266,123,-592', 'dirt'], ['-2272,123,-593', 'andesite'], ['-2271,123,-593', 'andesite']])
+  const strayBlocks = new Map([...strayAt].map(([k0, n]) => [k0, Block.fromProperties(n, {}, 0)]))
+  const liveAt = (x, y, z) => strayBlocks.get(`${x},${y},${z}`) || wD.at(x, y, z)
+  const wL = Object.assign({}, wD, { at: liveAt, standable: (x, y, z) => world.standable({ blockAt: v => liveAt(v.x, v.y, v.z) }, x, y, z) })
+  sl = Date.now(); const gL = await dw.designGraph(wL, box, { x1: R0.x1, x2: R0.x2, z1: R0.z1, z2: R0.z2, y1: R0.y1, y2: R0.y2 }, { tick: tickD })
+  const before = tops.filter(k0 => gL.parent.has(k0))
+  const selected = new Map()
+  for (const k0 of tops) { const r = dw.routeBlockers(g, k0, { reachHas: kk => gL.parent.has(kk), at: liveAt, isOurs: q => strayBlocks.has(key(q)), isProtected: q => prot.has(key(q)) }); for (const q of r.strays) selected.set(key(q), q); if (r.blocked) console.log('  route to ' + k0 + ': ' + r.blocked) }
+  for (const k0 of selected.keys()) strayBlocks.delete(k0)
+  sl = Date.now(); const gA = await dw.designGraph(wL, box, { x1: R0.x1, x2: R0.x2, z1: R0.z1, z2: R0.z2, y1: R0.y1, y2: R0.y2 }, { tick: tickD })
+  const after = tops.filter(k0 => gA.parent.has(k0))
+  // (left blocking: the strays the selection would still find past the walk's reach after the clear - none; the others stand
+  //  off the way the walk takes, and the teardown's rule takes them: never kept in a protected cell)
+  const leftOnRoutes = tops.reduce((t, k0) => t + dw.routeBlockers(g, k0, { reachHas: kk => gA.parent.has(kk), at: liveAt, isOurs: q => strayBlocks.has(key(q)), isProtected: q => prot.has(key(q)) }).strays.length, 0)
+  const strayInProt = [...strayAt.keys()].filter(k0 => prot.has(k0)).length
+  design = { stands: g.stands, prot: prot.size, ms: msD, longest: longestD, floors: floors.length, unreachedFloors: unreachedFloors.length, topsMissing, before: before.length, after: after.length, selected: selected.size, leftOnRoutes, strayInProt }
+  console.log(`design walk: ${g.stands} stands of the finished castle, ${prot.size} protected cells - ${msD}ms, longest slice ${longestD}ms; its own ways up reached: ${tops.length - topsMissing.length}/${tops.length}; upper groups of 20+ stands: ${floors.length - unreachedFloors.length} of ${floors.length} reached by the walk model`)
+  console.log(`design clear: the live strays ${strayInProt}/${strayAt.size} in protected cells; tops reached before the clear ${before.length}/${tops.length}, ${selected.size} strays selected (${[...selected.keys()].join(' ')}), after ${after.length}/${tops.length}; ${leftOnRoutes} left blocking a route (${strayBlocks.size} more in the walking space off the way taken - the teardown's)`)
+} catch (e) { console.log('design walk: could not run - ' + e.message); design = { error: e.message } }
+const fails = [design && design.error && 'the design walk did not run: ' + design.error, design && design.topsMissing && design.topsMissing.length && `the finished castle's walk misses its own ways up: ${design.topsMissing.join(' ')}`, design && design.after != null && design.after < 2 && `after the clear the castle's own ways up are still cut (${design.after}/2)`, design && design.longest > 25 && `the design walk held the loop ${design.longest}ms`, design && design.leftOnRoutes && `${design.leftOnRoutes} strays left blocking the castle's own routes`, hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, longest > 25 && `the ring plan held the loop ${longest}ms in one slice`, ringUnserved && `${ringUnserved} cells a ring was planned for still without a stand`, !ringsLaid && tops.length >= 3 && 'no ring planned on the site', droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
 console.log(fails.length ? `FAIL ${fails.join('; ')}` : 'PASS')
 process.exit(fails.length ? 1 : 0)
 })()

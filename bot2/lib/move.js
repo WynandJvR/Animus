@@ -398,6 +398,9 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   //  planner laid cobble into the castle's unbuilt cells, and a site clearing spent 176s taking 14 of them back out,
   //  2026-09-29)
   m.exclusionAreasPlace.push(block => isProtected(block, 'fill') ? 100 : 0)
+  // (never a stepping stone in the finished build's walking space - its stairs, ladders, corridors: our cobble capped the
+  //  castle's ladder to its upper story and the floor read "no stand", 2026-10-07; build.walkProtected / designwalk.js)
+  m.exclusionAreasPlace.push(block => { if (!block || !block.position) return 0; try { return require('./build').walkProtected(block.position) ? 100 : 0 } catch { return 0 } })
   m.exclusionAreasPlace.push(block => {
     if (!block || !block.position) return 0
     const z = inZone(block.position); if (z && z.label === 'farm') return 101; if (z && !allowed.has(z.label)) return 100

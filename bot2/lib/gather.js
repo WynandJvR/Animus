@@ -565,6 +565,9 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     //  place no time is to spare)
     const cellB = world.at(bot, x0, y0, z0); const zn = move.inZone({ x: x0, y: y0, z: z0 })
     if (!builder && cellB && move.isProtected(cellB, 'fill')) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); return false }
+    // (the builder's towers never in the finished build's walking space - its stairs, ladders, corridors: designwalk.js; an
+    //  escape's tower is survival's, never held by it)
+    if (builder) { let wp = false; try { wp = require('./build').walkProtected({ x: x0, y: y0, z: z0 }) } catch {} if (wp) { towerWhy = 'the castle\'s own walking space'; return false } }
     if (zn && !allowZones.includes('*') && !allowZones.includes(zn.label)) { log('gather', `no tower at ${x0},${y0},${z0} - inside the ${zn.label}`); return false }
     await bot.look(bot.entity.yaw, -Math.PI / 2, true)
     bot.setControlState('jump', true)
