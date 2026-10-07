@@ -1692,7 +1692,7 @@ async function designFor (bot) {
   try {
     const tick = ringTicker()
     // (the blueprint's hash, in slices: the cells and the box)
-    const h = require('crypto').createHash('sha1'); h.update(JSON.stringify(j.box))
+    const h = require('crypto').createHash('sha1'); h.update(designwalk.DESIGN_RULES); h.update(JSON.stringify(j.box)) // (the rules too: a rule changed is a design to walk again)
     for (let i = 0; i < j.cells.length; i += 2000) { h.update(j.cells.slice(i, i + 2000).map(c => `${c.x},${c.y},${c.z},${c.name},${JSON.stringify(c.props || {})};`).join('')); await tick() }
     const hash = h.digest('hex')
     let cached = null; try { cached = JSON.parse(fs.readFileSync(designFile(j), 'utf8')) } catch {}
@@ -1773,10 +1773,10 @@ async function accessFor (bot, cells) {
   if (accessMemo && accessMemo.job === job && (accessMemo.reachAt === reach.at || Date.now() - accessMemo.at < 30000)) return
   accessBusy = true; const t0 = Date.now(); const tick = ringTicker()
   try {
-    const r = await designwalk.accessPlan(designWorld(bot), design, { reachHas: k => reach.cells.has(k), cells, isTodo: (x, y, z) => { const q = job.index.get(`${x},${y},${z}`); return !!q && !q.clear && cellDone(bot, q) !== true }, eyeReaches: ring.eyeReaches, tick })
+    const r = await designwalk.accessPlan(designWorld(bot), design, { reachHas: k => reach.cells.has(k), cells, isTodo: (x, y, z) => { const q = job.index.get(`${x},${y},${z}`); return !!q && !q.clear && cellDone(bot, q) !== true }, eyeReaches: ring.eyeReaches, at: (x, y, z) => world.at(bot, x, y, z), isOurs: q => isStray(bot, q.x, q.y, q.z), isProtected: q => walkProtected(q), tick })
     const prev = accessMemo && accessMemo.job === job ? accessMemo.cells.size : -1
     accessMemo = { job, cells: r.cells, at: Date.now(), reachAt: reach.at }
-    if (r.cells.size !== prev) log('build', `access first: ${r.needy} cells of the window with no stand in my walk, ${r.targets} stands of the finished build would reach them (${r.routed} with a way from my walk) - ${r.cells.size} cells make those ways${r.cells.size ? ' (e.g. ' + [...r.cells].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => (job.index.get(k) || {}).name + '@' + k + ' for ' + n).join(', ') + ')' : ''} - ${Date.now() - t0}ms, longest slice ${tick.longest()}ms`)
+    if (r.cells.size !== prev) log('build', `access first: ${r.needy} cells of the window with no stand in my walk, ${r.targets} stands of the finished build would reach them (${r.routed} with a way from my walk) - ${r.cells.size} cells make those ways${r.cells.size ? ' (e.g. ' + [...r.cells].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => (job.index.get(k) || {}).name + '@' + k + ' for ' + n).join(', ') + ')' : ''}${Object.keys(r.why || {}).length ? '; routed but not walked: ' + Object.entries(r.why).map(([w, e]) => `${e.n} ${w} (e.g. ${e.eg})`).join(', ') : ''} - ${Date.now() - t0}ms, longest slice ${tick.longest()}ms`)
   } catch (e) { log('build', `access plan failed: ${e.message}`) } finally { accessBusy = false }
 }
 

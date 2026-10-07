@@ -26,7 +26,11 @@ function designWorld (registry, cellAt, box, snapName) {
     const c = cellAt(x, y, z)
     // (a wooden trapdoor as a body meets it: opened - a hatch over a ladder is a way up to a player, shut it read as a lid and
     //  every floor over one as unreachable)
-    if (c) return blockOf(c.name, /_trapdoor$/.test(c.name) && !/^iron_/.test(c.name) ? Object.assign({}, c.props, { open: 'true' }) : c.props)
+    // (and a wooden DOOR as the body leaves it: open - its panel swung to the side its hinge gives, the passage straight through
+    //  it. Read shut, the design walked into the castle's double door at -2275,120,-579/-580 from the west and turned inside it
+    //  for the stairs north and south - a turn the open panels shut: 62 of 68 design routes "open" by the cell-by-cell follow
+    //  were refused by the live walk there, 2026-10-07 19:50)
+    if (c) return blockOf(c.name, /_trapdoor$|_door$/.test(c.name) && !/^iron_/.test(c.name) ? Object.assign({}, c.props, { open: 'true' }) : c.props)
     if (x >= box.x1 && x <= box.x2 && z >= box.z1 && z <= box.z2 && y >= box.y1) return air
     const n = snapName(x, y, z)
     return n ? blockOf(n, {}) : (y < box.y1 ? blockOf('stone', {}) : air)
@@ -102,7 +106,7 @@ async function routesFrom (w, graph, reachHas, targets, { tick = async () => {},
   let left = 0; for (const k of want) if (!prev.has(k)) left++
   for (let i = 0; i < q.length && prev.size < cap && left > 0; i++) {
     for (const n of W.next(q[i])) { const k = key(n); if (prev.has(k)) continue; prev.set(k, key(q[i])); if (want.has(k)) left--; q.push(n) }
-    if (i % 32 === 0) await tick()
+    if (i % 8 === 0) await tick()
   }
   const out = new Map()
   for (const t of want) {
@@ -120,7 +124,11 @@ async function routesFrom (w, graph, reachHas, targets, { tick = async () => {},
 //  place (isTodo). The castle's upper story: its stairs and ladder built, its floors not, and 3 of 16 upper groups reached -
 //  every upper cell "no stand", a ring plan a cell, 2026-10-07. Built first, the floor's way up comes before its walls.
 //  -> { cells: Map(key -> needy cells served), needy, targets, routed }. PURE; eyeReaches(stand, cell) by cell centres
-async function accessPlan (w, graph, { reachHas, cells, isTodo, eyeReaches, tick = async () => {}, maxNeedy = 400 }) {
+// (ONLY A CELL WHOSE ABSENCE BREAKS THE STAND, as the world stands (at): a floor cell with nothing solid in it now, a ladder not
+//  hung yet. A floor cell still to place but full of the old ground - coarse dirt over the site's grass - already bears the
+//  stand: "coarse_dirt@-2282,119,-593 for 188" topped the list with grass_block standing there, 2026-10-07 19:36. And what
+//  else keeps the routes' stands out of the walk, counted by reason (routeBlockers': the walk's stand a step at a time) - why)
+async function accessPlan (w, graph, { reachHas, cells, isTodo, eyeReaches, at = null, isOurs = () => false, isProtected = () => false, tick = async () => {}, maxNeedy = 400 }) {
   const has = k => near(reachHas, k)
   const ctr = p => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 })
   const needy = []; const serves = new Map() // target stand -> [needy keys]
@@ -141,18 +149,36 @@ async function accessPlan (w, graph, { reachHas, cells, isTodo, eyeReaches, tick
   const routes = serves.size ? await routesFrom(w, graph, reachHas, [...serves.keys()], { tick }) : new Map()
   const out = new Map() // job cell key -> Set of needy keys
   for (const [t, r] of routes) {
+    await tick()
     let from = -1; for (let i = r.length - 1; i >= 0; i--) if (has(r[i])) { from = i; break }
     for (const k of r.slice(from + 1)) {
       const s0 = parse(k)
       for (const dy of [-1, 0]) {
         const q = { x: s0.x, y: s0.y + dy, z: s0.z }
         if (!isTodo(q.x, q.y, q.z)) continue
+        if (at) {
+          const lb = at(q.x, q.y, q.z); const db = w.at(q.x, q.y, q.z)
+          if (dy === -1 && lb && world.isSolid(lb) && !world.isOpenTrapdoor(lb)) continue // (a floor there already)
+          if (dy === 0 && !(db && /^(ladder|vine)$/.test(db.name) && !(lb && lb.name === db.name))) continue // (its feet: only a ladder not hung)
+        }
         const kk = key(q); let set = out.get(kk); if (!set) out.set(kk, (set = new Set()))
         for (const nk of serves.get(t)) set.add(nk)
       }
     }
   }
-  return { cells: new Map([...out].map(([k, v]) => [k, v.size])), needy: needy.length, targets: serves.size, routed: routes.size }
+  // (what keeps each routed stand out of the walk: its route followed from the walk's side, the first stand the world does not
+  //  give - routeBlockers' reason, the numbers taken out; one example cell each)
+  const why = {}
+  if (at) {
+    let m = 0
+    for (const [t, r] of routes) {
+      await tick() // (a route at a time: routeBlockers walks the whole route)
+      const rb = routeBlockers(graph, t, { route: r, reachHas, at, isOurs, isProtected })
+      const reason = rb.blocked ? rb.blocked.replace(/-?\d+,-?\d+,-?\d+/g, 'X') : rb.strays.length ? 'only our strays' : 'open (a walk the live search does not take)'
+      const e = why[reason] || (why[reason] = { n: 0, eg: rb.blocked ? (rb.blocked.match(/-?\d+,-?\d+,-?\d+/) || [t])[0] : t }); e.n++
+    }
+  }
+  return { cells: new Map([...out].map(([k, v]) => [k, v.size])), needy: needy.length, targets: serves.size, routed: routes.size, why }
 }
 function routeBlockers (graph, d, { reachHas, at, isOurs, isProtected, route: given = null }) {
   const route = given || routeTo(graph, typeof d === 'string' ? d : key(d))
@@ -210,4 +236,6 @@ function routeBlockers (graph, d, { reachHas, at, isOurs, isProtected, route: gi
   }
   return { strays, blocked: null }
 }
-module.exports = { designWorld, designGraph, protectedOf, routeTo, routeFrom, routesFrom, accessPlan, routeBlockers, parse, key }
+// (the design's rules' version: in the cache's hash - a change here recomputes the walk)
+const DESIGN_RULES = 'doors-open-1'
+module.exports = { DESIGN_RULES, designWorld, designGraph, protectedOf, routeTo, routeFrom, routesFrom, accessPlan, routeBlockers, parse, key }

@@ -324,7 +324,7 @@ try {
   const hasStand = (rs, c) => { for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 1; dy++) { const st = { x: c.x + dx, y: c.y + dy, z: c.z + dz }; if (rs.has(relK(key(st))) && ringMod.eyeReaches({ x: st.x + 0.5, y: st.y, z: st.z + 0.5 }, { x: c.x + 0.5, y: c.y, z: c.z + 0.5 })) return true } return false }
   let slA = Date.now(); let longestA = 0
   const tickA = async () => { const d = Date.now() - slA; if (d > longestA) longestA = d; if (d > 8) { await new Promise(r => setImmediate(r)); slA = Date.now() } }
-  const ap = await dw.accessPlan(wD, g, { reachHas: k0 => reach0.has(relK(k0)), cells: todoList, isTodo: (x, y, z) => todoD.has(`${x},${y},${z}`), eyeReaches: ringMod.eyeReaches, tick: tickA, maxNeedy: 100000 })
+  const ap = await dw.accessPlan(wD, g, { reachHas: k0 => reach0.has(relK(k0)), cells: todoList, isTodo: (x, y, z) => todoD.has(`${x},${y},${z}`), eyeReaches: ringMod.eyeReaches, at: (x, y, z) => at(x - FO.x, y - FO.y, z - FO.z) || air, tick: tickA, maxNeedy: 100000 })
   const needyBefore = todoList.filter(c => !hasStand(reach0, c))
   // (the access cells placed in the dump - its own blocks, as the blueprint draws them - and the walk again)
   const saved = new Map()
@@ -333,6 +333,7 @@ try {
   const gained = needyBefore.filter(c => hasStand(reach1, c)).length
   for (const [rk, b0] of saved) { if (b0) cells.set(rk, b0); else cells.delete(rk) }
   console.log(`access first: ${todoList.length} cells still to place in the dump's height, ${needyBefore.length} with no stand of the walk; ${ap.targets} design stands would reach them, ${ap.routed} routed from the walk; ${ap.cells.size} access cells (the floor's way up) - placed, ${gained} of the ${needyBefore.length} gain a stand (walk ${reach0.size} -> ${reach1.size} cells); plan's longest slice ${longestA}ms`)
+  console.log('  routed stands not in the walk, by reason: ' + Object.entries(ap.why).sort((a0, b0) => b0[1].n - a0[1].n).slice(0, 5).map(([r0, e0]) => `${e0.n} ${r0} (e.g. ${e0.eg})`).join('; '))
   accessGain = { gained, needy: needyBefore.length, cells: ap.cells.size, longest: longestA }
   design = { standFar, stands: g.stands, prot: prot.size, ms: msD, longest: longestD, floors: floors.length, unreachedFloors: unreachedFloors.length, topsMissing, before: before.length, after: after.length, selected: selected.size, leftOnRoutes, strayInProt }
   console.log(`design walk: ${g.stands} stands of the finished castle, ${prot.size} protected cells - ${msD}ms, longest slice ${longestD}ms; its own ways up reached: ${tops.length - topsMissing.length}/${tops.length}; upper groups of 20+ stands: ${floors.length - unreachedFloors.length} of ${floors.length} reached by the walk model`)
