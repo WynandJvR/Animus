@@ -403,7 +403,7 @@ async function shearTrip (bot, s, n, ctx = {}) {
       // (SPARES ONLY FROM FREE INGOTS: pack and bank less the gear's share (ctx.ironKeep - the director's gearIronKeep; none
       //  given, none free), and never a gather - with too few, ensure falls through to an iron mine trip for a spare. The
       //  one pair ensureShears makes when none is held stays as it was; audit)
-      const free = Math.max(0, inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') - (ctx.ironKeep ? (ctx.ironKeep() || 0) : Infinity))
+      const free = Math.max(0, inv.count(bot, 'iron_ingot') + base().bankCount('iron_ingot') - (() => { const k = ctx.ironKeep && ctx.ironKeep(); return Number.isFinite(k) ? k : Infinity })())
       const more = Math.min(3, Math.ceil((n - cutsLeft()) / (pair - 2)), Math.floor(free / 2))
       if (more > 0) {
         const before = inv.count(bot, 'shears')
