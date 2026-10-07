@@ -4,6 +4,8 @@
 // castle site dumped block by block (castlewalk.fixture.json: every non-air block, relative to the dump's corner).
 // Every walk-model step should be a step the planner can take: a step the model allows and the planner refuses is a leg
 // that times out, a stand that is never reached, a region read open that the body cannot leave. Counted by geometry class.
+// And where each search STARTS (the planner's start node for a body on each stand's floor = the stand = world.standCell),
+// and the DEAD ENDS (stands the walk enters and the planner cannot leave) the model must read as dead ends too.
 // Run from anywhere: node tools/session-scripts/castlewalktest.js [--list N]
 const path = require('path')
 const bot2 = path.join(__dirname, '..', '..', 'bot2')
@@ -89,7 +91,41 @@ for (const p of stands) {
 console.log(`${stands.length} stands, ${modelEdges} walk-model steps, ${mismatched} the planner refuses; ${missing} planner steps the model leaves out (${Object.entries(missBy).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([c, n]) => n + ' ' + c).join(', ')})`)
 for (const [c, n] of Object.entries(byClass).sort((a, b) => b[1] - a[1])) console.log(`  ${n}  ${c}`)
 for (const e of examples) console.log('   ' + e)
+// THE START: where the planner starts a body standing on each stand's floor (index.js getPathFromTo: the floored feet, a cell
+// up when the feet are inside a non-empty block - a lantern, a slab, a carpet) must be that stand, and world.standCell (every
+// walk-model search's start) must say the same. Read from the floored feet, the searches started a cell under the planner on
+// every low floor: the way out "found" at the lantern's own level while the body, its head two over it, had none - 20 minutes
+// on a lantern in a 1x1 shaft, 2026-10-07. (the low-floor stands counted: the class a floored start reads wrong)
+let startWrong = 0; let lowFloor = 0; const startEx = []
+bot.entity.onGround = true
+for (const p of stands) {
+  const t = world.floorTop(at(p.x, p.y - 1, p.z)); const pos = new Vec3(p.x + 0.5, p.y - 1 + t, p.z + 0.5)
+  bot.entity.position = pos
+  const f = pos.floored(); const b = blockAt(f); const plannerStart = { x: f.x, y: f.y + ((b && pos.y - f.y > 0.001 && bot.entity.onGround && !mv.emptyBlocks.has(b.type)) ? 1 : 0), z: f.z }
+  const sc = world.standCell(bot)
+  if (f.y !== p.y) lowFloor++
+  if (key(plannerStart) !== key(p) || key(sc) !== key(p)) { startWrong++; if (startEx.length < Math.max(listN, 3)) startEx.push(`${key(p)}: planner starts ${key(plannerStart)}, standCell ${key(sc)}`) }
+}
+console.log(`${lowFloor} stands on a low floor (feet inside the floor's cell); ${startWrong} where the planner's start or standCell is not the stand`)
+for (const e of startEx.slice(0, startWrong ? 3 : 0)) console.log('   ' + e)
+// DEAD ENDS: a stand the walk steps into and the planner has no move out of (no dig, no place) - a leg ending there never
+// leaves, so walkReach drops it (rooms.deadEnd: no model step AND no planner move). Gated both ways: a dead end the model
+// reads as open (a leg's end the body never leaves), and a stand the rule drops that the planner CAN leave (a stand lost for
+// nothing). The model's own closed cells the planner leaves - its deliberate strictness, the plate and fire rules - counted
+const plannerOut = q => plannerNext(q).filter(m => m.x !== q.x || m.z !== q.z || m.y !== q.y)
+const entered = new Set(); for (const p of stands) for (const n of W.next(p)) entered.add(key(n))
+let deadEnds = 0; let deadMissed = 0; let dropped = 0; let droppedLeavable = 0; let modelOnly = 0; const modelOnlyBy = {}
+for (const p of stands) {
+  if (!entered.has(key(p))) continue
+  const out = plannerOut(p)
+  if (!out.length) { deadEnds++; if (W.next(p).length) deadMissed++ }
+  if (rooms.deadEnd(W, p, q => plannerOut(q).length > 0)) { dropped++; if (out.length) droppedLeavable++ }
+  if (!W.next(p).length && out.length) { modelOnly++; const c = classOf(p, out[0]); modelOnlyBy[c] = (modelOnlyBy[c] || 0) + 1 }
+}
+console.log(`${deadEnds} dead ends the walk steps into (no planner move out); ${deadMissed} the walk model reads as open; ${dropped} dropped by rooms.deadEnd, ${droppedLeavable} of them leavable`)
+console.log(`${modelOnly} stands the model alone reads as closed, kept (${Object.entries(modelOnlyBy).map(([c, n]) => n + ' ' + c).join(', ')})`)
 // (the gate: no step the planner refuses, but a ladder's - the climbs are modelled on their own)
 const hard = Object.entries(byClass).filter(([c]) => !/ladder/.test(c)).reduce((t, [, n]) => t + n, 0)
-console.log(hard ? `FAIL ${hard} non-ladder steps the planner refuses` : 'PASS')
-process.exit(hard ? 1 : 0)
+const fails = [hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
+console.log(fails.length ? `FAIL ${fails.join('; ')}` : 'PASS')
+process.exit(fails.length ? 1 : 0)

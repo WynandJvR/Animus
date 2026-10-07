@@ -1109,10 +1109,15 @@ async function escapeUpInner (bot) {
     // (the proof over-ruled the search: what it thought the way was - the search is fixed there, the proof stays; audit)
     if (inFoot && proven && searchOut) { const ex = build.wayOutPoint(bot); log('move', `stuck three times here though the way-out search finds an exit at ${ex ? fmt(ex) : '?'} - the walks prove it wrong: breaking out`) }
     if (inFoot && (proven || !searchOut)) {
+      // (the cells round THE PLANNER'S START - world.standCell - never the floored feet: on a lantern the feet are inside the
+      //  lantern's cell and the body's head reaches the cell two over it; read from the floored feet, the room was the 69
+      //  cells of the floor below, its wall "beside me" a cell the body could not step to - every walk noPath, "couldn't reach
+      //  the wall", "no wall beside me", 20 minutes on a lantern, 2026-10-07)
+      const me = world.standCell(bot)
       // (a door beside the bot is "a way" to wayOut, but crossDoor goes through a door only along its facing, from a step in
       //  front or behind: from its side - a one-cell pocket next to a double door - it never got through, and the log said
       //  "no way out" beside a door, 2026-09-29; audit)
-      const doorBeside = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, f0.x + dx, f0.y, f0.z + dz); return !!b && /_door$/.test(b.name) })
+      const doorBeside = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, me.x + dx, me.y, me.z + dz); return !!b && /_door$/.test(b.name) })
       log('move', `enclosed by the build at ${fmt(f0)} - ${doorBeside ? 'the door beside me did not let me through' : 'no way out'}; opening our own wall beside me, the builder puts it back`)
       const cellAt = (x, y, z) => j.index.get(`${x},${y},${z}`)
       const holdsUp = (x, y, z) => j.cells.some(q => q.sup && q.sup.x === x && q.sup.y === y && q.sup.z === z && build.cellDone(bot, q) === true)
@@ -1127,26 +1132,26 @@ async function escapeUpInner (bot) {
       //  a 6-9 block drop, and air past them is a lip, not a way out; audit)
       const safe = (x, y, z) => air(x, y, z) && air(x, y + 1, z) && world.dropAt(bot, x, y, z) <= world.SAFE_DROP
       const sides = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz]) => {
-        const door = [0, 1].some(dy => { const b = world.at(bot, f0.x + dx, f0.y + dy, f0.z + dz); return b && /_door$/.test(b.name) })
-        return { dx, dz, door, ok: ours(f0.x + dx, f0.y, f0.z + dz) && ours(f0.x + dx, f0.y + 1, f0.z + dz), beyond: safe(f0.x + 2 * dx, f0.y, f0.z + 2 * dz) }
+        const door = [0, 1].some(dy => { const b = world.at(bot, me.x + dx, me.y + dy, me.z + dz); return b && /_door$/.test(b.name) })
+        return { dx, dz, door, ok: ours(me.x + dx, me.y, me.z + dz) && ours(me.x + dx, me.y + 1, me.z + dz), beyond: safe(me.x + 2 * dx, me.y, me.z + 2 * dz) }
       }).filter(sd => sd.ok).sort((a, b) => (b.door - a.door) || (b.beyond - a.beyond))
       // A ROOM, NOT A POCKET: shut in a 140-cell room under the plaza, every side of the body was air - "ours or air" - and
       // the tunnel ran three steps across the open floor, dug nothing, and the walks gave up again, a loop of 6 minutes,
-      // 2026-10-04. The room the body can walk (cells stood in, a step up or down), and its nearest WALL - a pair of cells
-      // ours to open, safe ground past it that is not the room itself: walked to, then opened as before
+      // 2026-10-04. The room the body can walk, and its nearest WALL - a pair of cells ours to open, safe ground past it that is
+      // not the room itself: walked to, then opened as before
+      // (walked BY THE WALK MODEL - rooms.walkModel, the planner's steps: its head room, its drop column, its plates. A room of
+      //  its own rule - any standable cell a step up or down - took steps the planner refuses, and the escape walked to a wall
+      //  it could not reach, 2026-10-07. Door cells stay out of it - the doors are step 1's)
       const kk = q => q.x + ',' + q.y + ',' + q.z
+      const W = build.walkModel(bot)
       const room = new Map() // key -> dist
       {
-        const q = [{ x: f0.x, y: f0.y, z: f0.z, d: 0 }]; room.set(kk(f0), 0)
+        const q = [{ x: me.x, y: me.y, z: me.z, d: 0 }]; room.set(kk(me), 0)
         while (q.length && room.size < 600) {
           const c = q.shift()
-          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            for (const dy of [0, 1, -1]) {
-              const n = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
-              if (room.has(kk(n)) || Math.abs(n.x - f0.x) > 20 || Math.abs(n.z - f0.z) > 20 || !world.standable(bot, n.x, n.y, n.z)) continue
-              if (dy === 1 && !air(c.x, c.y + 2, c.z)) continue // (a step up wants head room over the cell left)
-              room.set(kk(n), c.d + 1); q.push(Object.assign(n, { d: c.d + 1 }))
-            }
+          for (const n of W.next(c)) {
+            if (room.has(kk(n)) || Math.abs(n.x - me.x) > 20 || Math.abs(n.z - me.z) > 20 || !world.standable(bot, n.x, n.y, n.z)) continue
+            room.set(kk(n), c.d + 1); q.push(Object.assign(n, { d: c.d + 1 }))
           }
         }
       }
@@ -1176,7 +1181,7 @@ async function escapeUpInner (bot) {
         for (const dr of doors.sort((a, b) => a.d - b.d).slice(0, 2)) {
           if (dr.d > 0) await goTo(bot, new goals.GoalBlock(dr.c.x, dr.c.y, dr.c.z), { timeoutMs: 15000, stuckMs: 5000, dig: false, place: false, label: 'to the door out' }).catch(() => null)
           const crossed = await crossDoor(bot, new goals.GoalBlock(dr.past.x, dr.past.y, dr.past.z)).catch(() => false)
-          const now = bot.entity.position.floored()
+          const now = world.standCell(bot)
           if (crossed && !room.has(kk(now))) { log('move', `enclosed at ${fmt(f0)} - out through the door beside ${fmt(dr.c)} to ${fmt(now)}`); clearGiveUps(f0); return true }
         }
         if (doors.length) log('move', `enclosed at ${fmt(f0)}: the room's door${doors.length > 1 ? 's' : ''} did not let me through - a wall next`)
@@ -1196,23 +1201,62 @@ async function escapeUpInner (bot) {
         }
       }
       // (the sides beside the body, the same order)
-      for (const sd0 of sides) sd0.cost = pairCost(f0.x + sd0.dx, f0.y, f0.z + sd0.dz)
+      for (const sd0 of sides) sd0.cost = pairCost(me.x + sd0.dx, me.y, me.z + sd0.dz)
       sides.sort((a, b) => ((a.cost >= 10) - (b.cost >= 10)) || (a.cost - b.cost))
+      const best = exit || sides[0] || null
+      // 2b. BEFORE A FINISHED WALL: THE LOW BLOCK UNDER MY FEET. Standing on a block of ours lower than a full one - a lantern,
+      //     a bottom slab, a carpet - the feet are inside its cell and the head two over it: the planner starts a cell up, where
+      //     every side may be walled at head height while the cells at the block's own level are open. Taken out, the body
+      //     settles less than a block onto the floor under it, the way on is the walk's again, and the builder puts the one
+      //     block back - a lantern stood on in a 1x1 shaft held the bot 20 minutes till the operator broke it, 2026-10-07.
+      //     Only when the drop is under a block (the floor under it is a whole block's top or higher than the block's own), the
+      //     block holds nothing up, and the walk model has a step on from there that leaves this room. One block, no wall
+      //     opened: before any finished wall - but a FINISHED one by step 3's rule, only when survival needs it or after the wait
+      // (asked where the body IS: a door walk in step 1 may have moved it - the block under the old spot is nobody's floor)
+      const meNow = world.standCell(bot)
+      if ((!best || best.cost >= 10) && kk(meNow) !== kk(me)) log('move', `enclosed at ${fmt(f0)}: moved to ${fmt(meNow)} since - not taking out the block under ${fmt(me)}`)
+      if ((!best || best.cost >= 10) && kk(meNow) === kk(me)) {
+        const u = { x: me.x, y: me.y - 1, z: me.z } // (the cell the feet are in: the planner's start is the one over it)
+        const ub = world.at(bot, u.x, u.y, u.z); const fl = world.at(bot, u.x, u.y - 1, u.z)
+        const top = world.floorTop(ub); const top2 = world.floorTop(fl)
+        const lowFloor = bot.entity.position.floored().y === u.y && !!ub && !world.isAirish(ub) && top > 0 && top < 1 && world.isSolid(fl) && !world.isOpenTrapdoor(fl) && !world.DANGER_FLOOR_RE.test(fl.name) && top2 <= 1.01 && top < top2
+        const onward = lowFloor && ours(u.x, u.y, u.z) && W.next(u).some(n => !(n.x === u.x && n.z === u.z) && !room.has(kk(n)))
+        if (lowFloor && !onward) log('move', `enclosed at ${fmt(f0)}: standing on ${ub.name} at ${fmt(u)} - ${ours(u.x, u.y, u.z) ? 'no way on from under it either' : 'not ours to take out'}`)
+        if (onward && finished(u.x, u.y, u.z) && !urgent()) { log('move', `enclosed at ${fmt(f0)}: the way out is under my feet - our finished ${ub.name} at ${fmt(u)}; not taking it out with no danger (hp ${Math.round(bot.health)}, ${world.phase(bot)}, no threat); waiting`); return false }
+        if (onward) {
+          const mine = !!cellAt(u.x, u.y, u.z)
+          log('move', `enclosed at ${fmt(f0)}: standing on our own ${ub.name} at ${fmt(u)} (top ${top.toFixed(2)}) walled in at head height - taking it out to settle onto the ${fl.name} under it (the builder puts it back)`)
+          escOpened.push(u)
+          const dug = await act.dig(bot, u, { own: mine, force: mine, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false)
+          await gather.landed(bot, 1000)
+          const now = world.standCell(bot)
+          if (dug && W.next(now).some(n => !room.has(kk(n)))) {
+            await act.collectDrops(bot, { radius: 3, maxMs: 2000 }).catch(() => {})
+            log('move', `enclosed: out from under my feet - at ${fmt(now)}, a way on`)
+            noteTrap(bot, f0); clearGiveUps(f0)
+            return true
+          }
+          // (dug, or the body moved: every wall, side and start above was read from the old stand - none of it is the body's now.
+          //  Out, unfreed: the next escape reads it all afresh from where the body is; audit)
+          if (dug || kk(now) !== kk(me)) { log('move', `enclosed: taking out the ${ub.name} at ${fmt(u)} did not free me (at ${fmt(now)}, no step on${dug ? '' : ', not dug: ' + (act.lastDigWhy() || '?')}) - the next escape reads the walls from here`); if (dug) noteTrap(bot, f0); else escOpened = escOpened.filter(q => kk(q) !== kk(u)); return false }
+          escOpened = escOpened.filter(q => kk(q) !== kk(u)) // (nothing opened)
+          log('move', `enclosed: the ${ub.name} at ${fmt(u)} would not come out (${act.lastDigWhy() || 'not dug'}) - a wall next`)
+        }
+      }
       // 3. a finished cell only when it must be: hurt, the night, a threat about - otherwise the builder's walk model is
       //    asked again later (the closet reads as a way out once its trapdoors are read right) and the bot waits
-      const best = exit || sides[0] || null
       if (best && best.cost >= 10) {
         if (!urgent()) { log('move', `enclosed at ${fmt(f0)}: the only way out is through a FINISHED cell of the build - not breaking it with no danger (hp ${Math.round(bot.health)}, ${world.phase(bot)}, no threat); waiting`); return false }
         log('move', `enclosed at ${fmt(f0)}: BREAKING A FINISHED CELL of the build to get out - hp ${Math.round(bot.health)}, ${world.phase(bot)}${require('./reflex').hostiles(16).some(h => h.e.name !== 'bat') ? ', a threat about' : ''} (the builder puts it back)`)
       }
       let sd = sides[0]
-      let start = { x: f0.x, y: f0.y, z: f0.z }
+      let start = { x: me.x, y: me.y, z: me.z }
       if (exit) {
         if (exit.d > 0) {
           log('move', `enclosed in a room of ${room.size} cells - its wall at ${fmt({ x: exit.c.x + exit.dx, y: exit.c.y, z: exit.c.z + exit.dz })} opens onto open ground: walking to it`)
           await goTo(bot, new goals.GoalBlock(exit.c.x, exit.c.y, exit.c.z), { timeoutMs: 15000, stuckMs: 5000, dig: false, place: false, label: 'to the wall to open' }).catch(() => null)
         }
-        const here = bot.entity.position.floored()
+        const here = world.standCell(bot)
         if (here.x === exit.c.x && here.y === exit.c.y && here.z === exit.c.z) { sd = { dx: exit.dx, dz: exit.dz }; start = here }
         // (not there: never the air side - the same no-op tunnel and the same loop; the trap and give-up rules decide; audit)
         else { log('move', `enclosed: couldn't reach the wall at ${fmt(exit.c)}`); sd = null }
@@ -1233,7 +1277,7 @@ async function escapeUpInner (bot) {
           await act.collectDrops(bot, { radius: 4, maxMs: 3000 }).catch(() => {}) // (a door dug comes back whole: the builder re-places it)
           if (!safe(p0.x, p0.y, p0.z)) { log('move', `enclosed: the cell opened at ${fmt(p0)} stands over a drop - not stepping in`); break } // (room, and a drop a fall does not hurt)
           await goTo(bot, new goals.GoalBlock(p0.x, p0.y, p0.z), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'out through our wall' }).catch(() => null)
-          at = bot.entity.position.floored()
+          at = world.standCell(bot)
           if (build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)) { log('move', `enclosed: a way out from ${fmt(at)}`); break }
         }
         noteTrap(bot, f0); clearGiveUps(f0)

@@ -83,6 +83,13 @@ function walkModel (w, isC = () => false, { opens = false, avoid = null } = {}) 
   return { air, st, next }
 }
 
+// A DEAD END: a cell the walk model has no step out of AND the planner that walks the legs has no move out of (no dig, no
+// place) - plannerExits(p): true when it has one. A leg ending there never leaves (a 1x1 shaft over a lantern, every walk
+// an instant noPath for 20 minutes, 2026-10-07). Both, never the model alone: the model is stricter on purpose in places
+// (a plate cell left along its plate only, never onto a fire) and a cell it alone reads as closed is a cell the planner
+// still walks out of - no reason to drop it (castlewalktest.js counts both)
+function deadEnd (W, p, plannerExits) { return !W.next(p).length && !plannerExits(p) }
+
 // A WALK REGION round p: out if it leaves the box (x/z) or runs past `cap` cells (no compartment); else closed, with its
 // cells. NO sky exit - a region asks whether a walker gets IN or OUT on foot (over a roofless compartment's wall is a drop
 // the walk refuses; audit). memo: key -> the region, filled for every cell seen.
@@ -209,4 +216,4 @@ function closesPocket (w, c, { box, work, standsOf, cap = 300 }) {
   return null
 }
 
-module.exports = { walkModel, region, exitReach, doorwayAxis, closesRoom, closesPocket, doorPanel, edgeOf, OPP, CW, CCW }
+module.exports = { walkModel, deadEnd, region, exitReach, doorwayAxis, closesRoom, closesPocket, doorPanel, edgeOf, OPP, CW, CCW }

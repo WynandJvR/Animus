@@ -1368,7 +1368,9 @@ const REACH_MARGIN = 10; const REACH_CAP = 15000
 const DEAR_STEP = 50 // (a step the planner takes only with no other way: a trap's 50, under the build's 60; a campfire's side 30 is a cost)
 async function walkReach (bot) {
   if (!job || !bot.entity) return null
-  const f = world.feetPos(bot)
+  // (from THE PLANNER'S START - world.standCell: on a lantern, a slab, a carpet the feet are inside the floor's own cell and
+  //  the planner starts a cell up; the walk model's stands are the planner's nodes, so its search starts where the planner's)
+  const f = world.standCell(bot)
   const here = r => [0, -1, 1].some(dy => r.cells.has(key({ x: f.x, y: f.y + dy, z: f.z })))
   if (reach && reach.job === job && Date.now() - reach.at < 30000 && here(reach)) return reach
   // (every block read once a search: blockAt works out the light each call, and each cell is read from four sides)
@@ -1386,6 +1388,8 @@ async function walkReach (bot) {
   // (dear: the planner's last resort - 50 to 99; 100 and over it never enters at all - mineflayer-pathfinder drops a move
   //  costing over 100 (a refused node, a head under water, a sum of rules): impassable here as for it; audit)
   const dear = (x, y, z) => { const c0 = stepCost(x, y, z); return c0 >= DEAR_STEP && c0 < 100 }
+  // (a move of the legs' planner out of p - walked, never dug nor placed: a dead end's other half, rooms.deadEnd)
+  const plannerExits = p => { try { return mv.getNeighbors({ x: p.x, y: p.y, z: p.z, remainingBlocks: 0 }).some(m => (m.x !== p.x || m.y !== p.y || m.z !== p.z) && m.cost <= 100 && !(m.toBreak && m.toBreak.length) && !(m.toPlace && m.toPlace.length)) } catch { return true } }
   // (a cell a leg could not reach, lately: the model says walkable, the body did not get there - routed round for 10 min.
   //  AVOIDED, never solid: passed as a closed cell it was a floor for the cell over it - a search standing on air)
   // (DEAR IS NOT SHUT: the planner walks a dear cell when there is no other way - so the search reaches it too, in a second
@@ -1423,7 +1427,13 @@ async function walkReach (bot) {
     if (Date.now() - slice > 8) { longest = Math.max(longest, Date.now() - slice); await new Promise(r => setImmediate(r)); slice = Date.now() }
     const c = q[i++]
     if (!inArea(c)) continue // (reached, not walked on from: the site's own ground is the question)
-    for (const n of W.next(c)) { const k = key(n); if (!cells.has(k)) { cells.add(k); parent.set(k, c); depth.set(k, (depth.get(key(c)) || 0) + 1); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
+    const ns = W.next(c)
+    // (A DEAD END IS NO STAND: a cell the walk drops into with no step out of it, nor any move of the legs' own planner (no
+    //  dig, no place) - rooms.deadEnd. A 1x1 shaft over a lantern was a leg's end: dropped in, every walk an instant noPath
+    //  for 20 minutes, 2026-10-07. Asked without the avoid - a leg failed lately is no wall to the body - and only when the
+    //  model has no step: the planner is asked of those few cells alone)
+    if (!ns.length && c !== start && rooms.deadEnd(W0, c, plannerExits)) { cells.delete(key(c)); continue }
+    for (const n of ns) { const k = key(n); if (!cells.has(k)) { cells.add(k); parent.set(k, c); depth.set(k, (depth.get(key(c)) || 0) + 1); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
   }
   // (SHUT IN - no cell of the set outside the build: every stand reads out of reach, no walk is made, and the walker's own
   //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
@@ -2423,7 +2433,7 @@ function wallsMeIn (bot, c, from = null) {
   //  at once; only a c on or beside it costs the second search. Capped at 700: past that, no room. Two fresh 1500-cell
   //  searches a cell blocked the body 50-150ms; audit)
   watchStatus(bot)
-  const rw = roomWorld(bot); const f = from || world.feetPos(bot)
+  const rw = roomWorld(bot); const f = from || world.standCell(bot) // (the planner's start: on a lantern, the cell over the floored feet)
   const mk = `${f.x},${f.y},${f.z}|${statusGen}`
   if (!wallMemo || wallMemo.key !== mk) { const r = rooms.exitReach(rw, job.box, f, { cap: WALL_CAP }); wallMemo = { key: mk, out: r.out, seen: r.seen } }
   if (!wallMemo.out) return false // (closed already without c: c is no reason to hold)
@@ -2462,7 +2472,7 @@ let lastExit = null
 function wayOutPoint (bot, from = null) { lastExit = null; return wayOut(bot, { x: NaN, y: NaN, z: NaN }, from, false) ? lastExit : null }
 function wayOut (bot, c, from = null, withC = true) {
   if (!job) return true
-  const b0 = job.box; const f = from ? { x: from.x, y: from.y, z: from.z } : world.feetPos(bot)
+  const b0 = job.box; const f = from ? { x: from.x, y: from.y, z: from.z } : world.standCell(bot)
   const inBox = p => p.x >= b0.x1 && p.x <= b0.x2 && p.z >= b0.z1 && p.z <= b0.z2
   if (!inBox(f)) return true
   const isC = (x, y, z) => withC && x === c.x && y === c.y && z === c.z
