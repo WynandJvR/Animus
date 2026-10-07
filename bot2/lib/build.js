@@ -37,7 +37,10 @@ const FILLER_ITEMS = /^(dirt|andesite|diorite|tuff|cobbled_deepslate|netherrack|
 const LEDGER_RE = new RegExp('^(?:' + FILLER_ITEMS.source.slice(1, -1) + '|' + SCAFFOLD_RE.source.slice(1, -1) + ')$') // (what we place, plus the old scan's kinds: follows FILLER_ITEMS)
 // what the bot leaves standing about: placeSupport/pathfinder filler (+rooted_dirt, the planner's list), and
 // the reflexes' plugs (cobblestone, stone, sand, gravel)
-const STRAY_RE = /^(dirt|coarse_dirt|rooted_dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone|sand|gravel)$/
+// (and GRASS_BLOCK: our dirt in the light grows grass - in a cell the snapshot had open, nothing else puts one there. Not
+//  counted, the castle's west yard read "grass_block at -2295,119,-589 - not ours" on its own way in, and no teardown ever
+//  took a grown-over stepping stone down, 2026-10-07)
+const STRAY_RE = /^(dirt|grass_block|coarse_dirt|rooted_dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|stone|sand|gravel)$/
 // our furniture and lights are never scaffold, wherever they stand
 // a lantern of any metal - never a jack o'lantern (a pumpkin: a full block, glowstone's stand-in - it was taken for a
 // hanging lantern, attached and never anchoring; audit #11)
@@ -1699,7 +1702,7 @@ async function clearDesignWay (bot, c) {
   }
   ds.sort((a, b) => world.dist3(a, c) - world.dist3(b, c))
   // (said ONCE a call - what was considered and why each was declined, counted; a call a cluster: ringFor marks the cluster)
-  const declined = {}; let dwWorld = null
+  const declined = {}; const declinedAt = {}; let dwWorld = null // (and one cell a reason: the evidence - 'X' alone hid which)
   for (const d of ds.slice(0, 6)) {
     if (designTried.has(key(d) + '@' + planBand)) continue
     designTried.add(key(d) + '@' + planBand)
@@ -1708,13 +1711,16 @@ async function clearDesignWay (bot, c) {
     const rt = await designwalk.routeFrom(dwWorld, design, k => reach.cells.has(k), d, { tick: ringTicker() })
     if (!rt) { declined['no way to it in the finished build from my walk'] = (declined['no way to it in the finished build from my walk'] || 0) + 1; continue }
     const { strays, blocked } = designwalk.routeBlockers(design, d, { route: rt, reachHas: k => reach.cells.has(k), at: (x, y, z) => world.at(bot, x, y, z), isOurs: q => isStray(bot, q.x, q.y, q.z), isProtected: q => walkProtected(q) })
-    if (blocked || !strays.length) { const r = blocked ? blocked.replace(/-?\d+,-?\d+,-?\d+/g, 'X') : 'open already'; declined[r] = (declined[r] || 0) + 1; continue }
+    if (blocked || !strays.length) { const r = blocked ? blocked.replace(/-?\d+,-?\d+,-?\d+/g, 'X') : 'open already'; declined[r] = (declined[r] || 0) + 1; if (blocked && !declinedAt[r]) declinedAt[r] = (blocked.match(/-?\d+,-?\d+,-?\d+/) || [])[0]; continue }
     log('build', `the castle's own way up to ${key(d)} (for ${c.name} at ${move.fmt(c)}) is blocked only by our own strays: ${strays.map(q => (world.at(bot, q.x, q.y, q.z) || {}).name + '@' + key(q)).join(' ')} - taking them out`)
     let n = 0; const t0 = Date.now()
     for (const q of strays.slice(0, 12)) {
       if ((stepStop && stepStop()) || Date.now() - t0 > 90000) break
       if (!isStray(bot, q.x, q.y, q.z)) continue // (asked again at the dig: never a block not ours)
-      if (!act.reach(bot, new Vec3(q.x, q.y, q.z), 4.3)) await goSite(bot, new goals.GoalNear(q.x, q.y, q.z, 3), 'clear our stray', { place: false, shouldStop: stepStop }).catch(() => null)
+      // (from the route's own stand before it - designwalk.routeBlockers: the ladder under the cap, the body held on it by
+      //  act.dig; a GoalNear 3 of the cap stopped at -2289,126,-577 and the cobblestone over it was never in reach, 2026-10-07.
+      //  That stand not reached and the stray out of reach: act.dig's own walk to it, as before)
+      if (!act.reach(bot, new Vec3(q.x, q.y, q.z), 4.3)) await goSite(bot, q.stand ? new goals.GoalBlock(q.stand.x, q.stand.y, q.stand.z) : new goals.GoalNear(q.x, q.y, q.z, 3), 'clear our stray', { place: false, shouldStop: stepStop }).catch(() => null)
       if (await act.dig(bot, new Vec3(q.x, q.y, q.z), { force: true, own: true, allowZones: ['build', 'base'], timeoutMs: 10000 }).catch(() => false)) n++
       else log('build', `our stray at ${key(q)} on the castle's own way would not come out (${act.lastDigWhy() || '?'})`)
     }
@@ -1722,7 +1728,7 @@ async function clearDesignWay (bot, c) {
     reach = null; await walkReach(bot).catch(() => null)
     return n
   }
-  log('build', `the castle's own way for ${c.name} at ${move.fmt(c)}: ${ds.length} of its stands in reach out of my walk${ds.length ? ` - declined: ${Object.entries(declined).map(([r, k]) => k + ' ' + r).join(', ') || 'all tried this band'}` : ''}`)
+  log('build', `the castle's own way for ${c.name} at ${move.fmt(c)}: ${ds.length} of its stands in reach out of my walk${ds.length ? ` - declined: ${Object.entries(declined).map(([r, k]) => k + ' ' + r + (declinedAt[r] ? ` (e.g. ${declinedAt[r]})` : '')).join(', ') || 'all tried this band'}` : ''}`)
   return 0
 }
 

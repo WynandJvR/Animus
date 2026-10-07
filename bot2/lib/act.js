@@ -46,10 +46,39 @@ function guarded (bot, b, own) {
 // which inside a reflex is forever). Same protection. True when the block there changed.
 async function digBlock (bot, b, { own = false } = {}) {
   if (!b || guarded(bot, b, own)) return false
-  try { await inv.equipFor(bot, b); await bot.dig(b, true) } catch { return false }
+  let acks = null
+  try { await inv.equipFor(bot, b); acks = digAcks(bot); await bot.dig(b, true) } catch { if (acks) acks.stop(); return false }
+  await acks.settle(acksFor(bot, b))
   const after = world.at(bot, b.position.x, b.position.y, b.position.z)
   return !after || after.name !== b.name
 }
+// THE SERVER'S WORD ON A DIG. mineflayer's dig resolves on its OWN write of air into the client's world (digging.js
+// finishDigging -> _updateBlockState), before the server has said anything: a dig the server refuses comes back as the block
+// itself, sent before the server acknowledges the action (block_changed_ack, at the end of the tick that handled it). Read
+// at once, the world showed the client's guess: the ladder cap at -2289,130,-577 "taken out" from the ladder at 18:29, and
+// the teardown's two digs of it and the cobblestone over it at 18:33-18:34 "done" - all three back in the world at 18:40,
+// nothing ever placed there (2026-10-07). So a dig's re-read waits for the server's acknowledgements of its start and its
+// finish (one, when both go out in the same tick) - or a deadline, then reads what is there.
+function digAcks (bot) {
+  const c = bot._client; let n = 0; let wake = null
+  const on = () => { n++; if (wake) wake() }
+  c.on('acknowledge_player_digging', on)
+  const stop = () => { c.removeListener('acknowledge_player_digging', on); wake = null }
+  return {
+    stop,
+    async settle (need, ms = 1500) {
+      if (n < need) {
+        await new Promise(resolve => {
+          const t = setTimeout(() => resolve(), ms)
+          wake = () => { if (n >= need) { clearTimeout(t); resolve() } }
+        })
+      }
+      const ok = n >= need; stop(); return ok
+    }
+  }
+}
+// (a start and a finish a tick or more apart: two acknowledgements; an instant break sends both at once - one)
+function acksFor (bot, b) { let ms = 0; try { ms = bot.digTime(b) } catch {} return ms >= 100 ? 2 : 1 }
 
 // Dig one block (walking into reach if needed). Refuses crafted blocks unless `force`, and finished build
 // cells unless `own`. Returns true when the cell is verifiably no longer that block.
@@ -114,29 +143,51 @@ async function dig (bot, pos, { force = false, own = false, allowZones = [], tim
     // 3.75s, every one after a walk, 2026-10-06. The landing is a few ticks; on a ladder, a vine or in water none comes
     // (a deadline on this dig, never a wait before thinking)
     { const tl = Date.now(); while (!grounded(bot) && !noLanding(bot) && Date.now() - tl < 800) await sleep(50) }
+    // ON A LADDER OR A VINE, HELD: a body on one with no key down slides down it (0.15 b/t) through the whole dig - off the
+    //  ground the dig is timed at five times as long, and a player crouches to stay put. Pressed for the dig only (the walk
+    //  is done), let go after; the edge guard leaves a crouch it did not press alone (reflex.setGuardSneak)
+    const hold = climbing(bot) && !(bot.controlState && bot.controlState.sneak)
+    if (hold) bot.setControlState('sneak', true)
     const td = Date.now()
-    await inv.equipFor(bot, b)
+    let acks = null
     try {
+      await inv.equipFor(bot, b)
+      if (hold && !reach(bot, pos, reachMax)) { lastDigWhy = 'slid out of reach on the ladder'; continue } // (the walk again)
+      acks = digAcks(bot)
       await bot.dig(b, true)
+      await acks.settle(acksFor(bot, b))
     } catch (e) {
+      if (acks) acks.stop()
       digErr = e && e.message
       if (reflex.active()) continue
       await sleep(200)
-    }
+    } finally { if (hold) bot.setControlState('sneak', false) }
     const after = world.at(bot, pos.x, pos.y, pos.z)
     if (Date.now() - tm > 6000) log('act', `slow dig ${b.name} at ${move.fmt(pos)}: walk ${td - tm}ms, dig ${Date.now() - td}ms (holding ${bot.heldItem ? bot.heldItem.name : 'nothing'})`)
     if (!after || after.name !== b.name) return true
+    // (the server put it back: said, with where the body was - the evidence of why; the loop tries again while time is left)
+    if (!digErr) { const me = bot.entity.position; const feet = world.at(bot, Math.floor(me.x), Math.floor(me.y), Math.floor(me.z)); digErr = `the server put it back - dug from ${move.fmt(me)}, ${world.dist3(me.offset(0, 1.62, 0), { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 }).toFixed(1)}b off, ${grounded(bot) ? 'standing' : 'off the ground'}${feet ? ' in ' + feet.name : ''}`; log('act', `dig ${b.name} at ${move.fmt(pos)}: ${digErr}`) }
   }
   lastDigWhy = `it would not break in time${digErr ? ' (' + digErr + ')' : ''}`
   return false
 }
 // STANDING ON SOMETHING, as the dig timing reads it: physics' onGround, or a full block right under the feet (onGround
 // flickers on stairs and slab edges). THE one rule - bot.digTime (main.js) times a dig by it, act.dig waits for it.
+// (never a LADDER under the feet: its box is a plate on the wall, nothing a body stands on - a body hanging on a ladder
+//  column at a whole-block height read "standing" on the ladder below it and its digs were timed on the ground, five times
+//  too fast for the server, which put the blocks back; 2026-10-07)
 function grounded (bot) {
   if (bot.entity.onGround) return true
   const p = bot.entity.position
   const under = bot.blockAt(p.offset(0, -0.05, 0))
-  return !!(under && under.boundingBox === 'block' && p.y - Math.floor(p.y) < 0.05)
+  return !!(under && under.boundingBox === 'block' && !CLIMB_RE.test(under.name) && p.y - Math.floor(p.y) < 0.05)
+}
+const CLIMB_RE = /^(ladder|vine|twisting_vines(_plant)?|weeping_vines(_plant)?|cave_vines(_plant)?)$/
+// on a ladder or a vine and off the ground: hanging on it
+function climbing (bot) {
+  if (bot.vehicle || grounded(bot)) return false
+  const p = bot.entity.position; const f = world.at(bot, Math.floor(p.x), Math.floor(p.y), Math.floor(p.z))
+  return !!f && CLIMB_RE.test(f.name)
 }
 // where no landing comes: in water, on a ladder or a vine, in scaffolding, in a boat
 function noLanding (bot) {

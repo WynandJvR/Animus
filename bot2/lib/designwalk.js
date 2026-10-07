@@ -97,21 +97,54 @@ function routeBlockers (graph, d, { reachHas, at, isOurs, isProtected, route: gi
   let from = -1; for (let i = route.length - 1; i >= 0; i--) if (near(reachHas, route[i])) { from = i; break }
   if (from < 0) return { strays: [], blocked: 'no stand of its route in my walk' }
   const open = b => !!b && (world.bodyPassable(b) || world.isOpenTrapdoor(b) || /_door$|_fence_gate$|_carpet$|^ladder$|_trapdoor$/.test(b.name))
+  const ladder = b => !!b && /^ladder$/.test(b.name)
+  // (a floor: solid, or a ladder - the stand itself in a ladder)
+  // (and leaves: a floor the walk stands on - "no floor yet under -2290,120,-588" over the yard's oak leaves; a box of its own)
+  const floorAt = (x, y, z) => { const fl = at(x, y - 1, z); return ladder(at(x, y, z)) || (!!fl && (world.isSolid(fl) || ladder(fl) || (fl.boundingBox === 'block' && world.LEAF_RE.test(fl.name)))) }
+  // THE BODY'S STAND IN EACH COLUMN OF THE ROUTE, AS THE WORLD STANDS: the design's own height, one lower (its own thin floor -
+  //  a carpet - not laid yet), or one higher (the old ground raised under it since the snapshot: the site's levelling, a block
+  //  of ours or not - walked over, never in the way), a step from the last one. At the design's height only, the castle's
+  //  west yard (the snapshot's dips at y118, the ground in them since) declined every route there: "grass_block at
+  //  -2299,118,-585 - not ours", 2026-10-07 18:25. Feet and head open, or open but for OUR strays in the walking space
+  //  (taken out); a stand needing none first. (One lower only where the design's floor cell is still air, one higher only over
+  //  a block in the design's feet cell: a ladder's stands shifted a rung down and the cap's cobblestone over it was never
+  //  selected - castlewalktest)
+  // (the walk's own stand where it meets the route - one up or down of the design's: from there, that column itself too - the
+  //  ladder's rung under the cap met the walk a rung lower, and the cap was past it; castlewalktest)
+  const s0 = parse(route[from]); let last = { x: s0.x, y: [0, -1, 1].map(dy => s0.y + dy).find(y => reachHas(`${s0.x},${y},${s0.z}`)), z: s0.z }
+  let prevY = last.y
   const strays = []
-  for (const k of route.slice(from + 1)) {
-    const s = parse(k)
-    const fl = at(s.x, s.y - 1, s.z); const ft = at(s.x, s.y, s.z)
-    // (a floor: solid, or a ladder - the stand itself in a ladder; or, its own thin floor not laid yet (a carpet's cell open),
-    //  the block under that: the body stands one lower, as the walk would)
-    const fl2 = at(s.x, s.y - 2, s.z)
-    const floorOk = (ft && /^ladder$/.test(ft.name)) || (fl && (world.isSolid(fl) || /^ladder$/.test(fl.name))) || (fl && world.isAirish(fl) && fl2 && world.isSolid(fl2))
-    if (!floorOk) return { strays, blocked: `no floor yet under ${k}` }
-    for (const dy of [0, 1]) {
-      const q = { x: s.x, y: s.y + dy, z: s.z }; const b = at(q.x, q.y, q.z)
-      if (open(b)) continue
-      if (b && isProtected(q) && isOurs(q)) { if (!strays.some(o => key(o) === key(q))) strays.push(q); continue }
-      return { strays, blocked: `${b ? b.name : '?'} at ${key(q)} - not ours` }
+  for (let i = last.y === s0.y ? from + 1 : from; i < route.length; i++) {
+    const s = parse(route[i])
+    let pick = null
+    const lowOk = world.isAirish(at(s.x, s.y - 1, s.z) || { name: 'stone' }); const highOk = !open(at(s.x, s.y, s.z))
+    for (const y of [s.y, s.y - 1, s.y + 1]) {
+      if ((y < s.y && !lowOk) || (y > s.y && !highOk)) continue
+      if (prevY != null && Math.abs(y - prevY) > 1) continue
+      if (!floorAt(s.x, y, s.z)) continue
+      const ours = []; let ok = true
+      for (const dy of [0, 1]) {
+        const q = { x: s.x, y: y + dy, z: s.z }; const b = at(q.x, q.y, q.z)
+        if (open(b)) continue
+        if (b && isProtected(q) && isOurs(q)) { ours.push(q); continue }
+        ok = false; break
+      }
+      if (!ok) continue
+      if (!ours.length) { pick = { y, ours }; break }
+      if (!pick) pick = { y, ours }
     }
+    if (!pick) {
+      // (said at the design's own height: what stands where the finished build walks)
+      if (!floorAt(s.x, s.y, s.z)) return { strays, blocked: `no floor yet under ${route[i]}` }
+      for (const dy of [0, 1]) { const q = { x: s.x, y: s.y + dy, z: s.z }; const b = at(q.x, q.y, q.z); if (!open(b) && !(b && isProtected(q) && isOurs(q))) return { strays, blocked: `${b ? b.name : '?'} at ${key(q)} - not ours` } }
+      return { strays, blocked: `no step to ${route[i]} from ${s.x},${prevY},${s.z}` }
+    }
+    // (each stray with the stand it is dug from: the route's stand before it, as the body will stand there - THE clear's own
+    //  stand, the body on the ladder under the cap; a GoalNear 3 of the cap left it at -2289,126,-577 and the cobblestone
+    //  over the cap was never reached, 2026-10-07 18:29)
+    const stand = last
+    for (const q of pick.ours) if (!strays.some(o => key(o) === key(q))) strays.push(Object.assign(q, { stand }))
+    prevY = pick.y; last = { x: s.x, y: pick.y, z: s.z }
   }
   return { strays, blocked: null }
 }
