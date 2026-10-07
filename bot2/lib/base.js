@@ -192,6 +192,16 @@ function refreshCache (w, p) {
 // (the ONE definition of the spare set: director's spareKit makes it, the bank keeps it)
 const SPARE_KIT = ['stone_pickaxe', 'stone_axe', 'stone_sword']
 const BANK_RESERVE = Object.fromEntries(SPARE_KIT.map(t => [t, 1]))
+// THE SAFEHOUSE'S OWN STOCK: food, arrows, a blade and a shield in the chests INSIDE it (whichever stand inside the hut box),
+// so a camp outside - a witch, a skeleton - never leaves the hideout unfed or without a bow load: the chests at the door
+// are a walk out, and the hideout fetches indoors only while mobs are near (2026-10-07). Filled from what a home deposit is
+// putting away anyway (no walk of its own), drawn on last by every other withdraw. None of it is a build block
+const SAFE_STOCK = { food: 16, arrow: 16, sword: 1, shield: 1 }
+function safeKind (name) { return inv.GOOD_FOOD.includes(name) ? 'food' : name === 'arrow' ? 'arrow' : name === 'shield' ? 'shield' : /_sword$/.test(name) ? 'sword' : null }
+function indoorChests (bot) { return knownChests(bot).filter(p => move.insideHut(p)) }
+function indoorCount (bot, kind) { let n = 0; for (const p of indoorChests(bot)) { const c = chestCache()[key(p)]; if (c && c.items) for (const [nm, k] of Object.entries(c.items)) if (safeKind(nm) === kind) n += k } return n }
+// what the safehouse's stock still lacks of `name`'s kind (0: full, or no chest inside)
+function safeShort (bot, name) { const k = safeKind(name); return k && indoorChests(bot).length ? Math.max(0, SAFE_STOCK[k] - indoorCount(bot, k)) : 0 }
 // (`only(p)`: the chests the caller may walk to - the hideout's indoor chests while mobs are about; the rest are skipped unopened)
 async function withdraw (bot, name, n, { maxWalk = 64, only = null } = {}) {
   if (n <= 0) return 0
@@ -206,7 +216,9 @@ async function withdraw (bot, name, n, { maxWalk = 64, only = null } = {}) {
   const room = () => inv.freeSlots(bot) > 0 || inv.items(bot).some(i => i.name === name && i.count < (i.stackSize || 64))
   if (!room()) { await tossJunk(bot).catch(() => {}); if (!room()) { log('base', `the pack is full - no ${name} taken`); return 0 } }
   let got = 0; let full = false
-  for (const p of knownChests(bot)) {
+  // (the safehouse's stock is drawn on last - the kit's arrows or bread from the nearest chest emptied it first; audit)
+  const order = safeKind(name) && !only ? knownChests(bot).sort((a, b) => (move.insideHut(a) ? 1 : 0) - (move.insideHut(b) ? 1 : 0)) : knownChests(bot)
+  for (const p of order) {
     if (world.dist3(p, bot.entity.position) > maxWalk) continue
     if (only && !only(p)) continue
     const c = chestCache()[key(p)]
@@ -335,7 +347,9 @@ async function placeChestInner (bot) {
 async function depositItem (bot, name, n = 1) {
   const items = inv.items(bot).filter(i => i.name === name).sort((a, b) => inv.durabilityLeft(bot, b) - inv.durabilityLeft(bot, a))
   if (!items.length) return 0
-  for (const p of knownChests(bot)) {
+  // (the safehouse's stock first while it lacks this kind - the spare sword is its blade)
+  const order = safeShort(bot, name) > 0 ? knownChests(bot).sort((a, b) => (move.insideHut(b) ? 1 : 0) - (move.insideHut(a) ? 1 : 0)) : knownChests(bot)
+  for (const p of order) {
     const c = chestCache()[key(p)]
     if (c && c.free <= 0) continue
     const w = await openChest(bot, p)
@@ -366,8 +380,41 @@ function depositKeepOf (bot, it) {
   let h = 0; try { h = keepHook(it) || 0 } catch {}
   return Math.max(k, h)
 }
+// The safehouse's stock topped up at a home deposit: one indoor chest opened, only when it lacks something the pack can spare
+async function topUpSafeStock (bot, keep) {
+  const plan = new Map()
+  // (from the haul, and from the kit's own food and arrows down to half their keep - the arrows ride 64 in the pack and are
+  //  never haul: a bow load indoors costs the pack a quarter of its quiver; a sword or shield only as haul or a spare)
+  for (const it of inv.items(bot)) {
+    if (plan.has(it.name) || !safeKind(it.name)) continue
+    const short = safeShort(bot, it.name); if (short <= 0) continue
+    const kp = keep(bot, it); const floor = kp === Infinity ? Infinity : /^(food|arrow)$/.test(safeKind(it.name)) ? Math.ceil(kp / 2) : kp
+    if (floor !== Infinity) plan.set(it.name, Math.min(short, inv.count(bot, it.name) - floor))
+  }
+  for (const [nm, k] of [...plan]) if (k <= 0) plan.delete(nm)
+  if (!plan.size) return 0
+  const target = indoorChests(bot).find(p => { const c = chestCache()[key(p)]; return !c || c.free > 0 })
+  if (!target) return 0
+  const before = {}; for (const nm of plan.keys()) before[nm] = inv.count(bot, nm)
+  const w = await openChest(bot, target); if (!w) return 0
+  // (per KIND: two foods each counted against the same 16 would fill it twice over)
+  const left = {}; for (const kd of Object.keys(SAFE_STOCK)) left[kd] = Math.max(0, SAFE_STOCK[kd] - indoorCount(bot, kd))
+  try {
+    for (const [nm, k0] of plan) {
+      const kd = safeKind(nm); const k = Math.min(k0, left[kd]); if (k <= 0) continue
+      const it = inv.items(bot).find(i => i.name === nm); if (!it) continue
+      try { await w.deposit(it.type, null, k); left[kd] -= k } catch (e) { log('base', `safehouse stock: ${nm} x${k} would not go in (${e.message})`); if (/full/i.test(e.message)) break }
+    }
+    refreshCache(w, target)
+  } finally { try { w.close() } catch {} }
+  await settle(bot)
+  const put = Object.entries(before).map(([nm, b]) => [nm, b - inv.count(bot, nm)]).filter(([, m]) => m > 0)
+  if (put.length) log('base', `the safehouse's own stock topped up at ${move.fmt(target)}: ${put.map(([nm, m]) => `${m} ${nm}`).join(', ')} (food ${indoorCount(bot, 'food')}/${SAFE_STOCK.food}, arrows ${indoorCount(bot, 'arrow')}/${SAFE_STOCK.arrow}, sword ${indoorCount(bot, 'sword')}, shield ${indoorCount(bot, 'shield')})`)
+  return put.reduce((a, [, m]) => a + m, 0)
+}
 async function depositAll (bot, { keep = depositKeepOf } = {}) {
   const want = () => inv.items(bot).filter(i => i.count > 0 && inv.count(bot, i.name) > keep(bot, i))
+  await topUpSafeStock(bot, keep).catch(e => log('base', `safehouse stock top-up threw: ${e.message}`))
   let rounds = 0; const skipped = new Set(); let depErr = null
   while (want().length && rounds++ < 6) {
     let target = knownChests(bot).find(p => !skipped.has(key(p)) && (() => { const c = chestCache()[key(p)]; return !c || c.free > 2 })())
