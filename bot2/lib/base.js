@@ -232,6 +232,43 @@ async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
   return got
 }
 
+// MANY KINDS, ONE OPENING A CHEST: `list` [[name, n], ...] in the caller's order, each chest opened once for every kind it
+// holds, until each is had or the pack is down to `keepFree` slots. Kind by kind (withdraw), a round's window opened the
+// chests 20 times over for 20 kinds - "scaffold+withdraw 52s", 2026-10-07. Exact names only (a stand-in is the caller's).
+// Returns { name: got }
+async function withdrawMany (bot, list, { keepFree = 2, maxWalk = 64 } = {}) {
+  const want = new Map(); for (const [nm, n] of list) if (n > 0) want.set(nm, (want.get(nm) || 0) + n)
+  const goal = new Map(want); const start = {}; for (const nm of want.keys()) start[nm] = inv.count(bot, nm)
+  const got = {}; let opened = 0
+  for (const p of knownChests(bot)) {
+    if (!want.size || inv.freeSlots(bot) <= keepFree) break
+    if (world.dist3(p, bot.entity.position) > maxWalk) continue
+    const c = chestCache()[key(p)]
+    if (c && c.items && ![...want.keys()].some(nm => c.items[nm])) continue
+    const w = await openChest(bot, p)
+    if (!w) continue
+    opened++
+    // (the slots this opening may fill, counted from before it - the pack's own count is the window's while it is open)
+    let slots = inv.freeSlots(bot) - keepFree
+    try {
+      for (const [nm, n] of [...want]) {
+        if (slots <= 0) break
+        const its = w.containerItems().filter(i => i.name === nm); const have = its.reduce((s, i) => s + i.count, 0)
+        const stack = (its[0] && its[0].stackSize) || 64
+        const k = Math.min(have, n, slots * stack)
+        if (k <= 0) continue
+        try { await w.withdraw(its[0].type, null, k); slots -= Math.ceil(k / stack) } catch (e) { log('base', `withdraw ${nm} failed: ${e.message}`); if (/inventory is full/i.test(e.message || '')) break }
+      }
+      refreshCache(w, p)
+    } finally { try { w.close() } catch {} }
+    await settle(bot) // (counted after the close and the resync - see withdraw)
+    for (const nm of [...want.keys()]) { const g = inv.count(bot, nm) - start[nm]; got[nm] = g; if (g >= goal.get(nm)) want.delete(nm); else want.set(nm, goal.get(nm) - g) }
+  }
+  const took = Object.entries(got).filter(([, g]) => g > 0)
+  if (took.length) log('base', `took ${took.map(([nm, g]) => g + ' ' + nm).join(', ')} from the chests (${took.length} kinds, ${opened} chest opening${opened === 1 ? '' : 's'})`)
+  return got
+}
+
 // (never re-entered: a full pack made the chest's own log gather deposit, the deposit wanted a new chest, the chest's craft
 //  gathered a log... - 2,829 lines in ten minutes, a loop with no wait in it, 2026-09-29. Nested, it says no)
 let placingChest = false
@@ -440,4 +477,4 @@ async function roomToCraft (bot, keep = new Set()) {
   return inv.freeSlots(bot) > 0
 }
 
-module.exports = { SPARE_KIT, home, setHome, distHome, withdraw, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+module.exports = { SPARE_KIT, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }

@@ -1504,11 +1504,16 @@ async function withdrawWindow (needs, lowY = {}) {
   if (inv.freeSlots(bot) < Math.min(Object.keys(needs).length + 2, 12) && depositHaulSize() > 0) await base.depositAll(bot, { keep: (b, i) => Math.max(depositKeep(b, i), build.FILLER_ITEMS.test(i.name) ? build.SCAFFOLD_WANT : 0) }).catch(() => false) // (the scaffold's stock stays: ensureScaffold just took it)
   const heads = firsts.filter(nm => countOf(nm) === 0 && stockOf(nm) > 0)
   await roomForBand(heads, firsts, needs, y, Math.min(heads.length + 1, 6))
+  // (each pass in ONE round of chest openings - base.withdrawMany, the exact items in the band's order; then, kind by kind, only
+  //  what a stand-in must cover - a birch stair for a jungle stair: withdrawOf's pool)
   for (const cap of [64, 64 * 4]) {
+    if (inv.freeSlots(bot) < 2) return
+    const list = order.map(([name, n]) => [name, Math.min(n, cap) - countOf(name)]).filter(([, w]) => w > 0)
+    await base.withdrawMany(bot, list.map(([name, w]) => [name, Math.min(w, base.bankCount(name))]), { keepFree: 2 }).catch(() => ({}))
     for (const [name, n] of order) {
       if (inv.freeSlots(bot) < 2) return
       const want = Math.min(n, cap) - countOf(name)
-      if (want > 0) await withdrawOf(name, want)
+      if (want > 0 && stockOf(name) - countOf(name) > base.bankCount(name)) await withdrawOf(name, want) // (a stand-in banked beyond the exact item)
     }
   }
 }
