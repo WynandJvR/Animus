@@ -270,7 +270,9 @@ function chargeAffordable (shooter, hs, hp) {
   { const f = fledFrom.get(shooter.e.id); if (!reachNow && !pinnedNow && f != null && hp < f) return false }
   // (EVERY shooter about, in sight or not - a patrol's others shoot round the corner: the charge counted one and three
   //  bolts landed 0.65-0.85s apart, 20 -> 8, 2026-10-02; audit)
-  const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 24 && Math.abs(h.e.position.y - bot.entity.position.y) < 6) // (not a skeleton in the cave under us)
+  // (the CHARGED one always: fled down a slope, a witch 6+ above was out of its own reckoning - dps 0 - and "fight - witch
+  //  13.2b (shooter)" ran uphill at it unarmoured, flee and charge by turns, 2026-10-07 05:46)
+  const shooters = hs.filter(h => RANGED.has(h.e.name) && h.d < 24 && (h.e === shooter.e || Math.abs(h.e.position.y - bot.entity.position.y) < 6)) // (not a skeleton in the cave under us)
   const w = inv.bestWeapon(bot)
   const dmg = w ? (/_axe$/.test(w.name) ? 7 : 5) : 1
   const cd = w ? (/_axe$/.test(w.name) ? 1050 : 650) : 400

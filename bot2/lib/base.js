@@ -192,7 +192,8 @@ function refreshCache (w, p) {
 // (the ONE definition of the spare set: director's spareKit makes it, the bank keeps it)
 const SPARE_KIT = ['stone_pickaxe', 'stone_axe', 'stone_sword']
 const BANK_RESERVE = Object.fromEntries(SPARE_KIT.map(t => [t, 1]))
-async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
+// (`only(p)`: the chests the caller may walk to - the hideout's indoor chests while mobs are about; the rest are skipped unopened)
+async function withdraw (bot, name, n, { maxWalk = 64, only = null } = {}) {
   if (n <= 0) return 0
   if (BANK_RESERVE[name] && inv.count(bot, name) > 0) n = Math.min(n, Math.max(0, bankCount(name) - BANK_RESERVE[name]))
   if (n <= 0) return 0
@@ -207,6 +208,7 @@ async function withdraw (bot, name, n, { maxWalk = 64 } = {}) {
   let got = 0; let full = false
   for (const p of knownChests(bot)) {
     if (world.dist3(p, bot.entity.position) > maxWalk) continue
+    if (only && !only(p)) continue
     const c = chestCache()[key(p)]
     if (c && !(c.items && c.items[name])) continue
     const w = await openChest(bot, p)

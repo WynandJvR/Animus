@@ -299,6 +299,11 @@ async function deepInHut () {
   const r = await move.goTo(bot, new goals.GoalBlock(best.x, y, best.z), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'to the far side of the safehouse' }).catch(() => null)
   if (!r || !r.ok) log('dir', `couldn't get to the far side of the safehouse (${best.x},${y},${best.z}) - ${r ? r.why || 'not reached' : 'the walk threw'}`)
 }
+// A hostile at our level for the hideout's reckoning: a walker within 6 up or down, a SHOOTER within 12 - from the slope over
+// the farm a witch 7+ above threw down on a bot it no longer counted "about", the harvest went out to it, 2026-10-07 05:46
+function levelWithUs (h) { return Math.abs(h.e.position.y - bot.entity.position.y) < (reflex.RANGED.has(h.e.name) ? 12 : 6) }
+// A bow that answers shooters: ready, and arrows for a fight - three arrows are no answer to a witch's 26 hp (~6 a hit)
+function bowArmed () { return reflex.bowReady() && inv.count(bot, 'arrow') >= 8 }
 // Items in the pack beyond the kit we keep on us.
 function haulSize () {
   let n = 0
@@ -550,13 +555,13 @@ function decide () {
   //  pillagers fell into the hole the bot died in, 11 blocks from the door, and the hideout waited on them 40 minutes and on,
   //  2026-10-04. One that sees us is the reflex's at once, as ever)
   const pitted = e => { const f = e.position.floored(); return [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => [0, 1].every(dy => { const b = world.at(bot, f.x + dx, f.y + dy, f.z + dz); return !!b && world.isSolid(b) })) && !reflex.canSee(e) }
-  const aroundAll = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e))
+  const aroundAll = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && levelWithUs(h) && onSurface(h.e))
   const around = aroundAll.filter(h => !pitted(h.e))
   const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
   // (by day too when shooters stand round home and the body can't take their arrows - no shield, little armour: a
   //  pillager patrol and two skeletons shot the bot four times in two minutes, each respawn walking back out to the
   //  grave, the farm, the tool chest, 2026-09-25)
-  const outgunned = around.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !reflex.bowReady()
+  const outgunned = around.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !bowArmed()
   // (from dusk: the bed takes the dusk, and a night slept from dusk never came - the first evening went to bed at 19:58)
   // (the bed's own reach - 200 at dusk, 32 at night: it stands in for the bed wherever the bed would be chosen; held to 24 of home,
   //  the second evening went to bed from 41b out, 2026-10-04)
@@ -1052,14 +1057,19 @@ const TASKS = {
     await deepInHut()
     // the bow off the chest in here: with it the camp outside is shot at, not waited out (pillagers never burn - a
     // patrol camped the door, 2026-09-25)
-    if (!reflex.bowReady() && base.bankCount('bow') > 0 && base.bankCount('arrow') > 0) {
-      if (!inv.has(bot, 'bow')) await base.withdraw(bot, 'bow', 1).catch(() => 0)
-      await base.withdraw(bot, 'arrow', 64).catch(() => 0)
+    // (the chests may stand OUTSIDE the safehouse: a walk to one is a walk out - never with something hostile within 16, the
+    //  hideout's own reason; the respawned bot walked out to the chest for the bow with a witch about, fled it down the hill
+    //  and died there, 2026-10-07 05:46. The chests INSIDE are a step indoors behind the shut door: always theirs - a hurt,
+    //  unarmed bot left unfed for nothing goes out hunting into the mob instead; audit. And back inside after, before waiting)
+    const where = () => reflex.hostiles(16).some(h => h.e.name !== 'bat') ? { only: p => move.insideHut(p) } : {}
+    if (!bowArmed() && base.bankCount('bow') > 0 && base.bankCount('arrow') > 0) {
+      if (!inv.has(bot, 'bow')) await base.withdraw(bot, 'bow', 1, where()).catch(() => 0)
+      if (inv.has(bot, 'bow')) await base.withdraw(bot, 'arrow', 64, where()).catch(() => 0)
       // out only to shoot what can be shot: daylight, a shooter on the surface at our height, and above the hurt line - the
       // door was opened for 'dim' at night with mobs round it, and the log said "going out to shoot" (audit #21)
-      if (reflex.bowReady()) {
+      if (bowArmed()) { // (out to shoot only with arrows for the fight - bowArmed)
         const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
-        const shooters = reflex.hostiles(20).filter(h => reflex.RANGED.has(h.e.name) && Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e))
+        const shooters = reflex.hostiles(20).filter(h => reflex.RANGED.has(h.e.name) && levelWithUs(h) && onSurface(h.e))
         if (!dim && shooters.length && bot.health > reflex.hurtLine()) { log('dir', `took the bow and ${inv.count(bot, 'arrow')} arrows - going out to shoot ${shooters.length} shooter(s)`); await hut.unsealDoor(bot).catch(() => false); return true }
         log('dir', `took the bow and ${inv.count(bot, 'arrow')} arrows - staying in (${dim ? 'dim' : !shooters.length ? 'no shooter on the surface' : 'hp ' + Math.round(bot.health)})`)
       }
@@ -1068,14 +1078,19 @@ const TASKS = {
     if (bot.health < 20 && bot.food < inv.REGEN_FOOD && !inv.foodItems(bot, { hurt: true }).length) {
       const bank = base.bankCounts()
       for (const n of ['bread', 'cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'baked_potato', 'cooked_chicken', 'cooked_salmon', 'cooked_cod'].concat(inv.SAFE_RAW)) {
-        if ((bank[n] || 0) > 0) { await base.withdraw(bot, n, Math.min(8, bank[n])).catch(() => 0); if (inv.foodItems(bot, { hurt: true }).length) break }
+        if ((bank[n] || 0) > 0) { await base.withdraw(bot, n, Math.min(8, bank[n]), where()).catch(() => 0); if (inv.foodItems(bot, { hurt: true }).length) break }
       }
+    }
+    if (!move.insideHut(world.feetPos(bot))) {
+      if (!await hut.enterHut(bot, { shouldStop: () => taskCancelled() })) return false
+      await hut.sealDoor(bot).catch(() => false)
+      await deepInHut()
     }
     log('dir', `waiting inside while mobs are about (hp ${Math.round(bot.health)})`)
     while (!taskCancelled() && Date.now() - t0 < 4 * 60000) {
-      const left = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && Math.abs(h.e.position.y - bot.entity.position.y) < 6 && onSurface(h.e))
+      const left = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && levelWithUs(h) && onSurface(h.e))
       const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
-      const outgunned = left.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !reflex.bowReady()
+      const outgunned = left.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !bowArmed()
       if (!left.length || (!dim && !outgunned && bot.health > reflex.hurtLine())) break // (the hurt line, as entry and heal use: R11)
       // a bed right here: sleeping skips the rest of the night (the server refuses while monsters are
       // close - keep trying, walled in they drift off)
