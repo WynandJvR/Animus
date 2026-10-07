@@ -173,7 +173,7 @@ function note (name, ok) {
 // succeed" four times over, the watchdog's alarm, a backoff for nothing (late in the day, 25-64 from home; audit
 // 2026-09-28). One gate: a day chore whose stop holds waits, said once. (Survival - food, graves, tools, the bed - is
 // never held here; the castle's step does its home work first and minds its own stop.)
-const DAY_TASKS = new Set(['fillCraters', 'fillFreshCraters', 'farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'caneFarm', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
+const DAY_TASKS = new Set(['fillCraters', 'fillFreshCraters', 'farm', 'harvest', 'hydrate', 'levelFarm', 'levelYard', 'fixWater', 'lightBase', 'plant', 'orchardHarvest', 'caneFarm', 'pen', 'spareKit', 'fillShaft', 'cook', 'ironTrip', 'tidy', 'siteTidy'])
 const lateSaid = new Map()
 // held(name): may decide() offer it now? Not while backing off from failures (cooling), nor a day chore once its stop holds.
 // (cooling keeps its one meaning - "it failed recently": the recover rule reads cooling('food') as that evidence; audit)
@@ -753,10 +753,22 @@ function decide () {
   if (inv.rawFoodCount(bot) >= 3 && dHome < 64 && !held('cook')) return { name: 'cook', why: `${inv.rawFoodCount(bot)} raw food to cook` }
   // saplings on hand and room for them in the orchard (empty spots, or fewer trees than the build still needs)
   {
+    orchardPlan() // (the demand as last worked out - never the zero a restart leaves until the next home jobs)
     const saps = orchard.saplingCount(bot) + inv.count(bot, 'dark_oak_sapling') + Object.entries(base.bankCounts()).filter(([n]) => orchard.ANY_SAP_RE.test(n)).reduce((a, [, c]) => a + c, 0)
     const sc = orchard.sapCounts(bot, base.bankCounts()) // (the saplings to hand, the bank's included: the planter's own rule)
     const o = orchard.orchard()
     if (dHome < 64 && world.phase(bot) === 'day' && saps > 0 && orchard.plantable(bot, sc, demandTrees) && !held('plant')) return { name: 'plant', why: `${saps} saplings for the orchard (${o ? o.spots.length : 0} spots; ${demandTrees.squares} squares and ${demandTrees.singles} singles wanted)` }
+  }
+  // GROWN TREES THE BUILD IS SHORT OF, cut when there are a few: a grown tree only waits for a log trip, and while it stands
+  // its spot grows nothing - the orchard's yield is its cut-and-replant cycle. The whole build's shortfall decides (the window
+  // may want no wood at all while the roofs' 700 spruce logs are hours of growth away), three singles or a square at a time
+  // (only while a build wants work: a plan from a finished or unset job would fell on for nothing - and is dropped, below)
+  {
+    const op = orchardPlan()
+    if (op && op.short && dHome < 64 && world.phase(bot) === 'day' && !held('orchardHarvest') && build.getJob() && build.needsWork(bot)) {
+      const ripe = ripeTrees(op)
+      if (ripe.list.length >= 3 || ripe.list.some(t => t.quad)) return { name: 'orchardHarvest', why: `${ripe.list.length} grown tree${ripe.list.length > 1 ? 's' : ''} in the orchard of a wood the build is short of (${ripe.kinds.map(n => op.short[n] + ' ' + n).join(', ')})` }
+    }
   }
   // cane to hand and room for it at the water by home: the cane farm (canefarm.js - its trigger and planter one rule)
   {
@@ -1265,6 +1277,13 @@ const TASKS = {
   async fixWater () { return farm.fixWater(bot, { shouldStop: dayStop }) },
   async harvest () { return farm.harvest(bot, { shouldStop: dayStop }) },
   async pen () { const w = pen.work(bot, penArgs()); return w ? pen.run(bot, w.kind, { shouldStop: dayStop }) : true },
+  async orchardHarvest () {
+    const op = orchardPlan() || {}; const short = op.short || {}
+    const got = await orchard.harvest(bot, { demand: demandTrees, shouldStop: dayStop, skip: n => !((short[n] || 0) > 0) })
+    ripeMemo = null // (the orchard changed: read afresh)
+    if (got > 0) await base.depositHaul(bot, { shouldStop: dayStop }).catch(() => false)
+    return got > 0
+  },
   async caneFarm () {
     const want = canefarm.PER_RUN - inv.count(bot, 'sugar_cane')
     if (want > 0 && base.bankCount('sugar_cane') > 0) await base.withdraw(bot, 'sugar_cane', Math.min(want, base.bankCount('sugar_cane'))).catch(() => 0)
@@ -1505,6 +1524,23 @@ function tripRoom () { return Math.max(1, inv.freeSlots(bot) - 2) * 64 }
 // orchard's own harvests have given, 5 - the wild oaks round Notre-Dame - until it has any). Updated whenever the
 // materials plan is made at home; the orchard grows to it and no further.
 let demandTrees = { squares: 0, singles: 0 } // (orchard.demandFor: the squares and the singles the build's wood still wants)
+let demandRead = false // (this run's demand: the last one saved, until the home jobs work it out afresh)
+function orchardPlan () {
+  // (no build wanting work: no shortfall to plant or fell for - the plan dropped, never a finished job's last numbers; audit)
+  if (mem.get().orchardPlan && (!build.getJob() || !build.needsWork(bot))) { mem.set('orchardPlan', null); demandTrees = { squares: 0, singles: 0 }; ripeMemo = null }
+  const p = mem.get().orchardPlan; if (!demandRead && p && p.demand) { demandTrees = p.demand; demandRead = true } return p || null
+}
+// THE RIPE LIST, read at most every RIPE_MS: grown() is a trunk scan over every spot (a square's 160 reads), and decide()
+// runs it each pass - the body's loop pays (body first); the list is dropped when a harvest or a planting changes the orchard
+const RIPE_MS = 30000
+let ripeMemo = null // { at, list, kinds }
+function ripeTrees (op) {
+  if (ripeMemo && Date.now() - ripeMemo.at < RIPE_MS) return ripeMemo
+  const list = []; const kinds = new Set()
+  for (const t of orchard.grown(bot)) { const b = orchard.trunkLog(bot, t); if (b && (op.short[b.name] || 0) > 0) { list.push(t); kinds.add(b.name) } }
+  ripeMemo = { at: Date.now(), list, kinds: [...kinds] }
+  return ripeMemo
+}
 // Wool the build still needs (its plan's raw wool), with demandTrees: the sheep pen is built for it.
 let demandWool = 0
 const cellCost = new Map() // item -> { raws, c }: one cell's raw cost by its recipe (stock-free) - pickRaw's order
@@ -1650,6 +1686,10 @@ async function processAtHome (stop = dayStop) {
   const win = mats.planFor(bot, winNeeds)
   let tot = mats.planFor(bot, st.need)
   demandTrees = treesFor(tot)
+  // (kept in memory: the orchard's demand and the whole build's log shortfall by species. Held only in this module, a restart
+  //  zeroed it until the next castle round's home jobs - the planting rung ran in between "0 squares and 0 singles wanted"
+  //  with the castle ~700 spruce logs short, 2026-10-07 08:07)
+  mem.set('orchardPlan', { demand: demandTrees, short: Object.fromEntries(Object.entries(tot.raw).filter(([r, n]) => n > 0 && /^(log|[a-z_]+_log)$/.test(r))) })
   demandWool = tot.raw.white_wool || 0 // (the sheep's white: every coloured wool is dyed from it - materials PREFER)
   if (tot.unknown.length) log('dir', `no route known for ${tot.unknown.join(', ')} - gathering them as they are`)
   // furnaces for the volume, counted around HOME (counted around the bot at the site it found too few and
