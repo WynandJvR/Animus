@@ -68,8 +68,11 @@ const COMPOST_PER_MEAL = 21 // the first item always lands, the next six layers 
 // builder takes any stage of a shape, waxed or not (copperAlt - build.acceptsFor carries the same rule), the plan makes
 // the plain form: no honeycomb, and no waiting days for a block to turn green.
 const COPPER_NOT_AGED = /^(raw_copper|copper_ingot|copper_nugget|copper_ore|deepslate_copper_ore|raw_copper_block|copper_torch)$|^copper_(sword|shovel|pickaxe|axe|hoe|helmet|chestplate|leggings|boots|horse_armor|spear|nautilus_armor|golem_spawn_egg)$/
+// (and the LIGHTNING ROD, copper with no "copper" in its name: it ages exposed -> weathered -> oxidized in place like the
+//  rest - one read as "lost lightning_rod ... now exposed_lightning_rod", and the builder would dig and re-place it for
+//  ever; "could not dig the oxidized_lightning_rod" round the castle's spires, 2026-10-07. The registry's only such family)
 function copperBase (name) {
-  if (!/copper/.test(name) || COPPER_NOT_AGED.test(name)) return null
+  if (!/copper|lightning_rod/.test(name) || COPPER_NOT_AGED.test(name)) return null
   const b = name.replace(/^(waxed_)?((exposed|weathered|oxidized)_)?/, '')
   return b === 'copper' ? 'copper_block' : b
 }
