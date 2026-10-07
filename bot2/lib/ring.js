@@ -57,26 +57,46 @@ function walkwayHolds (w, laid, y, towerTop = []) {
 // something solid at the block's own height to place it against - a wall block, or a ring block laid before it
 function clickable (w, r, laid) { return SIDES.some(([dx, dz]) => { const q = { x: r.x + dx, y: r.y, z: r.z + dz }; if (laid.has(key(q))) return true; const b = w.at(q.x, q.y, q.z); return !!b && w.isSolid(b) }) || (() => { const u = w.at(r.x, r.y - 1, r.z); return !!u && w.isSolid(u) })() }
 
+// the eye on a top at feet y (a whole block's top under it) within a player's reach of the cell's middle
+const REACH = 4.2
+function eyeReaches (stand, c) { const ey = stand.y + 1.62; return (c.x - stand.x) ** 2 + (c.y + 0.5 - ey) ** 2 + (c.z - stand.z) ** 2 <= REACH * REACH }
+
+// THE RING, AT THE HEIGHT WHERE ITS EDGES HOLD: two under the layer first (the layer and the two over it in reach); where a
+// tall room's floor lies more than SAFE_DROP under that top - every candidate's open side a hurting drop - one lower, then
+// two (the reach taller, the cells served those its eye still reaches). The castle's upper rooms: "40 cells without a stand,
+// none" every time at y130, 2026-10-07 17:16. opts.stats (an array) gets one line of counts a height tried
 async function planRing (w, cells, opts = {}) {
   if (!cells.length) return null
+  const y0 = Math.min(...cells.map(c => c.y))
+  for (const y of [y0 - 2, y0 - 3, y0 - 4]) {
+    const st = { y }
+    const plan = await planRingAt(w, cells, opts, y, st)
+    if (opts.stats) opts.stats.push(st)
+    if (plan && plan.serves.length) return plan
+  }
+  return null
+}
+async function planRingAt (w, cells, opts, y, st) {
   const maxBlocks = opts.maxBlocks || 40
   const tick = opts.tick || (async () => {})
-  const refused = async r => { if (!opts.refused) return false; const v = await opts.refused(r); await tick(); return !!v }
-  const y0 = Math.min(...cells.map(c => c.y))
-  const y = y0 - 2 // (the top's feet at y0-1, the eye at y0+0.62: the layer and the two over it in reach)
+  let refusals = 0
+  const refused = async r => { if (!opts.refused) return false; const v = await opts.refused(r); await tick(); if (v) refusals++; return !!v }
   // candidates: the columns beside each cell's column, at the ring's height - the cheap rules only
-  const cand = new Map()
+  const cand = new Map(); const tried = new Set()
   for (const c of cells) for (const [dx, dz] of SIDES) {
     const r = { x: c.x + dx, y, z: c.z + dz }
+    tried.add(key(r))
     if (cand.has(key(r))) { cand.get(key(r)).serves.push(c); continue }
     if (!blockOk(w, r)) continue
     cand.set(key(r), Object.assign(r, { serves: [c] }))
   }
+  st.columns = tried.size; st.free = cand.size
   // EDGES: off each open side of the top - not the wall, not another block of the walkway - the fall is SAFE_DROP at most
   // (the feet at y+1 land on the first solid under that column), so a step off the ring hurts nothing and the edge reflex
   // has no lip to hold
   const edgeOk = r => edgeOkFor(w, r, y, new Set(cand.keys()))
   for (let changed = true; changed;) { changed = false; for (const [k, r] of [...cand]) if (!edgeOk(r)) { cand.delete(k); changed = true } } // (a dropped block opens its neighbours' edges: until none changes)
+  st.edges = cand.size
   if (!cand.size) return null
   // ACCESS: a candidate the walk reaches the top of - a stand beside it at the top's level (y+1), one under (y: a step up
   // of one) or one over (y+2: a step down of one) - the walk model's own steps; the room rules asked of that block only
@@ -106,6 +126,7 @@ async function planRing (w, cells, opts = {}) {
       if (access) break
     }
   }
+  st.access = access ? access.kind : 'none'; st.refused = refusals
   if (!access) return null
   // THE WALKWAY: from the access, along candidates that touch (a walk from top to top), each clickable when its turn comes
   // and passing the room rules then (start passed them already)
@@ -123,14 +144,16 @@ async function planRing (w, cells, opts = {}) {
   //  The tower's top is cover too; a walkway that loses its first block has lost its way up: no plan; audit)
   const towerTop = access.kind === 'tower' ? [access.tower[access.tower.length - 1]] : []
   const kept = new Set(edgeClosure(w, blocks, y, towerTop).map(key))
+  st.walkway = kept.size
   if (!kept.has(key(start))) return null
   const order = []; { const seen2 = new Set([key(start)]); const q2 = [start]; while (q2.length) { const r = q2.shift(); order.push({ x: r.x, y: r.y, z: r.z }); for (const n of nbr(r)) { const k = `${n.x},${y},${n.z}`; if (!seen2.has(k) && kept.has(k)) { seen2.add(k); q2.push({ x: n.x, y, z: n.z }) } } } }
   blocks.length = 0; blocks.push(...order)
   // (the tower's own top over its floor: its sides with the walkway round it)
   if (towerTop.length && !edgeOkFor(w, towerTop[0], y, new Set(blocks.map(key)))) return null
-  const lk = new Set(blocks.map(key))
-  const serves = cells.filter(c => SIDES.some(([dx, dz]) => lk.has(`${c.x + dx},${y},${c.z + dz}`)))
+  // (served: the cells an eye on one of the tops reaches - all of them two under the layer, fewer from lower)
+  const serves = cells.filter(c => blocks.some(b => eyeReaches({ x: b.x + 0.5, y: y + 1, z: b.z + 0.5 }, { x: c.x + 0.5, y: c.y, z: c.z + 0.5 })))
+  st.serves = serves.length; st.refused = refusals
   return { y, blocks, access, serves }
 }
 
-module.exports = { planRing, blockOk, edgeOkFor, edgeClosure, walkwayHolds }
+module.exports = { planRing, blockOk, edgeOkFor, edgeClosure, walkwayHolds, eyeReaches }

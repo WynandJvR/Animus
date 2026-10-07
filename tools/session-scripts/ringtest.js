@@ -100,6 +100,18 @@ const needy = [1, 2, 3, 4, 5].map(z => ({ x: 0, y: 105, z }))
   check(ring.edgeOkFor(w, top, 103, new Set(both.map(b => `${b.x},${b.y},${b.z}`))), 'with both sides laid the tower top holds its own edges')
 }
 {
+  // A TALL ROOM: its floor a block deeper (stands at y100) - two under the layer the walkway's open side drops 4, past
+  // SAFE_DROP; the ring goes one lower (y102), its eye still on the layer (2026-10-07 17:16: "none" at every y130 cluster)
+  const { w } = makeWorld({ floorY: 99 })
+  const stand = (x, y, z) => y === 100 && x > 0 && x < 6 && z > 0 && z < 6
+  const stats = []
+  const p = await ring.planRing(w, needy, { stand, stats })
+  check(!!p && p.y === 102, `a tall room: the ring one lower, where its edges hold (y${p ? p.y : '-'}; tried ${stats.map(st => 'y' + st.y + ' edges ' + st.edges).join(', ')})`)
+  check(!!p && p.serves.length === needy.length, `...and its eye still reaches the layer (${p ? p.serves.length : 0}/${needy.length})`)
+  const cover = new Set((p ? p.blocks : []).map(b => `${b.x},${b.y},${b.z}`))
+  check(!!p && p.blocks.every(b => ring.edgeOkFor(w, b, p.y, cover)), '...every edge of it within SAFE_DROP')
+}
+{
   // no way up at all (nothing the walk reaches): no ring
   const { w } = makeWorld()
   check(!(await ring.planRing(w, needy, { stand: () => false })), 'no ring without a stand to start from')

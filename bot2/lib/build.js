@@ -1712,10 +1712,20 @@ async function ringFor (bot, c) {
   const have = ringSpare(bot)
   if (have < RING_MIN_CELLS) { log('build', `ring waits: ${RING_MIN_CELLS - have} filler short (${RING_RESERVE} kept for the step's supports) for ${needy.length} cells at y${c.y} by ${move.fmt(c)}`); return 0 }
   const w = ringWorld(bot); const memo = new Map()
-  const opts = { stand, refused: r => ringRefusal(bot, r, work, memo, tick), tick, maxBlocks: Math.min(40, have) }
+  const stats = []
+  const opts = { stand, refused: r => ringRefusal(bot, r, work, memo, tick), tick, maxBlocks: Math.min(40, have), stats }
+  // a ring at the height its edges hold (ring.js: two under the layer, then three, then four)
   const plan = await ring.planRing(w, needy, opts)
-  log('build', `ring plan by ${move.fmt(c)}: ${needy.length} cells without a stand, ${plan ? plan.blocks.length + ' blocks' : 'none'} - ${Date.now() - tp}ms, longest slice ${tick.longest()}ms`)
-  if (!plan) { log('build', `no ring for ${needy.length} cells at y${c.y}..${c.y + 2} by ${move.fmt(c)}: no walkway the rules allow, or no way up to one`); return 0 }
+  // (the planner's own account: why none - the columns tried, free of the build and with head room, after the edge rule,
+  //  the access found, the room rules' refusals)
+  const why = stats.map(st => `ring y${st.y}: ${st.columns || 0} columns, ${st.free || 0} free, ${st.edges != null ? st.edges : '-'} edges hold, access ${st.access || '-'}${st.refused ? ', ' + st.refused + ' refused' : ''}${st.walkway != null ? ', walkway ' + st.walkway : ''}${st.serves != null ? ', serves ' + st.serves : ''}`).join('; ')
+  log('build', `ring plan by ${move.fmt(c)}: ${needy.length} cells without a stand, ${plan ? plan.blocks.length + ' blocks at y' + plan.y : 'none'} - ${Date.now() - tp}ms, longest slice ${tick.longest()}ms (${why})`)
+  if (!plan) {
+    // (the cluster's answer for the band: its cells do not each plan again - one "none" a cluster; audit)
+    for (const q of needy) ringTried.add(key(q) + '@' + planBand)
+    log('build', `no ring for ${needy.length} cells at y${c.y}..${c.y + 2} by ${move.fmt(c)}: no walkway the rules allow, or no way up to one`); return 0
+  }
+  for (const q of needy) ringTried.add(key(q) + '@' + planBand) // (planned once for all of them)
   const tower = plan.access.kind === 'tower' ? plan.access.tower.length : 0
   if (have < tower + RING_MIN_CELLS) { log('build', `ring waits: ${tower + plan.blocks.length - have} filler short for ${needy.length} cells at y${c.y} by ${move.fmt(c)}`); return 0 }
   return layRing(bot, plan, needy, c)
@@ -1724,7 +1734,7 @@ async function layRing (bot, plan, needy, c) {
   const t0 = Date.now(); const stop = () => (stepStop && stepStop()) || Date.now() - t0 > RING_MS
   const laid = []; const serves = plan.serves.map(key)
   const ledger = p => { laid.push({ x: p.x, y: p.y, z: p.z }); mem.update(m => { m.scaffold = m.scaffold || []; m.scaffold.push({ x: p.x, y: p.y, z: p.z }); m.rings = m.rings || []; let r = m.rings.find(q => q.id === ringId); if (!r) { r = { id: ringId, y: plan.y, serves, blocks: [], at: Date.now() }; m.rings.push(r) } r.blocks.push({ x: p.x, y: p.y, z: p.z }) }) }
-  const ringId = `${plan.y}:${plan.blocks[0].x},${plan.blocks[0].z}:${Date.now()}`
+  const ringId = `${plan.y}:${plan.access.from.x},${plan.access.from.z}:${Date.now()}`
   const memo = new Map()
   log('build', `ring for ${needy.length} cells at y${c.y}..${c.y + 2} by ${move.fmt(c)}: ${plan.blocks.length} blocks at y${plan.y} from ${plan.access.kind === 'tower' ? 'a tower at ' + move.fmt(plan.access.from) : 'the stand ' + move.fmt(plan.access.from)}`)
   // the way up: to the access stand by the walk, then (a tower) up its column to the walkway's top
