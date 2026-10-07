@@ -287,7 +287,9 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
   let lastErr = null; let tries = 0
   while (Date.now() - t0 < timeoutMs && tries < 4) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
-    if (cancelled()) return false
+    // (every refusal says why - these two did not, and five "the place itself failed" at the castle's y129-130 in two minutes
+    //  left nothing to go on, 2026-10-07 16:10)
+    if (cancelled()) { log('act', `place ${itemName} at ${move.fmt(pos)}: stopped - the task was cancelled (control epoch ${control.current()})`); return false }
     if (!fromReflex) await reflex.waitClear()
     { const now = bot.blockAt(target); if (now && placed(now)) return true }
     let ref = null; let face = null; let plan = null
@@ -346,7 +348,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     const letGo = sneak ? () => {} : reflex.holdNoSneak()
     try {
       const held = inv.items(bot).find(i => i.name === itemName)
-      if (!held) return false
+      if (!held) { log('act', `place ${itemName} at ${move.fmt(pos)}: none in the pack at the click - it was there before the walk into reach (${tries} tries so far)`); return false }
       // (in hand already - the next block of a run of the same: no equip round trip; ~0.5s a block went to placing, 2026-10-03)
       if (!bot.heldItem || bot.heldItem.name !== itemName) await bot.equip(held, 'hand')
       // (and a crouch some other holder pressed is let go too - the hold only stops the guard's own: audit #8)
