@@ -1,10 +1,18 @@
 'use strict'
 // littertest.js: litter.capsADrop - a lid set in the ground is kept; a block of ours standing in the air is litter
 // (offline: world.at stubbed with a small column world). node littertest.js [bot2 dir]
+// And litter.markStuck: a column proven out of reach leaves the count until the ground round it changes
 const path = require('path')
 const dir = process.argv[2] || path.join(__dirname, '..', '..', 'bot2')
+// (offline: the log to a temp file, the memory a fake one - never the live bot's files)
+process.env.BOT2_LOG_FILE = process.env.BOT2_LOG_FILE || path.join(require('os').tmpdir(), 'littertest.log')
+const mem = require(path.join(dir, 'lib', 'memory'))
+const fakeMem = { home: { x: 0, y: 100, z: 0 }, stats: {}, litter: [105, 106, 107].map(y => ({ x: 5, y, z: 5, name: 'cobblestone', at: 0 })) }
+mem.get = () => fakeMem; mem.set = (kk, v) => { fakeMem[kk] = v; return v }; mem.update = fn => fn(fakeMem); mem.save = () => {}
 const world = require(path.join(dir, 'lib', 'world'))
 const litter = require(path.join(dir, 'lib', 'litter'))
+require(path.join(dir, 'lib', 'day')).dayNo = () => 1
+world.openSky = () => true
 let cells = new Map()
 const key = (x, y, z) => `${x},${y},${z}`
 const solid = n => ({ name: n, boundingBox: 'block' })
@@ -30,4 +38,21 @@ check('stand in a crown', litter.capsADrop(bot, { x: 0, y: 106, z: 0 }), false)
 // 5. a block of ours floating beside a castle wall (stone_bricks at its level): no ground, not a lid
 cells = new Map(); groundAt(100); cells.set(key(0, 110, 0), solid('dirt')); cells.set(key(1, 110, 0), solid('stone_bricks'))
 check('stuck to a build wall', litter.capsADrop(bot, { x: 0, y: 110, z: 0 }), false)
+// 6-10. A COLUMN PROVEN OUT OF REACH (markStuck): out of the count while the ground round it is unchanged - an update in
+// its box that changes nothing keeps it out, a change far off is not read, a real change round it counts it again
+{
+  const EventEmitter = require('events')
+  const eb = new EventEmitter()
+  cells = new Map(); groundAt(100, 8); for (const y of [105, 106, 107]) cells.set(key(5, y, 5), solid('cobblestone'))
+  check('the column counts', litter.pending(eb, fakeMem.home, 96).length, 3)
+  litter.markStuck(eb, litter.pending(eb, fakeMem.home, 96), 'a test: open air beside the tower')
+  check('marked: out of the count', litter.pending(eb, fakeMem.home, 96).length, 0)
+  const upd = (x, y, z) => { const b = world.at(eb, x, y, z); eb.emit('blockUpdate', null, Object.assign({}, b, { position: { x, y, z } })) }
+  upd(6, 103, 5) // (inside the box, nothing changed: re-read, the same ground)
+  check('an update round it with no change: still out', litter.pending(eb, fakeMem.home, 96).length, 0)
+  cells.set(key(20, 101, 20), solid('stone')); upd(20, 101, 20) // (far off)
+  check('a change far off: still out', litter.pending(eb, fakeMem.home, 96).length, 0)
+  cells.set(key(6, 105, 5), solid('stone')); upd(6, 105, 5) // (a wall beside the column now)
+  check('a block round it changed: counted again', litter.pending(eb, fakeMem.home, 96).length, 3)
+}
 console.log(fails ? `${fails} FAILED` : 'ALL PASS'); process.exit(fails ? 1 : 0)

@@ -939,7 +939,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
 // THE rule for a failed walk: a verdict on the way (forget the place, mark it unreachable) - or only busy? An interruption
 // is the reflex taking the body, a stop is the caller's, a death is a death: none of them says anything about the place.
 // One fight near a known tree erased it from memory (audit 2026-09-28); every store that forgets on a failed walk asks here.
-function isVerdict (r) { return !!r && !r.ok && !/interrupt|stopped|died/.test(r.why || '') }
+function isVerdict (r) { return !!r && !r.ok && !/interrupt|stopped|died|shut in/.test(r.why || '') } // (shut in: the place's verdict, handed to the escape - never the goal's)
 function fmt (p) { return p ? `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}` : '?' }
 
 // STUCK IN ONE PLACE: every walk giving up from the same cell, task after task. A hole under the farm, flowing water at
@@ -1039,13 +1039,18 @@ function noteInstant (bot, goal) {
 // chest is no verdict from a stuck place (all twelve chests "skipping it for a while" from a scaffold top, 2026-10-06)
 function stuckPlace (bot, p = null) { const q = p || (bot && bot.entity ? bot.entity.position.floored() : null); return !!q && instantGoalsNear(q) >= 2 }
 let openSaid = null // (the "not enclosed" line, once a spot)
-async function escapeUp (bot) {
+// opts.proven: why the place is proven without the three give-ups - the walk search's own verdict (shut in, or perched on our
+// pillar) and a walk from here that failed (build.goSite); said in the log as it is
+async function escapeUp (bot, opts = {}) {
   if (escaping) return false
   escaping = true
-  try { return await escapeUpInner(bot) } finally { escaping = false }
+  try { return await escapeUpInner(bot, opts) } finally { escaping = false }
 }
 let finishedWait = null // (where and since when the escape has waited, shut in by finished cells of our build)
-async function escapeUpInner (bot) {
+// SURVIVAL NEEDS IT - the one rule for breaking a finished cell of the build: hurt, the night, a threat about, or shut in by
+// finished cells two minutes by day (finishedWait). The escape's, and the shut-in hand-off's back-off (build.goSite)
+function escapeUrgent (bot) { const rf = require('./reflex'); return bot.health <= rf.hurtLine() || world.phase(bot) !== 'day' || rf.hostiles(16).some(h => h.e.name !== 'bat') || (!!finishedWait && Date.now() - finishedWait.t > 120000) }
+async function escapeUpInner (bot, { proven: provenBy = false } = {}) {
   const act = require('./act'); const gather = require('./gather')
   const f0 = bot.entity.position.floored()
   // ON A PILLAR OF OUR OWN IN THE OPEN - every side a drop: down through it, the way it went up. The climb only rises: a
@@ -1106,10 +1111,10 @@ async function escapeUpInner (bot) {
     //  walk cannot take - a one-high gap between two built layers, cells of the layer between out of stock: the bot walked
     //  into it at the one open column and 'gave up (stuck x3)' eleven times, the search still finding "a way", 2026-09-29.
     //  The physics decides; audit)
-    const proven = giveUpsNear(bot.entity.position.floored()) >= 3
+    const proven = provenBy || giveUpsNear(bot.entity.position.floored()) >= 3
     const searchOut = inFoot && build.wayOut(bot, { x: NaN, y: NaN, z: NaN }, null, false)
     // (the proof over-ruled the search: what it thought the way was - the search is fixed there, the proof stays; audit)
-    if (inFoot && proven && searchOut) { const ex = build.wayOutPoint(bot); log('move', `stuck three times here though the way-out search finds an exit at ${ex ? fmt(ex) : '?'} - the walks prove it wrong: breaking out`) }
+    if (inFoot && proven && searchOut) { const ex = build.wayOutPoint(bot); log('move', `${provenBy ? provenBy + ',' : 'stuck three times here'} though the way-out search finds an exit at ${ex ? fmt(ex) : '?'} - ${provenBy ? 'a tower\'s sky column, no walk' : 'the walks prove it wrong'}: breaking out`) }
     if (inFoot && (proven || !searchOut)) {
       // (the cells round THE PLANNER'S START - world.standCell - never the floored feet: on a lantern the feet are inside the
       //  lantern's cell and the body's head reaches the cell two over it; read from the floored feet, the room was the 69
@@ -1167,7 +1172,7 @@ async function escapeUpInner (bot) {
       //  day - a closet with no door and finished walls only waited to dusk; audit 2026-10-07)
       if (!finishedWait || world.dist3(finishedWait.at, f0) > 3 || Date.now() - finishedWait.seen > 300000) finishedWait = { at: { x: f0.x, y: f0.y, z: f0.z }, t: Date.now() }
       finishedWait.seen = Date.now() // (a wait not seen for 5 min is over - the escape re-runs spaced out by back-offs; audit)
-      const urgent = () => { const rf = require('./reflex'); return bot.health <= rf.hurtLine() || world.phase(bot) !== 'day' || rf.hostiles(16).some(h => h.e.name !== 'bat') || Date.now() - finishedWait.t > 120000 }
+      const urgent = () => escapeUrgent(bot)
       // 1. the doors the room touches, nearest first: walked to, crossed (crossDoor opens a closed one)
       {
         const doors = []
@@ -1841,4 +1846,4 @@ function refuseNode (n, ms = 120000) {
   if (refusedNodes.size > 200) { const now = Date.now(); for (const [kk, t] of refusedNodes) if (t < now) refusedNodes.delete(kk) }
   refusedNodes.set(k, Date.now() + ms)
 }
-module.exports = { refuseNode, closedDoorAt, buried, legPoint, escapeUp, isVerdict, stuckPlace, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }
+module.exports = { refuseNode, closedDoorAt, buried, legPoint, escapeUp, escapeUrgent, isVerdict, stuckPlace, underBuild, underZone, inForeign, crossDoor, goals, bindReflex, bindBot, setZone, setZones, inZone, zones, utilitySpotOK, insideHut, setProtector, isProtected, surface, isUnderground, surfaceYHere, movementsFor, goTo, goNear, travel, stopMoving, runGoal, sleep, fmt, waitReflex }

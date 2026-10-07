@@ -40,7 +40,49 @@ function listen (bot) {
     if (!ledger.size) return
     const p = (n && n.position) || (o && o.position); if (!p) return
     const q = ledger.get(k(p)); if (q && (!n || n.name !== q.name)) { ledger.delete(k(p)); dirty = true; save() }
+    // (a change round a column proven out of reach: its verdict is asked again - stuckSeen)
+    // (a change of BLOCK only - a state update (a leaf's distance, a door) changes nothing the verdict read, and each one
+    //  re-hashed ~600 cells a column at the next count; audit)
+    if (stuckSeen.size && (!o || !n || o.name !== n.name)) for (const [ck, v] of stuckSeen) if (Math.abs(p.x - v.x) <= STUCK_R && Math.abs(p.z - v.z) <= STUCK_R && p.y >= v.y1 && p.y <= v.y2) stuckSeen.delete(ck)
   })
+}
+
+// A COLUMN PROVEN OUT OF REACH, until the world round it changes. The tidy reached its stand and the climb could not go up
+// from there - open air beside the tower (a block in the air: a one-wide tower in the open is refused), no head room over
+// the stand, no ground within a climb - and that is the ground's answer, not the day's: each new day the same 22 blocks
+// counted toward the 48 that sends the tidy ahead of the castle, the same climbs failed in the same ms, "took down 0, 22
+// left", 2026-10-07. The verdict is kept with the ground it was read from (stuckSig: the column's surroundings - the stands'
+// and the climb's cells); a block changed there and the column counts again. ONE count for the trigger and the tidy: pending()
+const STUCK_R = 3
+const STUCK_RULE = 1 // (the climb's rules the verdict was read under: changed - the climb learns a new way up - and every mark is read again; audit)
+function stuckBox (col) { const ys = col.map(q => q.y); return { y1: Math.min(...ys) - 9, y2: Math.max(...ys) + 2 } }
+function stuckSig (bot, x, z, box) {
+  let h = (5381 * 33 + STUCK_RULE) >>> 0
+  for (let dx = -STUCK_R; dx <= STUCK_R; dx++) for (let dz = -STUCK_R; dz <= STUCK_R; dz++) for (let y = box.y1; y <= box.y2; y++) {
+    const b = world.at(bot, x + dx, y, z + dz); const nm = b ? b.name : '?'
+    for (let i = 0; i < nm.length; i++) h = ((h * 33) ^ nm.charCodeAt(i)) >>> 0
+    h = ((h * 33) ^ 124) >>> 0
+  }
+  return h.toString(36)
+}
+const stuckSeen = new Map() // column 'x,z' -> {x, z, y1, y2}: its verdict read against the world since the last change near it
+function markStuck (bot, col, why) {
+  const left = col.filter(q => ledger.has(k(q))); if (!left.length) return
+  const box = stuckBox(left); const sig = stuckSig(bot, left[0].x, left[0].z, box)
+  for (const q of left) { q.stuck = sig; q.stuckWhy = why }
+  stuckSeen.set(left[0].x + ',' + left[0].z, { x: left[0].x, z: left[0].z, ...box }); dirty = true
+  log('litter', `the column at ${left[0].x},${left[0].z} (${left.length} block${left.length > 1 ? 's' : ''}, y${box.y1 + 9}-${box.y2 - 2}) is out of reach from its ground: ${why} - out of the count until a block round it changes`)
+}
+// still proven? - read once a column after a boot or a change near it (the listener above), then kept
+function stillStuck (bot, q, colOf) {
+  if (!q.stuck) return false
+  const ck = q.x + ',' + q.z
+  if (stuckSeen.has(ck)) return true
+  const col = colOf(ck).filter(c => c.stuck === q.stuck); const box = stuckBox(col) // (the blocks the verdict was read for: the box it was read in)
+  if (stuckSig(bot, q.x, q.z, box) === q.stuck) { stuckSeen.set(ck, { x: q.x, z: q.z, ...box }); return true }
+  for (const c of col) { delete c.stuck; delete c.stuckWhy }
+  dirty = true
+  return false
 }
 
 // A block of ours put down to stand on, outside the build (the build's ledger and snapshot take its own).
@@ -144,6 +186,7 @@ function seed (bot) {
 
 // The ledger's blocks still standing within `radius` of `from`.
 function pending (bot, from, radius = RADIUS) {
+  listen(bot) // (the stuck verdicts it reads are dropped by the listener on a change near them: wired wherever they are read)
   const out = []
   const mine = mem.get().mine
   // (litter is what is SEEN: a column of ours with rock over its top is underground - a cave's climb-out, an old mine's
@@ -152,6 +195,7 @@ function pending (bot, from, radius = RADIUS) {
   const tops = new Map()
   for (const q of ledger.values()) { const kk = q.x + ',' + q.z; if (!tops.has(kk) || tops.get(kk) < q.y) tops.set(kk, q.y) }
   const seen = new Map()
+  const cols = new Map(); const colOf = ck => { if (!cols.has(ck)) cols.set(ck, [...ledger.values()].filter(c => c.x + ',' + c.z === ck)); return cols.get(ck) }
   // (and not deep under the base's level, sky or no sky: a pit or a ravine 8+ below home is seen from nowhere that matters
   //  and is the ground of the day's falls and deaths; audit)
   const floorY = mem.get().home ? mem.get().home.y - 8 : -Infinity
@@ -166,8 +210,9 @@ function pending (bot, from, radius = RADIUS) {
     // (under our own mine's entrance - its shaft: the mine's, out of sight and out of reach from the surface; gather.inMineShaft)
     if (mine && mine.entrance && q.y < mine.entrance.y - 1 && world.dist2(q, mine.entrance) < 3) continue
     const b = world.at(bot, q.x, q.y, q.z)
-    if (b && b.name === q.name && triesOf(bot, q) < TRIES && !ours(q.x, q.y, q.z)) out.push(q)
+    if (b && b.name === q.name && triesOf(bot, q) < TRIES && !ours(q.x, q.y, q.z) && !stillStuck(bot, q, colOf)) out.push(q)
   }
+  save()
   return out
 }
 
@@ -248,21 +293,23 @@ let climbed = []
 async function climbTo (bot, q, shouldStop) {
   const gather = require('./gather')
   const walled = () => { const p = bot.entity.position; const fx = Math.floor(p.x); const fy = Math.floor(p.y + 0.01); const fz = Math.floor(p.z); return [fy + 1, fy + 2].some(y => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => { const b = world.at(bot, fx + dx, y, fz + dz); return !!b && b.boundingBox === 'block' && !world.LEAF_RE.test(b.name) })) }
+  // (why it stopped short, or null: { why, ground: true } when the ground itself said no - the column's verdict, markStuck)
   const cap = tallClimbSafe(bot) ? MAX_CLIMB : LOW_CLIMB
   for (let i = 0; !act.reach(bot, q, 4.5) && bot.entity.position.y < q.y; i++) {
-    if (i >= cap) { if (cap < MAX_CLIMB) log('litter', `${q.name || 'block'} at ${k(q)} left: too tall to climb safely now (hp ${Math.round(bot.health)}, ${world.phase(bot)}, the ${LOW_CLIMB}-block climb)`); break }
-    if (shouldStop && shouldStop()) break
-    if (climbDanger()) { log('litter', `the climb stopped at ${k(bot.entity.position.floored())}: danger (a hostile near, or hurt) - straight down`); break }
+    if (i >= cap) { if (cap < MAX_CLIMB) log('litter', `${q.name || 'block'} at ${k(q)} left: too tall to climb safely now (hp ${Math.round(bot.health)}, ${world.phase(bot)}, the ${LOW_CLIMB}-block climb)`); return { why: 'too tall to climb', ground: cap === MAX_CLIMB } }
+    if (shouldStop && shouldStop()) return { why: 'stopped' }
+    if (climbDanger()) { log('litter', `the climb stopped at ${k(bot.entity.position.floored())}: danger (a hostile near, or hurt) - straight down`); return { why: 'danger' } }
     // (one pillar, straight: each step from the top of the last - a body moved off it (a reflex, a push) began a new pillar
     //  beside the old one each time, a stair in the air; stopped there, what it raised comes down with climbDown)
     // (off it = in ANOTHER column only: a tower whose block went in after the jump came down left the body a block under its
     //  "top", and "moved off its pillar" ended every climb at the same slope columns since 01:12, 2026-10-07 - the next
     //  tower from where it stands goes on)
     const top = climbed[climbed.length - 1]; const me = bot.entity.position
-    if (top && (Math.floor(me.x) !== top.x || Math.floor(me.z) !== top.z)) { log('litter', `the climb stopped: moved off its pillar at ${k(top)} (standing at ${k(me.floored())})`); break }
-    if (!walled()) { log('litter', `the climb stopped: open air beside the tower at ${k(me.floored())}`); break }
-    if (!await gather.towerUp(bot, { allowZones: ['orchard', 'base', 'farm'], onPlaced: c => climbed.push(c) })) { if (gather.towerWhy()) log('litter', `the climb stopped at ${k(bot.entity.position.floored())}: ${gather.towerWhy()}`); break }
+    if (top && (Math.floor(me.x) !== top.x || Math.floor(me.z) !== top.z)) { log('litter', `the climb stopped: moved off its pillar at ${k(top)} (standing at ${k(me.floored())})`); return { why: 'moved off its pillar' } }
+    if (!walled()) { const why = `open air beside the tower at ${k(me.floored())}`; log('litter', `the climb stopped: ${why}`); return { why, ground: !climbed.length } }
+    if (!await gather.towerUp(bot, { allowZones: ['orchard', 'base', 'farm'], onPlaced: c => climbed.push(c) })) { const tw = gather.towerWhy(); if (tw) log('litter', `the climb stopped at ${k(bot.entity.position.floored())}: ${tw}`); return { why: tw || 'the tower did not rise', ground: /^no head room/.test(tw || '') && !climbed.length } }
   }
+  return null
 }
 async function climbDown (bot, onLevel = null) {
   // (ours = the ledger's, not only this climb's list: a body nudged off the list's own top stopped the descent at once and
@@ -295,13 +342,14 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     //  the lip, and the bot slipped off twice digging from there - audit 2026-09-28. None such: near it, as before)
     const stand = standBeside(bot, low) || standUnder(bot, low)
     // (no stand, and the column is in the air: "near it" is a hunt for a way into mid-air - left this run, said)
-    if (!stand && act.fallBelow(bot, low) > world.SAFE_DROP) { log('litter', `no ground within a climb of the column at ${k(low)} - left this run`); left += col.length; for (const q of col) addTry(bot, q); dirty = true; continue }
+    if (!stand && act.fallBelow(bot, low) > world.SAFE_DROP) { log('litter', `no ground within a climb of the column at ${k(low)} - left this run`); left += col.length; for (const q of col) addTry(bot, q); markStuck(bot, col, 'no ground within a climb of it'); continue }
     const r = await move.goTo(bot, stand ? new goals.GoalBlock(stand.x, stand.y, stand.z) : new goals.GoalNear(low.x, low.y, low.z, 2), { timeoutMs: 30000, place: false, allowZones: ['orchard', 'base', 'farm'], label: 'to litter' })
     const miss = () => { for (const q of col) addTry(bot, q); dirty = true }
     // (only a verdict counts against a column: a walk cut by dusk, a creeper or the operator says nothing of it - audit)
     if (!r.ok && !act.reach(bot, low, 4.5)) { left += col.length; if (move.isVerdict(r)) miss(); continue }
     const leftBefore = left
     const pts = infraPoints()
+    let climbStop = null // (the column's climb said no once: never asked again for each block over it - one line nine times in a ms)
     for (const q of col) {
       // (a pickaxe in hand for every block, the one rule - craft.keepTool: with it worn out mid-tidy, cobble went by hand,
       //  10-50s a block and nothing dropped, 2026-09-28. None to be had: the tidy stops, the tools come first)
@@ -312,7 +360,7 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
       // (above the reach from the ground - a stand of ours left on a tree's crown, 8 up: up to it the way a player does, a
       //  pillar of our own beside it, then that pillar down from on top. From the ground only, such blocks stood for good -
       //  the cobble on the spruce tops the operator asked about, 2026-09-28)
-      if (!act.reach(bot, q, 4.5) && q.y > bot.entity.position.y) await climbTo(bot, q, shouldStop)
+      if (!act.reach(bot, q, 4.5) && q.y > bot.entity.position.y) { if (climbStop) { left++; continue } climbStop = await climbTo(bot, q, shouldStop) }
       // (danger while up our tower: nothing more up here - straight down, climbDown below)
       if (climbed.length && climbDanger()) { left++; continue }
       if (!act.reach(bot, q, 4.5)) { left++; continue }
@@ -338,6 +386,8 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
     }
     await climbDown(bot, climbed.length ? takeOnTheWay : null)
     if (left > leftBefore) miss()
+    // (its ground reached, and the ground itself refused the climb: the column's verdict until that ground changes)
+    if (left > leftBefore && climbStop && climbStop.ground) markStuck(bot, col, climbStop.why)
     await act.collectDrops(bot, { radius: 5, maxMs: 3000 }).catch(() => {})
   }
   save()
@@ -347,4 +397,4 @@ async function tidy (bot, { from, radius = RADIUS, shouldStop } = {}) {
   return removed
 }
 
-module.exports = { note, seed, pending, tidy, capsADrop, has: p => ledger.has(k(p)), size: () => ledger.size }
+module.exports = { note, seed, pending, tidy, capsADrop, markStuck, has: p => ledger.has(k(p)), size: () => ledger.size }

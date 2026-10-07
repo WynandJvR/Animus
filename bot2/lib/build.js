@@ -1008,7 +1008,8 @@ function underTheBuild (bot) {
 }
 // (shouldStop: the caller's day - the running step's by default. The legs never heard it: a step's walk of three re-planned
 //  attempts ran past dusk, the round ended at night on the site and the bot walled itself in there, 2026-10-06)
-async function goSite (bot, goal, label, { place = true, dig = (job && job.cells.every(c => cellDone(bot, c) === true)) ? 'noGround' : true, doors = true, shouldStop = stepStop } = {}) {
+async function goSite (bot, goal, label, opts0 = {}) {
+  const { place = true, dig = (job && job.cells.every(c => cellDone(bot, c) === true)) ? 'noGround' : true, doors = true, shouldStop = stepStop } = opts0
   // leaving the safehouse first: the planner never routes through its door
   if (move.insideHut(bot.entity.position.floored())) await move.crossDoor(bot, goal).catch(e => log('build', `door crossing threw: ${e.message}`))
   // UNDER THE BUILD: the plaza overhangs the mountainside, and the bot, come up the slope from a grave run or a flee,
@@ -1082,6 +1083,31 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
   // after every failure, whatever it was: 88 walks "to the door" in four days, 74 failed, 3227s; 58 of 83 crossings still
   // missed the goal (2026-10-02 analysis). The planner routes through doors itself now (movementsFor)
   void doors
+  // SHUT IN OR PERCHED, BY THE WALK SEARCH'S OWN VERDICT, and the goal served by none of its cells: no walk gets there - the
+  // place is the problem, not the goal. The walker's 30s went first, three of them, before the give-ups called the escape
+  // (2026-10-07 11:33-11:35: enclosed at -2265,123,-608 and perched at y129, four walker timeouts in a row, "the search has
+  // no answer from here"). The escape at once - its own order, its finished-wall rule - and the walk again from wherever it
+  // leaves us. An escape that could not act (waiting out the finished-wall rule) is asked again only when the place changes:
+  // another stand, a block of the build changed, or survival turning urgent (move.escapeUrgent)
+  // (ONLY A PROVEN PLACE: shut in - or perched on a pillar of OUR OWN (the descent's case); perched on a wall top or a walkway
+  //  is the builder's own work stand, a handful of cells by design, and its pillar foot never "served": the escape tunnelled
+  //  from a real work stand; audit. And one real walk from THIS stand failed first - noPath or stuck, never a timeout (progress
+  //  was made): the walk model is stricter than the planner in places (the plate and fire rules), its "shut in" alone no
+  //  proof the planner has no way; audit)
+  const sk0 = key(world.standCell(bot))
+  if (!opts0.afterEscape) {
+    const sh = await shutHere(bot)
+    if (sh && !shutServes(sh, goal) && (sh.kind === 'shut in' || onOurPillar(bot)) && walkerFailed.get(sk0) === statusGen) {
+      watchStatus(bot)
+      const sk = sk0; const urgent = move.escapeUrgent(bot)
+      if (shutEsc && shutEsc.k === sk && shutEsc.gen === statusGen && (shutEsc.urgent || !urgent)) return { ok: false, why: 'shut in' }
+      log('build', `${sh.kind} at ${move.fmt(world.standCell(bot))} (${sh.kind === 'perched' ? `only ${sh.cells.size} cells I can walk` : `${sh.cells.size} cells I can walk, none outside the build`}) - the goal ${goal && goal.x != null ? move.fmt(goal) : goal && goal.pos ? move.fmt(goal.pos) : ''} is none of theirs: the escape, not the walker`)
+      const out = await move.escapeUp(bot, { proven: `${sh.kind} by the walk search (${sh.cells.size} cells) and a walk from here failed` }).catch(() => false)
+      if (out) { shutEsc = null; shutIn = null; reach = null; return goSite(bot, goal, label, Object.assign({}, opts0, { afterEscape: true })) }
+      watchStatus(bot); shutEsc = { k: key(world.standCell(bot)), gen: statusGen, urgent: move.escapeUrgent(bot) }
+      return { ok: false, why: 'shut in' }
+    }
+  }
   // (the walker's own towers are this step's pillar as much as pillarTo's: the step's descent takes the body back down
   //  them. Forgotten, a walk that towered 7 up on the castle's rim and then failed left the bot on the top, a drop all
   //  round, every walk after it stuck for 25 minutes, 2026-10-03 - the chop's own rule, gather.js tFell)
@@ -1090,6 +1116,7 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
   const r = await move.goTo(bot, goal, { timeoutMs: 30000, stuckMs: 8000, label: 'site ' + (label || ''), movements: () => siteMovements(bot, { place, dig }), shouldStop })
   // (THE WALKER'S OUTCOME, with why it walked: its failures were 43% of a day's build-step time (130 timeouts, 51 give-ups,
   //  2026-10-07) and its successes said nothing - no rate to judge it by. One line a walk; a step away is no walk to judge)
+  if (r && !r.ok && /noPath|stuck/.test(r.why || '')) { watchStatus(bot); walkerFailed.set(sk0, statusGen); if (walkerFailed.size > 50) walkerFailed.delete(walkerFailed.keys().next().value) }
   if (walkerWhy !== 'a step away' && !(r && r.why === 'stopped')) { const g = goal && goal.x != null ? goal : null; log('build', `site walker (${label || '-'}): ${r && r.ok ? 'reached' : (r ? r.why : 'no answer')} in ${((Date.now() - tWalk) / 1000).toFixed(1)}s${g ? ` to ${move.fmt(g)} (${world.dist3(g, bot.entity.position).toFixed(1)}b off now, dy ${Math.floor(g.y != null ? g.y : bot.entity.position.y) - Math.floor(bot.entity.position.y)})` : ''} - walked because: ${walkerWhy}`) }
   for (const q of reflex.plannerPlacedSince(tWalk)) if (!(job && job.index.has(key(q))) && !myPillar.some(c => c.x === q.x && c.y === q.y && c.z === q.z)) myPillar.push({ x: q.x, y: q.y, z: q.z })
   return r
@@ -1418,10 +1445,10 @@ async function walkReach (bot) {
   const start = [0, -1, 1].map(dy => ({ x: f.x, y: f.y + dy, z: f.z })).find(q => W0.st(q.x, q.y, q.z))
   // (no cell the walk model stands in under me - a stair, a slab's edge, a ladder: no search from here; read as a set of
   //  one, 20 cells were held at once, 2026-10-02)
-  if (!start) { reach = null; return null }
+  if (!start) { reach = null; shutIn = null; return null }
   // (standing outside the site's ground - at the chests by home: no question to ask from here, every stand is unknown; read
   //  as a set of one, every cell was held and nothing walked; audit)
-  if (!inArea(start)) { reach = null; return null }
+  if (!inArea(start)) { reach = null; shutIn = null; return null }
   const cells = new Set([key(start)]); const q = [start]; let i = 0; let capped = false
   const parent = new Map() // (the way each cell was reached: the route to a stand is read back from it - reachRoute)
   const depth = new Map([[key(start), 0]]) // (its route's length: detourTooLong)
@@ -1445,16 +1472,43 @@ async function walkReach (bot) {
   //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
   // (and PERCHED - a handful of cells: the top of a scaffold pillar on the rim, every side a drop; the site walk climbs down
   //  on its own blocks, which a walk-only search cannot see - a set of one held 11 cells, 2026-10-02: unknown too)
-  if (!capped && cells.size < 50) { reach = null; return null }
+  if (!capped && cells.size < 50) { reach = null; watchStatus(bot); shutIn = { job, kind: 'perched', cells, at: Date.now(), gen: statusGen, from: f }; return null }
   if (!capped && ![...cells].some(k => { const [x, , z] = k.split(',').map(Number); return x < b.x1 || x > b.x2 || z < b.z1 || z > b.z2 })) {
     if (Date.now() - shutSaid > 60000) { shutSaid = Date.now(); log('build', `walk reach: shut in at ${move.fmt(f)} (${cells.size} cells, none outside the build) - stands unknown, the walks go`) }
-    reach = null; return null
+    reach = null; watchStatus(bot); shutIn = { job, kind: 'shut in', cells, at: Date.now(), gen: statusGen, from: f }; return null
   }
+  shutIn = null
   reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent, depth }
   if (Date.now() - reachLast > 120000) { reachLast = Date.now(); log('build', `walk reach: ${cells.size} cells from ${move.fmt(f)}${capped ? ' (capped - unknown past it)' : ''} in ${reach.ms}ms (longest slice ${longest}ms)`) }
   return reach
 }
 let reachLast = 0; let shutSaid = 0
+// THE SEARCH'S VERDICT WHEN IT HAS NO SET: shut in (no cell of the walk outside the build) or perched (a handful of cells) -
+// { job, kind, cells, at, from }. Read by goSite: a goal none of those cells serves goes to the escape, not to the walker.
+// Any other null (no stand under me, outside the site, capped) is no verdict - null here
+let shutIn = null
+let shutEsc = null // (the escape's last answer from a shut place: { k, gen, urgent } - asked again when the place changes)
+const walkerFailed = new Map() // stand key -> statusGen: a walker walk from it failed (noPath/stuck) with the world as it was
+// standing on a pillar of our own - this step's (myPillar) or the litter ledger's: the perched case the escape's descent is for
+function onOurPillar (bot) { const f = world.standCell(bot); const u = { x: f.x, y: f.y - 1, z: f.z }; return myPillar.some(q => q.x === u.x && q.y === u.y && q.z === u.z) || require('./litter').has(u) }
+// the verdict for where I stand now (the search redone when it is stale): null when none
+async function shutHere (bot) {
+  watchStatus(bot)
+  const cur = () => shutIn && shutIn.job === job && shutIn.gen === statusGen && Date.now() - shutIn.at < 30000 && shutIn.cells.has(key(world.standCell(bot))) ? shutIn : null
+  if (cur() || reachCurrent(bot)) return cur()
+  await walkReach(bot).catch(() => null)
+  return cur()
+}
+// does any cell of the set serve the goal: the goal's own cell, a cell within its range, a stand in reach of its block
+function shutServes (sh, goal) {
+  const p = goal && goal.x != null ? goal : goal && goal.pos ? goal.pos : null
+  if (!p) return true // (a goal of no place: no verdict on it)
+  const r = goal.pos ? 4.5 : Math.max(0, Math.sqrt(goal.rangeSq || 0))
+  const cx = Math.floor(p.x); const cy = Math.floor(p.y); const cz = Math.floor(p.z)
+  if (sh.cells.has(`${cx},${cy},${cz}`)) return true
+  for (const kk of sh.cells) { const [x, y, z] = kk.split(',').map(Number); const ey = goal.pos ? y + 1.62 : y; if ((x - cx) ** 2 + (ey - cy - (goal.pos ? 0.5 : 0)) ** 2 + (z - cz) ** 2 <= r * r) return true }
+  return false
+}
 // (only a set that is current: this job, under 30s, and me still in it - from another place or step it is no answer; audit)
 function reachCurrent (bot) {
   if (!reach || reach.job !== job || Date.now() - reach.at > 30000 || !bot || !bot.entity) return false
@@ -1657,6 +1711,7 @@ async function placeCell (bot, c, j = job) {
       //  or round the build, the long walk's legs; once down there, the in-reach cells round it go in before it leaves)
       if (st) {
         const r1 = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place', { doors: false }).catch(() => null)
+        if (r1 && r1.why === 'shut in') return why('shut in - the escape has the body')
         // (the long walk round only from OUTSIDE the footprint: begun inside the castle, its legs went through the rooms' doors
         //  and shut the bot in one, the escape digging the floor out, 2026-09-29)
         const fp = bot.entity.position; const outBox = fp.x < job.box.x1 || fp.x >= job.box.x2 + 1 || fp.z < job.box.z1 || fp.z >= job.box.z2 + 1
@@ -1685,6 +1740,7 @@ async function placeCell (bot, c, j = job) {
     }
     const goal = faces ? new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces, LOS: true }) : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 })
     const r = await goSite(bot, goal, 'place', { shouldStop: cellStop })
+    if (r.why === 'shut in') return why('shut in - the escape has the body') // (no miss of the cell's: the step ends)
     if (!r.ok && cellOutOfTime() && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`) // (never "stopped": that word ends the step)
     // (a cell high over us: the planner won't tower toward a "see this face" goal - it never found one for the nave's
     //  y127 pillar tops, an evening of "stuck" - but it towers to a place to STAND: up beside the cell, then place)
@@ -2135,7 +2191,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place', { shouldStop: cellStop }).catch(() => null)
         placeProf.reach += Date.now() - tw
         if (r && r.why === 'stopped' && cellOutOfTime()) r.why = `timeout (the cell's ${CELL_REACH_MS / 1000}s)` // (the cell's budget, not the step's stop: a stand not reached)
-        if (r && r.why === 'stopped') break // (the step's stop, not the stand's verdict; audit)
+        if (r && (r.why === 'stopped' || r.why === 'shut in')) break // (the step's stop, not the stand's verdict; audit) (shut in: the escape has the body - no verdict on the cell either)
         if (r && !r.ok) {
           badStands.add(key(st)); if (/timeout|stuck/.test(r.why || '')) { skipTry = true; c.ownWay = true; const f0 = cellFails.get(key(c)); if (f0) { f0.ownWay = true; saveCellFails() } else { cellFails.set(key(c), { n: 0, at: 0, ownWay: true }); saveCellFails() } }
           // (the stand itself, for the next root: what stands at it, and whether a hold keeps it - a waiting hole, its column,
@@ -2187,7 +2243,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const ok = await placeCell(bot, c)
     // (a walk stopped by the step's own stop - dusk, survival - is no verdict on the cell: no miss, no rest, no own way; an
     //  own miss lets the cell be covered over; audit 2026-10-06)
-    if (!ok && (/stopped/.test(lastPlaceFail || '') || (stepStop && stepStop()))) break
+    // (and SHUT IN - the escape has the body, or waits out its finished-wall rule: no cell's fault; counted a miss, every cell
+    //  after it was "could not get within reach" in a ms, its fails persisted and rested out of the room rule's work; audit)
+    if (!ok && (/\bstopped\b|\bshut in\b/.test(lastPlaceFail || '') || (stepStop && stepStop()))) break
     prof.tries++; prof.ms += Date.now() - tp; prof.dist += d0; if (ok) prof.okMs += Date.now() - tp; else missed(lastPlaceFail, Date.now() - tp)
     tpick = Date.now()
     // NO FULL BUCKET AT THE POUR is the pack's, not the cell's (as the supports' filler below): left this step, never a miss - the
