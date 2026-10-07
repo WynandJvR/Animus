@@ -1030,7 +1030,7 @@ async function goSite (bot, goal, label, { place = true, dig = (job && job.cells
       //  cells, 94s a try - lost to the walker's one scaffold step up, 2026-10-03)
       // (only for a stand ABOVE us - the scaffold step's case; a walled-in courtyard at our level has the long way round as its
       //  only way, and the walker's 30s ran out on it, 0 of 8, 2026-10-03)
-      if (tgt.y - Math.floor(bot.entity.position.y) >= 3 && route.length > Math.max(30, 3 * world.dist3(bot.entity.position, tgt))) { said = said || `the route to ${move.fmt(tgt)} runs ${route.length} cells round - the walker's way instead`; break }
+      if (detourTooLong(bot, tgt, route.length)) { said = said || `the route to ${move.fmt(tgt)} runs ${route.length} cells round - the walker's way instead`; break }
       const plain = q => { const fl = world.at(bot, q.x, q.y - 1, q.z); const ft = world.at(bot, q.x, q.y, q.z); const hd = world.at(bot, q.x, q.y + 1, q.z); return !!fl && fl.boundingBox === 'block' && world.isSolid(fl) && !!ft && world.isAirish(ft) && !!hd && world.isAirish(hd) }
       const isDoorCell = q => { const b = world.at(bot, q.x, q.y, q.z); return !!b && /_door$|_fence_gate$/.test(b.name) }
       const stops = []; let last = 0
@@ -1392,6 +1392,7 @@ async function walkReach (bot) {
   if (!inArea(start)) { reach = null; return null }
   const cells = new Set([key(start)]); const q = [start]; let i = 0; let capped = false
   const parent = new Map() // (the way each cell was reached: the route to a stand is read back from it - reachRoute)
+  const depth = new Map([[key(start), 0]]) // (its route's length: detourTooLong)
   const t0 = Date.now(); let slice = t0; let longest = 0
   const dearQ = [] // (the dear tier: walked on from once the cheap cells are spent)
   while (i < q.length || dearQ.length) {
@@ -1400,7 +1401,7 @@ async function walkReach (bot) {
     if (Date.now() - slice > 8) { longest = Math.max(longest, Date.now() - slice); await new Promise(r => setImmediate(r)); slice = Date.now() }
     const c = q[i++]
     if (!inArea(c)) continue // (reached, not walked on from: the site's own ground is the question)
-    for (const n of W.next(c)) { const k = key(n); if (!cells.has(k)) { cells.add(k); parent.set(k, c); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
+    for (const n of W.next(c)) { const k = key(n); if (!cells.has(k)) { cells.add(k); parent.set(k, c); depth.set(k, (depth.get(key(c)) || 0) + 1); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
   }
   // (SHUT IN - no cell of the set outside the build: every stand reads out of reach, no walk is made, and the walker's own
   //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
@@ -1411,7 +1412,7 @@ async function walkReach (bot) {
     if (Date.now() - shutSaid > 60000) { shutSaid = Date.now(); log('build', `walk reach: shut in at ${move.fmt(f)} (${cells.size} cells, none outside the build) - stands unknown, the walks go`) }
     reach = null; return null
   }
-  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent }
+  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent, depth }
   if (Date.now() - reachLast > 120000) { reachLast = Date.now(); log('build', `walk reach: ${cells.size} cells from ${move.fmt(f)}${capped ? ' (capped - unknown past it)' : ''} in ${reach.ms}ms (longest slice ${longest}ms)`) }
   return reach
 }
@@ -1430,7 +1431,17 @@ function reachRoute (bot, p) {
 }
 let legLast = 0; let legN = 0
 function legSaid (s) { legN++; if (Date.now() - legLast > 30000) { legLast = Date.now(); log('build', `${s}${legN > 1 ? ` [${legN} walks since the last line]` : ''}`); legN = 0 } } // (one line in 30s: the evidence)
-function canWalkTo (bot, p) { return !reachCurrent(bot) || reach.capped || reach.cells.has(key(p)) }
+// A RAISED CELL WHOSE ROUTE RUNS ROUND THE BUILD: the legs refuse it (a route 3+ up, over 30 cells and three times the
+// straight line: the walker's one scaffold step up was the better bet, 2026-10-03) - so it is no stand the walk reaches
+// either. Read as reachable, a wall-top stand 5 up with a 225-cell route was chosen, the legs handed it to the walker, and
+// the walker stuck under it at the wall's foot, 30s, 2026-10-07. ONE rule: goSite's and canWalkTo's
+function detourTooLong (bot, p, len = null) {
+  const me = bot.entity.position
+  if (p.y - Math.floor(me.y) < 3) return false
+  const n = len != null ? len : (reachCurrent(bot) && reach.depth ? (reach.depth.get(key(p)) != null ? reach.depth.get(key(p)) + 1 : null) : null)
+  return n != null && n > Math.max(30, 3 * world.dist3(me, p))
+}
+function canWalkTo (bot, p) { return !reachCurrent(bot) || reach.capped || (reach.cells.has(key(p)) && !detourTooLong(bot, p)) }
 // A STAND THE WALK SEARCH REACHES within a player's reach of p (the eye within 4.3 of its centre), the nearest to me: the
 // stand; false when the search is current and has none; null when it is no answer (stale, capped, none from here)
 function reachStandFor (bot, p) {
@@ -1438,7 +1449,7 @@ function reachStandFor (bot, p) {
   const me = bot.entity.position; let best = null; let bd = Infinity
   for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 2; dy++) {
     const s0 = { x: p.x + dx, y: p.y + dy, z: p.z + dz }
-    if (!reach.cells.has(key(s0))) continue
+    if (!reach.cells.has(key(s0)) || detourTooLong(bot, s0)) continue
     const ex = p.x - s0.x; const ey = p.y + 0.5 - world.eyeAt(bot, s0); const ez = p.z - s0.z // (the eye from the floor's real top: world.eyeAt)
     if (ex * ex + ey * ey + ez * ez > 4.3 * 4.3) continue
     const d = world.dist3(s0, me); if (d < bd) { bd = d; best = s0 }
@@ -2050,7 +2061,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     if (!c.foundation && !c.ownWay && !inReach(c)) {
       const st = clusterStand(bot, c, ready, badStands, reachOf)
       if (st && st.out) log('build', `the stand ${move.fmt(st)} for ${c.name} at ${move.fmt(c)} is in a closed compartment of the build I am not in (from ${move.fmt(world.feetPos(bot))}) - no other stand: tried as a last resort`)
-      if (st && (st.n >= 3 || (st.n >= 1 && reachCurrent(bot) && reach && !reach.capped && reach.cells.has(key(st))))) {
+      if (st && (st.n >= 3 || (st.n >= 1 && reachCurrent(bot) && reach && !reach.capped && reach.cells.has(key(st)) && !detourTooLong(bot, st)))) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place').catch(() => null)
         placeProf.reach += Date.now() - tw
