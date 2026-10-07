@@ -137,7 +137,7 @@ let doorIds = null
 //            100 cut-off). On by default: at weight 40 the walk home from a clay bank still took the line under the
 //            river, the air reflex took the body, and at night the bot drowned there (2026-09-22). A walk that must
 //            dive says so (false) - none does today.
-function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true, dryHead = true, placeCost = 10, edgeCost = 0 } = {}) {
+function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint = true, dryHead = true, placeCost = 10, edgeCost = 0, spare = null } = {}) {
   // (the drop under a cell, once per plan: the step callbacks asked ~100 uncached blockAt per expanded node - audit #24)
   const drops = new Map(); let dropGen = pathGen
   const dropAt = (x, y, z, lim) => { if (dropGen !== pathGen || drops.size > 20000) { drops.clear(); dropGen = pathGen } const key = x + ',' + y + ',' + z + ',' + (lim || ''); let v = drops.get(key); if (v === undefined) { v = world.dropAt(bot, x, y, z, lim); drops.set(key, v) } return v }
@@ -157,11 +157,17 @@ function movementsFor (bot, { dig = true, place = true, allowZones = [], sprint 
   //  walks pass their own, lower: their scaffold is tracked and taken down - audit)
   m.placeCost = placeCost
   m.allow1by1towers = place
-  m.scafoldingBlocks = place ? scaffoldIds.slice() : []
+  // THE WALK'S STEPPING STONES NEVER SPEND A BLOCK THE BUILD STILL NEEDS: a kind is scaffold only while the pack holds more
+  // of it than the build's claim (base.buildNeedOf - the window's needs, the band's waited and anchor items), and never the
+  // item the walk is on its way to place (spare). The walk into reach to place coarse dirt laid the pack's one coarse dirt as
+  // a step - "none in the pack at the click", the cell missed; the night seal's andesite went the same way, 2026-10-07 16:26
+  const spared = new Set(spare || [])
+  const scaffoldOk = id => { const it = md.items[id]; if (!it) return false; if (spared.has(it.name)) return false; let need = 0; try { need = require('./base').buildNeedOf(it.name) } catch {} return bot.inventory.items().filter(i => i.type === id).reduce((n, i) => n + i.count, 0) > need }
+  m.scafoldingBlocks = place ? scaffoldIds.filter(scaffoldOk) : []
   // scaffold short (under half the builder's 32 in reserve): cobblestone will do to tower or bridge out (the build's stone, but a player
   // walled into a one-wide shaft of its own cathedral wall with 137 cobble and one dirt climbs out on the cobble - the bot
   // stood there twenty minutes, 2026-09-25; stray cobble is scaffold to the teardown)
-  if (place && bot.inventory.items().filter(i => scaffoldIds.includes(i.type)).reduce((a, i) => a + i.count, 0) < 16) { const cb = md.itemsByName.cobblestone; if (cb) m.scafoldingBlocks.push(cb.id) }
+  if (place && bot.inventory.items().filter(i => m.scafoldingBlocks.includes(i.type)).reduce((a, i) => a + i.count, 0) < 16) { const cb = md.itemsByName.cobblestone; if (cb && scaffoldOk(cb.id)) m.scafoldingBlocks.push(cb.id) }
   m.allowParkour = false
   // walking costs no hunger, sprinting ~1 food point per 40 m: only sprint on a full belly
   m.allowSprinting = sprint === 'always' || (sprint && bot.food >= 18)
@@ -927,7 +933,7 @@ async function goToInner2 (bot, goal, opts, { timeoutMs, stuckMs, dig, place, al
     const zonesOk = here && !allowZones.includes(here.label) ? allowZones.concat([here.label]) : allowZones
     const tRun = Date.now(); const pRun = bot.entity.position.clone()
     // (opts.movements: a walk with its own rules - the build site's - still gets every recovery here; build.goSite)
-    const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: opts.movements ? opts.movements() : movementsFor(bot, { dig, place, allowZones: zonesOk, dryHead }) })
+    const r = await runGoal(bot, goal, { timeoutMs: Math.max(2000, deadline - Date.now()), stuckMs, movements: opts.movements ? opts.movements() : movementsFor(bot, { dig, place, allowZones: zonesOk, dryHead, spare: opts.spare || null }) })
     if (r.ok) return r
     // (a plan that failed at once, going nowhere, three times over from here: a verdict, not bad luck - said, not cycled
     //  to the deadline; audit 2026-09-28)

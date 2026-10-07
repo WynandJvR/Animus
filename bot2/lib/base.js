@@ -477,6 +477,9 @@ async function depositItem (bot, name, n = 1) {
 // 2026-10-07. (A trip's own pre-deposit - nothing but the kit goes - passes its own keep, as before)
 let keepHook = null
 function setDepositKeep (fn) { keepHook = fn }
+// THE BUILD'S CLAIM ON AN ITEM - the window's needs and the band's waited and anchor items (Infinity), as registered
+// (keepHook): what no walk's stepping stones may spend (move.movementsFor). 0 with nothing registered
+function buildNeedOf (name) { if (!keepHook) return 0; try { return keepHook({ name }) || 0 } catch { return 0 } }
 function depositKeepOf (bot, it) {
   const k = keepCount(bot, it)
   if (k === Infinity || !keepHook) return k
@@ -651,4 +654,4 @@ async function roomToCraft (bot, keep = new Set()) {
   return inv.freeSlots(bot) > 0
 }
 
-module.exports = { SPARE_KIT, toolsKept, depositByWear, withdrawPlan, roomPlan, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+module.exports = { SPARE_KIT, buildNeedOf, toolsKept, depositByWear, withdrawPlan, roomPlan, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }

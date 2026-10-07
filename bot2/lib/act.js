@@ -337,7 +337,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
     }
     if (!reach(bot, pos, 4.4)) {
       if (noWalk) return false
-      const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to place' })
+      const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y, pos.z, 3), { timeoutMs: 20000, allowZones, label: 'reach to place', spare: [itemName] }) // (never the item it walks to place as a stepping stone: move.movementsFor)
       if (!r.ok && !reach(bot, pos, 4.8)) { log('act', `place ${itemName} at ${move.fmt(pos)}: could not get within reach (${r.why}) from ${move.fmt(bot.entity.position)}`); return false }
     }
     // (the flower out of the cell, now in reach - the walk came after the first look: a support placed from 6 blocks off
