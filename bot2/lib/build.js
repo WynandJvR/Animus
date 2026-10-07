@@ -1370,27 +1370,29 @@ function stateOf (b) { try { const p = b.getProperties(); const s = KEY_PROPS.fi
 // Standing columns to pillar up from, nearest first: clear air (no build cell) from the ground up past the cell's height,
 // within 3 of the cell so its top reaches it (only the eight beside it: the rose window's ring filled all eight with
 // its own cells, "no pillar up to it", 2026-09-27).
-function feetFor (bot, c) {
+// (rej: { reason: count } - why each column round the cell was no foot, for the stand-plan line; never changes the answer)
+function feetFor (bot, c, rej = null) {
   const me = bot.entity.position
   const out = []
+  const no = r => { if (rej) rej[r] = (rej[r] || 0) + 1 }
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
     if ((!dx && !dz) || Math.hypot(dx, dz) > 3.2) continue
     const x = c.x + dx; const z = c.z + dz
     const gy = world.groundY(bot, x, z, c.y - 1)
-    if (gy == null || c.y - 1 - gy > 16) continue
+    if (gy == null || c.y - 1 - gy > 16) { no('no ground within 16'); continue }
     // (never under the plaza's floor - a gap in it showed the slope 4 below; nor on top of an old scaffold pillar a
     //  walk can't get up onto - the columns tried before were full of their own dirt, 2026-09-27)
     const inFoot = x >= job.box.x1 && x <= job.box.x2 && z >= job.box.z1 && z <= job.box.z2
-    if (inFoot && gy < job.box.y1 - 1) continue
+    if (inFoot && gy < job.box.y1 - 1) { no('under the floor'); continue }
     const g = world.at(bot, x, gy, z)
     // (and never on a floor lower than a whole block - a bottom slab, a carpet, farmland (a stair's top step is whole): the feet stand in its own cell and the tower aims there; the jump from a slab peaks under the
     //  top of the block the tower needs - feet at 119.5 reach 120.75, the block wants 121 - so the first block never goes in;
     //  "towered ... to y119 (cell y119 cobblestone_slab)", 2026-10-03)
-    if (g && g.shapes && g.shapes.length && Math.max(...g.shapes.map(sh => sh[4])) < 0.99) continue
-    if (g && gy > job.box.y1 && !job.index.has(key({ x, y: gy, z })) && /^(dirt|cobblestone|andesite|diorite|tuff|coarse_dirt)$/.test(g.name)) continue
-    let clear = true
-    for (let y = gy + 1; y <= c.y + 1 && clear; y++) { const b = world.at(bot, x, y, z); if (!b || !world.isAirish(b) || job.index.has(key({ x, y, z }))) clear = false }
-    if (!clear) continue
+    if (g && g.shapes && g.shapes.length && Math.max(...g.shapes.map(sh => sh[4])) < 0.99) { no('a low floor'); continue }
+    if (g && gy > job.box.y1 && !job.index.has(key({ x, y: gy, z })) && /^(dirt|cobblestone|andesite|diorite|tuff|coarse_dirt)$/.test(g.name)) { no('an old filler pillar'); continue }
+    let clear = true; let why = ''
+    for (let y = gy + 1; y <= c.y + 1 && clear; y++) { const b = world.at(bot, x, y, z); if (job.index.has(key({ x, y, z }))) { clear = false; why = y > c.y - 1 ? 'a build cell at the cell\'s height' : 'a build cell below the cell' } else if (!b || !world.isAirish(b)) { clear = false; why = 'a block in the column' } }
+    if (!clear) { no(why); continue }
     // (on the floor or the ground, not up on a ledge of the build: the walk to a window ledge at y128 stuck every time)
     const raised = gy > job.box.y1 ? 25 : 0
     // (and below the build's floor, off its rim, last: the slope under the south rim - feet at y112-115 for a y125 cell -
@@ -1398,7 +1400,7 @@ function feetFor (bot, c) {
     //  if it ever got there, 2026-10-03. A foot at the floor's level wins when there is one)
     const sunk = gy < job.box.y1 - 1 ? (job.box.y1 - 1 - gy) * 6 : 0
     // (and a foot no walk gets to - an upper floor nothing climbs to yet: 24 pillar feet so, each a stuck walk; walkReach)
-    if (!canWalkTo(bot, { x, y: gy + 1, z })) continue
+    if (!canWalkTo(bot, { x, y: gy + 1, z })) { no('off my walk'); continue }
     out.push({ x, y: gy + 1, z, d: Math.hypot(x + 0.5 - me.x, gy + 1 - me.y, z + 0.5 - me.z) + Math.hypot(dx, dz) + raised + sunk })
   }
   return out.sort((a, b) => a.d - b.d)
@@ -1634,6 +1636,26 @@ async function pillarTo (bot, c, first, stop = cellStop) {
   return false
 }
 let lastPlaceFail = ''
+// THE STAND PLAN, SAID ONCE A CELL A BAND: a walk-search stand, else a pillar foot, else none - and for none, why each column
+// round it was no foot. The upper layers' reach misses were 70% of a step at y129-130 with nothing to say which of these
+// the cells lacked, 2026-10-07 16:21 - the data that decides between feetFor's rules and a scaffold ring (measurement only)
+const planSaid = new Set(); let planBand = null
+function standPlanSay (bot, c, pos) {
+  const k = key(c) + '@' + planBand; if (planSaid.has(k)) return
+  planSaid.add(k); if (planSaid.size > 5000) planSaid.clear()
+  try {
+    const rs = reachStandFor(bot, pos)
+    let what
+    if (rs) what = `walk stand ${move.fmt(rs)}`
+    else if (rs === null) what = 'the walk search has no answer from here'
+    else {
+      const rej = {}; const f = feetFor(bot, c, rej).filter(q => !footBad(q))
+      what = f.length ? `pillar foot ${move.fmt(f[0])} (${f.length} feet)` : `none - no walk stand, no pillar foot (${Object.entries(rej).sort((a, b) => b[1] - a[1]).map(([r, n]) => n + ' ' + r).join(', ') || 'no column'})`
+    }
+    const me = world.standCell(bot)
+    log('build', `stand plan for ${c.name} at ${move.fmt(c)} (band y${planBand}, me ${move.fmt(me)}, ${c.y - me.y >= 0 ? '+' : ''}${c.y - me.y}): ${what}`)
+  } catch {}
+}
 // (getInReach's short cut past the look-at walker: taken once a cell - its next try walks - and never when the step has
 //  nothing else to try; audit)
 const noStandOnce = new Set()
@@ -1748,6 +1770,7 @@ async function placeCell (bot, c, j = job) {
     }
     if (act.reach(bot, pos, 4.3)) return true
     if (cellOutOfTime()) return why(`could not get within reach (its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`)
+    standPlanSay(bot, c, pos)
     // (NO STAND THE WALK REACHES - the search current, none within a player's reach of a cell above me: the look-at walker
     //  cannot tower to a "see this face" goal (below), so its 30s ran out first and the pillar went up after it - the same
     //  pillar, first. A pillar that does not get there leaves the walker its try as before)
@@ -2011,6 +2034,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     const det = detachedItems(todo, bot)
     refreshHolds(todo, bot)
     const lowestAll = lowestStructural(todo, bot, det)
+    planBand = lowestAll // (the stand plan's band: one line a cell a band)
     // (what ANCHORS the band: the one definition - the step's end lines name it, and an item "holds" only when its cell is
     //  one: a trapdoor - infill - was said to hold the castle for two hours while a lightning rod did; audit 2026-09-29)
     const anchors = c => c.y === lowestAll && anchorable(bot, c, det)
