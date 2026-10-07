@@ -1424,7 +1424,7 @@ function reachStandFor (bot, p) {
   for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 2; dy++) {
     const s0 = { x: p.x + dx, y: p.y + dy, z: p.z + dz }
     if (!reach.cells.has(key(s0))) continue
-    const ex = p.x - s0.x; const ey = p.y + 0.5 - (s0.y + 1.62); const ez = p.z - s0.z
+    const ex = p.x - s0.x; const ey = p.y + 0.5 - world.eyeAt(bot, s0); const ez = p.z - s0.z // (the eye from the floor's real top: world.eyeAt)
     if (ex * ex + ey * ey + ez * ez > 4.3 * 4.3) continue
     const d = world.dist3(s0, me); if (d < bd) { bd = d; best = s0 }
   }
@@ -2360,7 +2360,7 @@ function edgeOf (dx, dz) { return rooms.edgeOf(dx, dz) }
 //  castle's inner trapdoors read as sealed and the escape dug out a trapdoor of the build, 2026-09-29)
 // THE WALK'S STEP MODEL - rooms.js, the one copy (the way-out search, the stands' regions, the room rule), over the
 // live world
-function roomWorld (bot) { return { at: (x, y, z) => world.at(bot, x, y, z), isAirish: world.isAirish, bodyPassable: world.bodyPassable, isOpenTrapdoor: world.isOpenTrapdoor, isSolid: world.isSolid, standable: (x, y, z) => world.standable(bot, x, y, z), plateEdge: world.plateEdge, SAFE_DROP: world.SAFE_DROP } }
+function roomWorld (bot) { return { floorTop: (x, y, z) => y + world.floorTop(world.at(bot, x, y, z)), at: (x, y, z) => world.at(bot, x, y, z), isAirish: world.isAirish, bodyPassable: world.bodyPassable, isOpenTrapdoor: world.isOpenTrapdoor, isSolid: world.isSolid, standable: (x, y, z) => world.standable(bot, x, y, z), plateEdge: world.plateEdge, SAFE_DROP: world.SAFE_DROP } }
 function walkModel (bot, isC = () => false) { return rooms.walkModel(roomWorld(bot), isC) }
 // A STAND'S REGION: whether the walk-only region round a cell gets out of the build (the box's edge, or a sky column a
 // tower may climb) - the same search as wayOut, from the stand. A stand whose region is closed off inside the build is in
@@ -2403,14 +2403,18 @@ function dropFoundation (bot, c, why) {
 // The stand beside `c` (feet within 3 across, four below to one above - the reach rule drops what is too far; two below never saw the ground under the market stalls' eaves, 3-4 up, and they waited "in a closed compartment" for good, 2026-10-03) from which the most ready cells are in reach: clear
 // to stand in, no cell of the job at its feet or head, never on a lip, and `c` itself in reach. {x,y,z,n} or null.
 const EYE = 1.62; const REACH = 4.2
+// (a stand on a floor over a block high - a fence, a wall, a closed gate - has the body's head in the cell two up: never a cell
+//  of the build there either, as at the feet and the head; world.floorTop)
+function highHead (bot, p) { return world.floorTop(world.at(bot, p.x, p.y - 1, p.z)) > 1.01 && job.index.has(key({ x: p.x, y: p.y + 2, z: p.z })) }
 // Every cell a body could stand at to place c - clusterStand's own candidates (standable, within reach, no cell of the build
 // at the feet or head): the room rule asks whether all of them lie inside a room
 function standsOf (bot, c) {
-  const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - (p.y + EYE); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
+  const eyeM = new Map(); const eyeOf = p => { const k = key(p); let v = eyeM.get(k); if (v === undefined) { v = world.eyeAt(bot, p); eyeM.set(k, v) } return v } // (one floor read a stand)
+  const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - eyeOf(p); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
   const out = []
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -4; dy <= 1; dy++) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
-    if (!within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
+    if (!within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || highHead(bot, p) || !world.standable(bot, p.x, p.y, p.z)) continue
     out.push(p)
   }
   return out
@@ -2422,11 +2426,12 @@ function clusterStand (bot, c, ready, bad = new Set(), reachOf = null) {
   const normals = new Map(near.map(q => [q, plansFor(q).filter(pl => refOk(bot, q, pl)).map(pl => pl.off.map(v => -v))]))
   const faces = (p, q) => (normals.get(q) || []).some(nv => (p.x - q.x) * nv[0] + (p.y + 1 - q.y) * nv[1] + (p.z - q.z) * nv[2] > 0)
   const me = bot.entity.position
-  const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - (p.y + EYE); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
+  const eyeM = new Map(); const eyeOf = p => { const k = key(p); let v = eyeM.get(k); if (v === undefined) { v = world.eyeAt(bot, p); eyeM.set(k, v) } return v } // (one floor read a stand)
+  const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - eyeOf(p); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
   let best = null
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -4; dy <= 1; dy++) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
-    if (bad.has(key(p)) || !within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || !world.standable(bot, p.x, p.y, p.z)) continue
+    if (bad.has(key(p)) || !within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || highHead(bot, p) || !world.standable(bot, p.x, p.y, p.z)) continue
     // (never under the build: a stand below the base inside the box is the hollow - the eviction sends the bot home from it)
     if (p.y < job.box.y1 && p.x >= job.box.x1 && p.x <= job.box.x2 && p.z >= job.box.z1 && p.z <= job.box.z2) continue
     if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue

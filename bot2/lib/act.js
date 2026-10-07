@@ -466,7 +466,7 @@ async function pour (bot, pos, itemName, { plans, accept, allowZones = [], timeo
   // (the eye stands on the floor's own top: a slab's is half a block down; a wall's or a fence's 1.5 is no stand a walk ever
   //  steps up onto - the top of the well's rim wall was picked, "could not reach the stand ... (timeout)", 2026-10-05.
   //  Nearest first, a few of them: the caller walks to the next when one cannot be reached)
-  const floorTop = b => { const sh = b && b.shapes; return sh && sh.length ? Math.max(...sh.map(q => q[4])) : 1 }
+  const floorTop = world.floorTop // (the one rule: world.floorTop)
   const clearStands = () => {
     const me = bot.entity.position.floored(); const out = []
     for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -2; dy <= 3; dy++) {

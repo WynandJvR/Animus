@@ -98,14 +98,29 @@ function dropAt (bot, x, y, z, max = 32) {
   return Infinity
 }
 
-// Can a player stand with feet at (x,y,z)? Solid, non-hazard floor; two clear cells.
+// THE FLOOR'S REAL TOP, in its own cell: a full block 1, a bottom slab 0.5, a carpet 0.06, a fence, a wall or a closed
+// gate 1.5 (its collision shapes' highest point). The body stands on it - so its eye is at the cell's y - 1 + top + 1.62,
+// and on a 1.5 floor its head reaches y + 2.3: a third clear cell. One rule for every stand and the walk model (a pour's
+// stand had it alone, d50e251): a closed spruce fence gate's top was taken for a full floor, the cluster stand on it was
+// walked at and never reached - stuck, a break-out, a trap of 7 cells, 2026-10-07
+function floorTop (b) {
+  if (!b) return 1
+  const sh = b.shapes
+  if (sh && sh.length) return Math.max(...sh.map(q => q[4]))
+  return isSolid(b) ? 1 : 0
+}
+// the eye's height standing at feet cell p (on whatever floor is under it)
+function eyeAt (bot, p) { return p.y - 1 + floorTop(at(bot, p.x, p.y - 1, p.z)) + 1.62 }
+// Can a player stand with feet at (x,y,z)? Solid, non-hazard floor; two clear cells - three on a floor over a block high.
 function standable (bot, x, y, z) {
   const floor = at(bot, x, y - 1, z)
   const feet = at(bot, x, y, z)
   const head = at(bot, x, y + 1, z)
   if (!floor || !feet || !head) return false
   if (!isSolid(floor) || isOpenTrapdoor(floor) || DANGER_FLOOR_RE.test(floor.name)) return false
-  return bodyPassable(feet) && bodyPassable(head)
+  if (!bodyPassable(feet) || !bodyPassable(head)) return false
+  if (floorTop(floor) > 1.01) { const h2 = at(bot, x, y + 2, z); if (!h2 || !bodyPassable(h2)) return false }
+  return true
 }
 
 function feetPos (bot) { return bot.entity.position.floored() }
@@ -348,7 +363,7 @@ function hasAirNeighbour (bot, p) {
 }
 
 module.exports = { standCell, isOpenTrapdoor, plateEdge, LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
-  data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, feetPos, eyeBlock,
+  data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, floorTop, eyeAt, feetPos, eyeBlock,
   headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
   groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,
   bodyPassable, CLIMBABLE_RE, WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE, HOT_RE, CONTACT_HURT_RE
