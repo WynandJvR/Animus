@@ -86,10 +86,11 @@ function walkModel (w, isC = () => false, { opens = false, avoid = null } = {}) 
 // A WALK REGION round p: out if it leaves the box (x/z) or runs past `cap` cells (no compartment); else closed, with its
 // cells. NO sky exit - a region asks whether a walker gets IN or OUT on foot (over a roofless compartment's wall is a drop
 // the walk refuses; audit). memo: key -> the region, filled for every cell seen.
-function region (w, box, p, { memo = new Map(), isC = () => false, cap = 300 } = {}) {
+// (opens: closed doors walked, as the bot crosses them - the walker's own way out; the room rule keeps them as walls)
+function region (w, box, p, { memo = new Map(), isC = () => false, cap = 300, opens = false } = {}) {
   const k0 = key(p); const hit = memo.get(k0); if (hit) return hit
   const inBox = q => q.x >= box.x1 && q.x <= box.x2 && q.z >= box.z1 && q.z <= box.z2
-  const W = walkModel(w, isC)
+  const W = walkModel(w, isC, { opens })
   const r = { out: false, cells: null }
   const seen = new Set([k0]); const q = [{ x: p.x, y: p.y, z: p.z }]; let i = 0
   while (i < q.length) {
@@ -101,6 +102,25 @@ function region (w, box, p, { memo = new Map(), isC = () => false, cap = 300 } =
   if (!r.out) r.cells = seen
   for (const k of seen) memo.set(k, r)
   return r
+}
+
+// A WAY OUT ON FOOT, searched toward the nearest edge first: { out, seen } - out when a walk from p leaves the box's
+// footprint, seen the cells it went through (keys). Best-first by the distance to the box's edge, so an open room finds its
+// way out in tens of cells; a closed one explores all of itself, to `cap`. (wallsMeIn's question - a plain region search
+// from inside the castle ran 700 cells for an answer the first doorway gives)
+function exitReach (w, box, p, { isC = () => false, cap = 700, opens = true } = {}) {
+  const W = walkModel(w, isC, { opens })
+  const edge = q => Math.min(q.x - box.x1, box.x2 - q.x, q.z - box.z1, box.z2 - q.z)
+  const buckets = []; const push = q => { const d = Math.max(0, edge(q)); (buckets[d] = buckets[d] || []).push(q) }
+  const seen = new Set([key(p)]); push(p)
+  for (let d = 0; d < buckets.length || buckets.some(Boolean);) {
+    const b = buckets[d]; if (!b || !b.length) { d++; if (d >= buckets.length) break; continue }
+    const c = b.pop()
+    if (c.x < box.x1 || c.x > box.x2 || c.z < box.z1 || c.z > box.z2) return { out: true, seen }
+    if (seen.size > cap) return { out: true, seen }
+    for (const n of W.next(c)) { const k = key(n); if (!seen.has(k)) { seen.add(k); const nd = Math.max(0, edge(n)); push(n); if (nd < d) d = nd } }
+  }
+  return { out: false, seen }
 }
 
 // A DOORWAY FOOT: an empty cell with room for a head over it (air, or an unbuilt cell of the build), walkable on two
@@ -189,4 +209,4 @@ function closesPocket (w, c, { box, work, standsOf, cap = 300 }) {
   return null
 }
 
-module.exports = { walkModel, region, doorwayAxis, closesRoom, closesPocket, doorPanel, edgeOf, OPP, CW, CCW }
+module.exports = { walkModel, region, exitReach, doorwayAxis, closesRoom, closesPocket, doorPanel, edgeOf, OPP, CW, CCW }

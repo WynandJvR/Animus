@@ -2415,8 +2415,25 @@ function wallsMeIn (bot, c, from = null) {
   if (!job) return false
   // (only a cell that CLOSES the way out seals us: sealed with it and open without it. Sealed either way - a room already
   //  closed - it is no reason to hold that cell back)
-  return !wayOut(bot, c, from, true) && wayOut(bot, c, from, false)
+  // (BY WALKING, doors crossed: the box's edge reached on foot, or a region too big to be a room. wayOut's open sky is the
+  //  escape's tower, never the builder's way out - judged by it, a room's last openings went in round the bot, its door's
+  //  far side had no stand yet, and the night came with the bot sealed in, digging out a finished log, 2026-10-07)
+  // (BODY FIRST: the region without c is kept for this cell of mine until a block in the box changes (statusGen) - its cells
+  //  are the way out it found (best-first toward the edge: rooms.exitReach); c off that way closes nothing of mine, answered
+  //  at once; only a c on or beside it costs the second search. Capped at 700: past that, no room. Two fresh 1500-cell
+  //  searches a cell blocked the body 50-150ms; audit)
+  watchStatus(bot)
+  const rw = roomWorld(bot); const f = from || world.feetPos(bot)
+  const mk = `${f.x},${f.y},${f.z}|${statusGen}`
+  if (!wallMemo || wallMemo.key !== mk) { const r = rooms.exitReach(rw, job.box, f, { cap: WALL_CAP }); wallMemo = { key: mk, out: r.out, seen: r.seen } }
+  if (!wallMemo.out) return false // (closed already without c: c is no reason to hold)
+  const near = [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1], [0, -2, 0], [0, -3, 0]].some(([dx, dy, dz]) => wallMemo.seen.has(`${c.x + dx},${c.y + dy},${c.z + dz}`))
+  if (!near) return false
+  const isC = (x, y, z) => x === c.x && y === c.y && z === c.z
+  return !rooms.exitReach(rw, job.box, f, { isC, cap: WALL_CAP }).out // (a c beside the way out found: is there another)
 }
+const WALL_CAP = 700
+let wallMemo = null
 // A walk from `from` (the feet) reaches a way out of the footprint - a column outside it, or open sky over a cell not the
 // build's own - with the cell counted solid (withC) or not. Outside the footprint: out already.
 // wayOutPoint: where the walk found its way out - a cell outside the footprint, or the cell under open sky a tower rises
