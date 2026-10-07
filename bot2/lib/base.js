@@ -456,7 +456,13 @@ async function makeRoom (bot, slots = 3) {
   if (inv.freeSlots(bot) >= slots) return true
   await tossJunk(bot)
   if (inv.freeSlots(bot) >= slots) return true
-  if (distHome(bot) < 48) { await depositAll(bot); return inv.freeSlots(bot) >= slots }
+  if (distHome(bot) < 48) {
+    await depositAll(bot)
+    // (still short: the window's blocks go too, only the kit and the band's waited items stay - they come back with the next
+    //  withdraw; a pack full of window blocks freed nothing; audit)
+    if (inv.freeSlots(bot) < slots && keepHook) await depositAll(bot, { keep: (b, i) => { let w = false; try { w = keepHook(i) === Infinity } catch {} return w ? Infinity : keepCount(b, i) } })
+    return inv.freeSlots(bot) >= slots
+  }
   return false
 }
 
