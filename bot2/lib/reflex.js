@@ -779,6 +779,24 @@ let fightCornered = false // the fight under way began cornered: it stays the an
 function coverPinned () { return (!!pinnedCover && Date.now() < pinnedCover.until) || (fightCornered && !!active && active.kind === 'fight') }
 let hotStuck = null // { k, since, last }: the fire the body has been on, across its bounces (the hot row)
 function campfireLit (b) { try { const v = b.getProperties().lit; return v === true || v === 'true' } catch { return true } }
+// (world's one list - the diagonal step reads its twin; a campfire put OUT burns nothing - see the hot row's douse)
+function hotBlock (b) { return !!b && world.HOT_RE.test(b.name) && !(/campfire$/.test(b.name) && !campfireLit(b)) }
+// WHAT BURNS A BODY IN THIS CELL: a hot block in the feet cell itself, or the one under it - only when nothing in the feet cell
+// with a collision box holds the body up off it. A lit campfire under a SHUT TRAPDOOR is the castle's chimney: the body stands
+// on the trapdoor 0.75 above the fire's top, unburnt - read as "standing on campfire", the hot row stepped it off the trapdoor
+// onto the next one (another chimney), the lip row put it back, every 20-40s for two minutes at hp 20 while the build waited,
+// 2026-10-07 15:38. Null: nothing burns here
+function burnsAt (x, y, z) {
+  const here = world.at(bot, x, y, z)
+  if (hotBlock(here)) return here
+  if (here && here.boundingBox === 'block') return null
+  const under = world.at(bot, x, y - 1, z)
+  return hotBlock(under) ? under : null
+}
+// A SAFE STANDING CELL - the one predicate every row that steers the body onto a cell of its own choosing asks (the lip, the hot
+// floor, the doomed leaf): a stand (world.standable), nothing burning there (burnsAt), and its middle over its floor - no lip
+// (the lip row's own trigger). Two rows each with their own idea of "firm" handed the body back and forth; audit 2026-10-07
+function safeStand (x, y, z) { return world.standable(bot, x, y, z) && !burnsAt(x, y, z) && world.dropAt(bot, x + 0.5, y, z + 0.5) === 0 }
 let holdSaidAt = 0 // (the out-of-sight hold's line, every 30s while it lasts: a hold must be visible in the log)
 // A RELEASE THAT WALKED BACK INTO THE ARROWS: the hidden-step release, then the task's walk into sight, a hit, cover, the hold,
 // released again - hp each lap with no end (the 2026-10-02 case; audit). A ranged hit from one of the shooters about at a
@@ -1697,7 +1715,7 @@ function tick () {
       let best = null; let bd = Infinity
       for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
         const x = fx + dx; const z = fz + dz
-        if (!world.standable(bot, x, fy, z) || world.dropAt(bot, x + 0.5, fy, z + 0.5) > 0) continue
+        if (!safeStand(x, fy, z)) continue
         const d = Math.hypot(x + 0.5 - me.x, z + 0.5 - me.z)
         if (d < bd) { bd = d; best = { x, y: fy, z } }
       }
@@ -1727,7 +1745,7 @@ function tick () {
       const crossesDrop = (x, z) => { const n = Math.ceil(Math.hypot(x + 0.5 - me.x, z + 0.5 - me.z) / 0.1); for (let i = 1; i < n; i++) { const t = i / n; const cx = Math.floor(me.x + (x + 0.5 - me.x) * t); const cz = Math.floor(me.z + (z + 0.5 - me.z) * t); if (cx === fx && cz === fz) continue; if (colDrop(cx, cz) > world.SAFE_DROP) return true } return false }
       for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -1; dy <= 1; dy++) {
         const x = fx + dx; const y = fy + 1 + dy; const z = fz + dz
-        if (!world.standable(bot, x, y, z) || doomed(world.at(bot, x, y - 1, z)) || (ours && isFooting(x, y - 1, z))) continue
+        if (!safeStand(x, y, z) || doomed(world.at(bot, x, y - 1, z)) || (ours && isFooting(x, y - 1, z))) continue
         // (a floor of LEAVES only when no other is within reach: a felled crown's leaves not yet at distance 7 rot a few
         //  seconds later - stepped from leaf to leaf, the bot fell 18 blocks off a mega spruce's crown, 2026-10-07 04:22)
         const d = Math.abs(dx) + Math.abs(dz) + Math.abs(dy) + (/_leaves$/.test((world.at(bot, x, y - 1, z) || {}).name || '') ? 10 : 0)
@@ -1765,13 +1783,14 @@ function tick () {
   //  cell at once, whatever put it there
   {
     const fx = Math.floor(me.x); const fy = Math.floor(me.y + 0.01); const fz = Math.floor(me.z)
-    // (world's one list - the diagonal step reads its twin; a campfire put OUT burns nothing - see the douse below)
-    const hot = b => !!b && world.HOT_RE.test(b.name) && !(/campfire$/.test(b.name) && !campfireLit(b))
+    const hot = hotBlock
     const here = world.at(bot, fx, fy, fz); const under = world.at(bot, fx, fy - 1, fz)
-    if (!bot.vehicle && (hot(here) || (bot.entity.onGround && hot(under)))) {
+    // (what the body RESTS on: burnsAt - the fire under a shut trapdoor burns nothing)
+    const burning = burnsAt(fx, fy, fz)
+    if (!bot.vehicle && burning && (burning === here || bot.entity.onGround)) {
       // (THE SAME FIRE, STILL: each bounce off it cleared the row and the next landing began it again - the clock runs across
       //  the bounces; past 1.5s on it the step has failed, whatever the cell said)
-      const fk = fx + ',' + fz; const hb0 = hot(here) ? here : under
+      const fk = fx + ',' + fz; const hb0 = burning
       if (!hotStuck || hotStuck.k !== fk || now - hotStuck.last > 1500) hotStuck = { k: fk, since: now, last: now }
       hotStuck.last = now
       const stuckOn = now - hotStuck.since > 1500
@@ -1784,7 +1803,7 @@ function tick () {
         if ((!dx && !dz) || stuckOn) continue
         const x = fx + dx; const y = fy + dy; const z = fz + dz
         if ((Math.abs(dx) === 2 || Math.abs(dz) === 2) && !openCol(fx + Math.sign(dx), fz + Math.sign(dz), fy)) continue // (two off: through the one between)
-        if (!world.standable(bot, x, y, z) || hot(world.at(bot, x, y, z)) || world.dropAt(bot, x + 0.5, y, z + 0.5) > world.SAFE_DROP) continue
+        if (!safeStand(x, y, z)) continue
         // (the way there at the body's OWN height too: stood on a campfire's top (y+0.44) the body passes at that level - a
         //  cell a step down with a wall at the body's height was picked, steered into for 14s, and the bot burned on the
         //  castle's second campfire, 2026-09-30)
@@ -1848,7 +1867,7 @@ function tick () {
       return
     } else if (active && active.kind === 'hot') {
       // (in the air over the fire - a bounce - the row holds: cleared, the eat row bit a loaf mid-bounce and the clock restarted)
-      if (!bot.entity.onGround && (hot(under) || hot(world.at(bot, fx, fy - 2, fz)))) return
+      if (!bot.entity.onGround && (burnsAt(fx, fy, fz) || burnsAt(fx, fy - 1, fz))) return
       return clearActive()
     }
   }
@@ -2349,4 +2368,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, outgunned, runAffordable, longRunOk, wayClear, noCoverAnswer, HIDEOUT_REACH, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _safeStand: (x, y, z) => safeStand(x, y, z), _burnsAt: (x, y, z) => burnsAt(x, y, z), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, outgunned, runAffordable, longRunOk, wayClear, noCoverAnswer, HIDEOUT_REACH, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
