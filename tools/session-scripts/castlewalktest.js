@@ -172,7 +172,66 @@ for (let x = 0; x < S.x; x++) for (let y = 1; y < S.y - 2; y++) for (let z = 0; 
 }
 console.log(`${wedges} wedge cells (a part block at the head over a floor); ${wedgeStands} the model calls a stand; the planner offers ${wedgeMoves} steps out of them through their own block`)
 // (the gate: no step the planner refuses, but a ladder's - the climbs are modelled on their own)
+// THE SCAFFOLD RING (ring.js) ON THE REAL SITE: upper wall cells no stand the walk reaches has in reach - the next layer over
+// a wall top - get a ring planned the way the live builder plans it, laid into this world, and then: every cell it serves has
+// a stand the walk reaches within a player's reach, and every walk-model step on and off the ring is a step the planner
+// takes (the first gate, over the new stands)
+const ringMod = require(path.join(bot2, 'lib', 'ring'))
+const reachSet = from => { const seen = new Set([key(from)]); const q = [from]; for (let i = 0; i < q.length && seen.size < 30000; i++) for (const n of W.next(q[i])) if (!seen.has(key(n))) { seen.add(key(n)); q.push(n) } return seen }
+const eyeOk = (st, c) => { const t = world.floorTop(at(st.x, st.y - 1, st.z)); const ey = st.y - 1 + t + 1.62; return (c.x - st.x) ** 2 + (c.y + 0.5 - ey) ** 2 + (c.z - st.z) ** 2 <= 4.2 * 4.2 }
+const solidKeys = [...cells.keys()].map(k0 => k0.split(',').map(Number)).filter(([x, y, z]) => world.isSolid(at(x, y, z)))
+const minStand = stands.reduce((a, b) => (b.y < a.y ? b : a), stands[0])
+let reached = reachSet(minStand); for (const st of stands) if (!reached.has(key(st)) && st.y <= minStand.y + 1) { const r2 = reachSet(st); if (r2.size > reached.size) reached = r2 }
+const reachedList = [...reached].map(k0 => { const [x, y, z] = k0.split(',').map(Number); return { x, y, z } })
+const stood = c => reachedList.some(st => Math.abs(st.x - c.x) <= 4 && Math.abs(st.z - c.z) <= 4 && eyeOk(st, c))
+// the next layer over each wall top high up (y >= 9 of the dump): air, with no reached stand in reach
+const tops = solidKeys.filter(([x, y, z]) => y >= 9 && y < S.y - 3 && world.isAirish(at(x, y + 1, z)) && /brick|stone|andesite|planks|log|wood/.test(at(x, y, z).name)).map(([x, y, z]) => ({ x, y: y + 1, z }))
+const unstood = tops.filter(c => !stood(c)).length // (this dump's upper walls mostly have a stand in reach already: the ring is planned over them all the same - its geometry is what is checked)
+const jobAt = new Set(tops.map(key))
+const rw0 = { at, isAirish: world.isAirish, isSolid: b => world.isSolid(b) && !world.isOpenTrapdoor(b), jobHas: (x, y, z) => jobAt.has(`${x},${y},${z}`) || (inside(x, y, z) && !world.isAirish(at(x, y, z)) && false), airDown: (x, y, z) => { for (let n = 0; n <= 32; n++) { const b = at(x, y - n, z); if (!b) return null; if (!world.isAirish(b)) return n } return null }, hot: (x, y, z) => { const b = at(x, y, z); const u = at(x, y - 1, z); return !!(b && /campfire|fire|magma/.test(b.name)) || !!(u && /campfire|fire|magma/.test(u.name)) }, SAFE_DROP: world.SAFE_DROP }
+const roomsMod = require(path.join(bot2, 'lib', 'rooms'))
+;(async () => {
+// THE LIVE REFUSAL'S COST, measured: the room rules on this world (rooms.doorwayAxis, closesRoom, closesPocket over the work
+// near the block, the last-stand check) - build.js ringRefusal's questions, here with the fixture's walk model; the slice is
+// the event loop's: planRing yields between questions as the live builder does (ringTicker)
+let slice = Date.now(); let longest = 0; let refusals = 0; let planMs = 0
+const tick = async () => { const d = Date.now() - slice; if (d > longest) longest = d; if (d > 8) { await new Promise(r => setImmediate(r)); slice = Date.now() } }
+const standsOfF = q => { const out = []; for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -4; dy <= 1; dy++) { const st = { x: q.x + dx, y: q.y + dy, z: q.z + dz }; if (W.st(st.x, st.y, st.z) && eyeOk(st, q)) out.push(st) } return out }
+const refusedF = (work, memo) => async r => {
+  refusals++
+  const jobUnbuilt = (x, y, z) => jobAt.has(`${x},${y},${z}`)
+  const stOf = q => { const k0 = key(q); let v = memo.get(k0); if (!v) { v = standsOfF(q); memo.set(k0, v) } return v }
+  if (roomsMod.doorwayAxis(rw, jobUnbuilt, r) || roomsMod.doorwayAxis(rw, jobUnbuilt, { x: r.x, y: r.y - 1, z: r.z })) return 'a doorway'
+  const c = { x: r.x, y: r.y, z: r.z, name: 'cobblestone' }; const box = { x1: 3, x2: S.x - 4, z1: 3, z2: S.z - 4 }
+  const near = work.filter(q => Math.abs(q.x - r.x) <= 6 && Math.abs(q.z - r.z) <= 6 && Math.abs(q.y - r.y) <= 4)
+  if (roomsMod.closesRoom(rw, c, { box, jobUnbuilt, work: near, standsOf: stOf })) return 'closes a room'
+  if (near.length && await roomsMod.closesPocketAsync(rw, c, { box, work: near, standsOf: stOf }, tick)) return 'closes a pocket'
+  for (const q of near) { if (Math.abs(q.x - r.x) > 3 || Math.abs(q.z - r.z) > 3 || r.y - q.y > 2 || q.y - r.y > 5) continue; const st = stOf(q); if (st.length && st.every(p0 => p0.x === r.x && p0.z === r.z && (p0.y === r.y || p0.y + 1 === r.y))) return 'last stand'; await tick() }
+  return null
+}
+let ringsLaid = 0; let ringServed = 0; let ringUnserved = 0; let ringBlocks = 0; const ringEx = []
+const usedTops = new Set()
+for (const c0 of tops) {
+  if (ringsLaid >= 3 || usedTops.has(key(c0))) continue
+  const cluster = tops.filter(q => q.y === c0.y && Math.abs(q.x - c0.x) <= 4 && Math.abs(q.z - c0.z) <= 4)
+  if (cluster.length < 3) continue
+  const work = tops.filter(q => Math.abs(q.x - c0.x) <= 12 && Math.abs(q.z - c0.z) <= 12)
+  const t0 = Date.now(); slice = Date.now()
+  const plan = await ringMod.planRing(rw0, cluster, { stand: (x, y, z) => reached.has(`${x},${y},${z}`), refused: refusedF(work, new Map()), tick })
+  planMs += Date.now() - t0; { const d = Date.now() - slice; if (d > longest) longest = d }
+  for (const q of cluster) usedTops.add(key(q))
+  if (!plan) continue
+  const put = (plan.access.kind === 'tower' ? plan.access.tower : []).concat(plan.blocks)
+  for (const b of put) cells.set(key(b), Block.fromProperties('cobblestone', {}, 0))
+  ringsLaid++; ringBlocks += put.length
+  const after = reachSet(plan.access.from); const afterList = [...after].map(k0 => { const [x, y, z] = k0.split(',').map(Number); return { x, y, z } })
+  for (const c of plan.serves) { if (afterList.some(st => eyeOk(st, c))) ringServed++; else { ringUnserved++; if (ringEx.length < 3) ringEx.push(key(c)) } }
+  // the new stands' steps, against the planner
+  for (const b of plan.blocks) { const st = { x: b.x, y: b.y + 1, z: b.z }; if (!W.st(st.x, st.y, st.z)) continue; const pn = new Set(plannerNext(st).map(key)); for (const n of W.next(st)) { modelEdges++; if (!pn.has(key(n))) { mismatched++; const c = 'ring top'; byClass[c] = (byClass[c] || 0) + 1 } } }
+}
+console.log(`ring: ${tops.length} upper wall-top cells (${unstood} with no stand in reach); ${ringsLaid} rings planned (${ringBlocks} blocks); ${ringServed} cells served with a reachable stand in reach, ${ringUnserved} not${ringEx.length ? ' (' + ringEx.join(' ') + ')' : ''}; planning ${planMs}ms for ${refusals} room-rule questions, longest slice ${longest}ms`)
 const hard = Object.entries(byClass).filter(([c]) => !/ladder/.test(c)).reduce((t, [, n]) => t + n, 0)
-const fails = [hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
+const fails = [hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, longest > 25 && `the ring plan held the loop ${longest}ms in one slice`, ringUnserved && `${ringUnserved} cells a ring was planned for still without a stand`, !ringsLaid && tops.length >= 3 && 'no ring planned on the site', droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
 console.log(fails.length ? `FAIL ${fails.join('; ')}` : 'PASS')
 process.exit(fails.length ? 1 : 0)
+})()

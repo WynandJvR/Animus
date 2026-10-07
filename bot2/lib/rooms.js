@@ -94,7 +94,13 @@ function deadEnd (W, p, plannerExits) { return !W.next(p).length && !plannerExit
 // cells. NO sky exit - a region asks whether a walker gets IN or OUT on foot (over a roofless compartment's wall is a drop
 // the walk refuses; audit). memo: key -> the region, filled for every cell seen.
 // (opens: closed doors walked, as the bot crosses them - the walker's own way out; the room rule keeps them as walls)
-function region (w, box, p, { memo = new Map(), isC = () => false, cap = 300, opens = false } = {}) {
+// (ONE COPY, TWO PACES: the search is a generator - region() runs it through at once; a caller that must give the event
+//  loop back (the ring's room rules, build.js) steps it and yields between steps - run(), runAsync())
+const STEP_CELLS = 16
+function run (g) { let n; do { n = g.next() } while (!n.done); return n.value }
+async function runAsync (g, tick) { let n; do { n = g.next(); if (!n.done) await tick() } while (!n.done); return n.value }
+function region (w, box, p, opts = {}) { return run(regionGen(w, box, p, opts)) }
+function * regionGen (w, box, p, { memo = new Map(), isC = () => false, cap = 300, opens = false } = {}) {
   const k0 = key(p); const hit = memo.get(k0); if (hit) return hit
   const inBox = q => q.x >= box.x1 && q.x <= box.x2 && q.z >= box.z1 && q.z <= box.z2
   const W = walkModel(w, isC, { opens })
@@ -105,6 +111,7 @@ function region (w, box, p, { memo = new Map(), isC = () => false, cap = 300, op
     const c = q[i++]
     if (!inBox(c)) { r.out = true; break }
     for (const n of W.next(c)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
+    if (i % STEP_CELLS === 0) yield
   }
   if (!r.out) r.cells = seen
   for (const k of seen) memo.set(k, r)
@@ -190,7 +197,9 @@ function closesRoom (w, c, { box, jobUnbuilt, work, standsOf }) {
 // upper rooms were closed by a wall cell, a floor slab, a stair, and 84 cells waited "for a way in", 2026-10-07. The sides:
 // every cell a body stands in beside c, above or below its level by one, and the cell over c (c its floor). Small rooms
 // only (cap): a big hall is no pocket. { side, cell, size } or null
-function closesPocket (w, c, { box, work, standsOf, cap = 300 }) {
+function closesPocket (w, c, opts) { return run(closesPocketGen(w, c, opts)) }
+async function closesPocketAsync (w, c, opts, tick) { return runAsync(closesPocketGen(w, c, opts), tick) }
+function * closesPocketGen (w, c, { box, work, standsOf, cap = 300 }) {
   if (/_door$|_fence_gate$/.test(c.name || '')) return null
   if (/_trapdoor$/.test(c.name || '') && ((c.want && String(c.want.open) === 'true') || (c.props && String(c.props.open) === 'true'))) return null
   const isC = (x, y, z) => x === c.x && y === c.y && z === c.z
@@ -200,10 +209,10 @@ function closesPocket (w, c, { box, work, standsOf, cap = 300 }) {
   const memo = new Map(); const memo0 = new Map()
   for (const s of sides) {
     if (!W.st(s.x, s.y, s.z)) continue
-    const r = region(w, box, s, { memo, isC, cap })
+    const r = yield * regionGen(w, box, s, { memo, isC, cap })
     if (r.out) continue
     // (closed already without c: c is not its last opening - holding it opens nothing)
-    if (!region(w, box, s, { memo: memo0, cap }).out) continue
+    if (!(yield * regionGen(w, box, s, { memo: memo0, cap })).out) continue
     let x1 = Infinity; let x2 = -Infinity; let y1 = Infinity; let y2 = -Infinity; let z1 = Infinity; let z2 = -Infinity
     for (const k of r.cells) { const [x, y, z] = k.split(',').map(Number); if (x < x1) x1 = x; if (x > x2) x2 = x; if (y < y1) y1 = y; if (y > y2) y2 = y; if (z < z1) z1 = z; if (z > z2) z2 = z }
     for (const q of work) {
@@ -211,9 +220,10 @@ function closesPocket (w, c, { box, work, standsOf, cap = 300 }) {
       if (isC(q.x, q.y, q.z)) continue
       const stands = standsOf(q).filter(p => !isC(p.x, p.y, p.z) && !isC(p.x, p.y + 1, p.z))
       if (stands.length && stands.every(p => r.cells.has(key(p)))) return { side: s, cell: q, size: r.cells.size }
+      yield // (a stand search a work cell)
     }
   }
   return null
 }
 
-module.exports = { walkModel, deadEnd, region, exitReach, doorwayAxis, closesRoom, closesPocket, doorPanel, edgeOf, OPP, CW, CCW }
+module.exports = { walkModel, deadEnd, region, regionGen, exitReach, doorwayAxis, closesRoom, closesPocket, closesPocketAsync, doorPanel, edgeOf, OPP, CW, CCW }

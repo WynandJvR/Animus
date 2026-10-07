@@ -203,12 +203,13 @@ async function strayBuildBlocks (bot) {
   const mid = { x: Math.floor((b.x1 + b.x2) / 2), y: Math.floor((b.y1 + b.y2) / 2), z: Math.floor((b.z1 + b.z2) / 2) }
   const r = Math.ceil(Math.hypot(b.x2 - b.x1, b.y2 - b.y1, b.z2 - b.z1) / 2) + pad
   const found = await world.scanBlocks(bot, re, { maxDistance: r, count: 20000, point: mid })
+  globalBot = bot; const rings = ringHolds() // (a serving ring's blocks are no strays)
   return found.filter(x => {
     const p = x.position
     if (p.x < b.x1 - pad || p.x > b.x2 + pad || p.z < b.z1 - pad || p.z > b.z2 + pad || p.y < b.y1 - pad || p.y > b.y2 + pad) return false
     // the one scaffold rule (isStray: snapshot was-open, not a cell, not furniture, not others' work) - no second copy
     // of it here (audit #6); a wrong block in a cell of the build is the placer's to swap, not a stray
-    return isStray(bot, p.x, p.y, p.z)
+    return isStray(bot, p.x, p.y, p.z) && !rings.has(key(p))
   }).map(x => ({ x: x.position.x, y: x.position.y, z: x.position.z, name: x.name }))
 }
 
@@ -1636,6 +1637,151 @@ async function pillarTo (bot, c, first, stop = cellStop) {
   return false
 }
 let lastPlaceFail = ''
+// ---- THE SCAFFOLD RING (ring.js plans it; laid here, ledgered, kept while it serves) --------------------------------
+// The castle's y129 band: every stand plan "none", led by "a build cell at the cell's height" - the columns beside a wall
+// cell high up are the wall and the room's other build cells - and 1 placed in 15 minutes, 2026-10-07 16:34. A ledge of our
+// own two under the layer, along the inside of the wall, walked like any floor and taken down when its cells are done.
+const ring = require('./ring')
+const ringTried = new Set() // cell@band: one ring try a cell a band
+const RING_MS = 120000; const RING_MIN_CELLS = 3
+// the cells a ring serves are done -> its blocks are ordinary site scaffold (the daily teardown's); until then kept
+function ringHolds () {
+  const rings = mem.get().rings || []; if (!rings.length || !job) return new Set()
+  const keep = []; const hold = new Set()
+  for (const r of rings) {
+    // (a served cell holds it only while it is still to be built from it: never one no route can source, nor one its own
+    //  misses gave up on (three and more) - kept for those, a ring would stand like the old filler pillars; audit)
+    const open = (r.serves || []).some(k => { const c = job.index.get(k); if (!c || cellDone(globalBot, c) === true || cellUnsourced(c)) return false; const f = cellFails.get(k); return !(f && !f.shared && f.n >= 3) })
+    if (open) { keep.push(r); for (const b of r.blocks || []) hold.add(key(b)) }
+  }
+  if (keep.length !== rings.length) mem.set('rings', keep) // (done serving: off the ledger - never a ring that lingers)
+  return hold
+}
+let globalBot = null
+function ringWorld (bot) {
+  return {
+    at: (x, y, z) => world.at(bot, x, y, z),
+    isAirish: world.isAirish,
+    isSolid: b => world.isSolid(b) && !world.isOpenTrapdoor(b),
+    jobHas: (x, y, z) => !!job && job.index.has(`${x},${y},${z}`),
+    airDown: (x, y, z) => { for (let k = 0; k <= 32; k++) { const b = world.at(bot, x, y - k, z); if (!b || world.isLavaBlock(b)) return null; if (!world.isAirish(b)) return k } return null },
+    hot: (x, y, z) => { const b = world.at(bot, x, y, z); const u = world.at(bot, x, y - 1, z); return (!!b && world.HOT_RE.test(b.name)) || (!!u && world.HOT_RE.test(u.name)) },
+    SAFE_DROP: world.SAFE_DROP
+  }
+}
+// what the room rules refuse a ring block at r: a doorway's foot or lintel, the last opening of a room or pocket with work
+// inside, the last stand of a cell still to place, and our own way out (the same rules a build cell answers to)
+// (BODY FIRST: asked only of the blocks the walkway takes (ring.js), the event loop back between them (ringTick); the stands
+//  of the work cells read once a plan (standsMemo), and the last-stand question only of the cells within a stand's reach of
+//  the block - a stand of q lies within 3 across and 4 under to 1 over it (standsOf's window); audit)
+async function ringRefusal (bot, r, work, standsMemo = new Map(), tick = async () => {}) {
+  const rw = roomWorld(bot)
+  const stOf = q => { const k = key(q); let v = standsMemo.get(k); if (!v) { v = standsOf(bot, q); standsMemo.set(k, v) } return v }
+  const jobUnbuilt = (x, y, z) => { const q = job.index.get(`${x},${y},${z}`); return !!q && !q.clear && cellDone(bot, q) !== true }
+  if (rooms.doorwayAxis(rw, jobUnbuilt, r) || rooms.doorwayAxis(rw, jobUnbuilt, { x: r.x, y: r.y - 1, z: r.z })) return 'a doorway'
+  const c = { x: r.x, y: r.y, z: r.z, name: 'cobblestone' }
+  const near = work.filter(q => Math.abs(q.x - r.x) <= 6 && Math.abs(q.z - r.z) <= 6 && Math.abs(q.y - r.y) <= 4)
+  if (rooms.closesRoom(rw, c, { box: job.box, jobUnbuilt, work: near, standsOf: stOf })) return 'closes a room'
+  if (near.length && await rooms.closesPocketAsync(rw, c, { box: job.box, work: near, standsOf: stOf }, tick)) return 'closes a pocket'
+  for (const q of near) { if (Math.abs(q.x - r.x) > 3 || Math.abs(q.z - r.z) > 3 || r.y - q.y > 2 || q.y - r.y > 5) continue; const st = stOf(q); if (st.length && st.every(p => p.x === r.x && p.z === r.z && (p.y === r.y || p.y + 1 === r.y))) return 'the last stand of ' + q.name; await tick() }
+  if (wallsMeIn(bot, c)) return 'walls me in'
+  return null
+}
+// the filler a ring may spend: a scaffold kind the pack holds more of than the build claims (move.movementsFor's rule)
+// (and RING_RESERVE of it never: the step's own temporary supports - a ring that spent the last filler left the band's cells
+//  "no filler for a temporary support"; audit)
+const RING_RESERVE = 8
+function ringSpare (bot) { return ringFiller(bot).reduce((s, e) => s + e.spare, 0) - RING_RESERVE }
+// the slice helper: the event loop back once 8ms have run (walkReach's own measure)
+function ringTicker () { let slice = Date.now(); let longest = 0; const tick = async () => { const d = Date.now() - slice; if (d > longest) longest = d; if (d > 8) { await new Promise(r => setImmediate(r)); slice = Date.now() } }; tick.longest = () => longest; return tick }
+function ringFiller (bot) {
+  const base = require('./base')
+  return inv.items(bot).filter(i => FILLER_ITEMS.test(i.name) || i.name === 'cobblestone').map(i => i.name).filter((n, i, a) => a.indexOf(n) === i)
+    .map(n => ({ n, spare: inv.count(bot, n) - base.buildNeedOf(n) })).filter(e => e.spare > 0).sort((a, b) => b.spare - a.spare)
+}
+async function ringFor (bot, c) {
+  globalBot = bot
+  // the cells round it with no stand and no pillar foot, the layer and the two over it (a cluster: one walkway serves them)
+  const near = job.cells.filter(q => !q.attach && !q.follows && Math.abs(q.x - c.x) <= 4 && Math.abs(q.z - c.z) <= 4 && q.y >= c.y && q.y <= c.y + 2 && cellDone(bot, q) !== true)
+  const needy = []; const tick = ringTicker(); const tp = Date.now()
+  for (const q of near.slice(0, 40)) { if (reachStandFor(bot, q) === false && !feetFor(bot, q).some(f => !footBad(f))) needy.push(q); await tick() }
+  if (!needy.some(q => key(q) === key(c))) needy.push(c)
+  if (needy.length < RING_MIN_CELLS) { log('build', `no ring for ${c.name} at ${move.fmt(c)}: ${needy.length} cell${needy.length > 1 ? 's' : ''} round it without a stand (${RING_MIN_CELLS} wanted)`); return 0 }
+  const work = job.cells.filter(q => !q.clear && Math.abs(q.x - c.x) <= 12 && Math.abs(q.z - c.z) <= 12 && Math.abs(q.y - c.y) <= 6 && cellDone(bot, q) !== true)
+  const stand = (x, y, z) => reachCurrent(bot) && !reach.capped && reach.cells.has(`${x},${y},${z}`)
+  const have = ringSpare(bot)
+  if (have < RING_MIN_CELLS) { log('build', `ring waits: ${RING_MIN_CELLS - have} filler short (${RING_RESERVE} kept for the step's supports) for ${needy.length} cells at y${c.y} by ${move.fmt(c)}`); return 0 }
+  const w = ringWorld(bot); const memo = new Map()
+  const opts = { stand, refused: r => ringRefusal(bot, r, work, memo, tick), tick, maxBlocks: Math.min(40, have) }
+  const plan = await ring.planRing(w, needy, opts)
+  log('build', `ring plan by ${move.fmt(c)}: ${needy.length} cells without a stand, ${plan ? plan.blocks.length + ' blocks' : 'none'} - ${Date.now() - tp}ms, longest slice ${tick.longest()}ms`)
+  if (!plan) { log('build', `no ring for ${needy.length} cells at y${c.y}..${c.y + 2} by ${move.fmt(c)}: no walkway the rules allow, or no way up to one`); return 0 }
+  const tower = plan.access.kind === 'tower' ? plan.access.tower.length : 0
+  if (have < tower + RING_MIN_CELLS) { log('build', `ring waits: ${tower + plan.blocks.length - have} filler short for ${needy.length} cells at y${c.y} by ${move.fmt(c)}`); return 0 }
+  return layRing(bot, plan, needy, c)
+}
+async function layRing (bot, plan, needy, c) {
+  const t0 = Date.now(); const stop = () => (stepStop && stepStop()) || Date.now() - t0 > RING_MS
+  const laid = []; const serves = plan.serves.map(key)
+  const ledger = p => { laid.push({ x: p.x, y: p.y, z: p.z }); mem.update(m => { m.scaffold = m.scaffold || []; m.scaffold.push({ x: p.x, y: p.y, z: p.z }); m.rings = m.rings || []; let r = m.rings.find(q => q.id === ringId); if (!r) { r = { id: ringId, y: plan.y, serves, blocks: [], at: Date.now() }; m.rings.push(r) } r.blocks.push({ x: p.x, y: p.y, z: p.z }) }) }
+  const ringId = `${plan.y}:${plan.blocks[0].x},${plan.blocks[0].z}:${Date.now()}`
+  const memo = new Map()
+  log('build', `ring for ${needy.length} cells at y${c.y}..${c.y + 2} by ${move.fmt(c)}: ${plan.blocks.length} blocks at y${plan.y} from ${plan.access.kind === 'tower' ? 'a tower at ' + move.fmt(plan.access.from) : 'the stand ' + move.fmt(plan.access.from)}`)
+  // the way up: to the access stand by the walk, then (a tower) up its column to the walkway's top
+  const ar = await goSite(bot, new goals.GoalBlock(plan.access.from.x, plan.access.from.y, plan.access.from.z), 'ring', { place: false, shouldStop: stop })
+  if (!ar || !ar.ok) { log('build', `ring by ${move.fmt(c)}: its access ${move.fmt(plan.access.from)} not reached (${ar ? ar.why : '?'})`); return 0 }
+  if (plan.access.kind === 'tower') {
+    for (let i = 0; i < 8 && Math.floor(bot.entity.position.y + 0.01) < plan.y + 1 && !stop(); i++) {
+      const fill = ringFiller(bot)[0]; if (!fill || ringSpare(bot) < 1) break
+      if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true, item: fill.n, onPlaced: q => ledger(q) })) break
+    }
+    if (Math.floor(bot.entity.position.y + 0.01) < plan.y + 1) {
+      // (a tower short of its walkway serves nothing: it is this step's pillar - descendPillar takes it down - and no ring)
+      for (const q of laid) myPillar.push(q)
+      mem.update(m => { m.rings = (m.rings || []).filter(r => r.id !== ringId) })
+      log('build', `ring by ${move.fmt(c)}: the tower stopped at y${Math.floor(bot.entity.position.y)} (${require('./gather').towerWhy() || '?'}) - its ${laid.length} blocks come down as a pillar`)
+      return 0
+    }
+  }
+  const w = ringWorld(bot)
+  const work = job.cells.filter(q => !q.clear && Math.abs(q.x - c.x) <= 12 && Math.abs(q.z - c.z) <= 12 && Math.abs(q.y - c.y) <= 6 && cellDone(bot, q) !== true)
+  let placed = 0; let prev = null; const ringLaid = [] // (the walkway's own blocks laid, in order - the take-back's list)
+  for (const b of plan.blocks) {
+    if (stop()) break
+    // (each block asked again as the world stands now - the walkway's own rules, the room rules, our own way out)
+    if (!ring.blockOk(w, b) || await ringRefusal(bot, b, work, memo, ringTicker())) { const bb = world.at(bot, b.x, b.y, b.z); if (bb && !world.isAirish(bb)) { prev = b; continue } break }
+    await new Promise(r => setImmediate(r)) // (the event loop back after each block's room rules: body first)
+    if (!act.reach(bot, new Vec3(b.x, b.y, b.z), 4.3) && prev) await move.goTo(bot, new goals.GoalBlock(prev.x, plan.y + 1, prev.z), { timeoutMs: 8000, stuckMs: 4000, dig: false, place: false, label: 'along the ring', shouldStop: stop }).catch(() => null)
+    const fill = ringFiller(bot)[0]; if (!fill || ringSpare(bot) < 1) { log('build', `ring by ${move.fmt(c)}: out of spare filler after ${placed} (${RING_RESERVE} kept for the step's supports)`); break }
+    const ok = await act.place(bot, b, fill.n, { faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0]], allowZones: ['build', 'base'], keepExit: true }).catch(() => false)
+    if (!ok) { log('build', `ring by ${move.fmt(c)}: the block at ${move.fmt(b)} would not go in - ${placed} of ${plan.blocks.length} laid`); break }
+    ledger(b); placed++; prev = b; ringLaid.push(b)
+    // (the cells round the new block: their stands as cached may list it - read again when asked; audit)
+    for (const k0 of [...memo.keys()]) { const [x, y, z] = k0.split(',').map(Number); if (Math.abs(x - b.x) <= 3 && Math.abs(z - b.z) <= 3 && y - b.y <= 5 && b.y - y <= 2) memo.delete(k0) }
+  }
+  // STOPPED SHORT - a refusal, the filler, a place that failed, the time: the walkway as laid must hold its edges on its own
+  // (ring.edgeClosure); the last blocks whose open side faces an unlaid candidate over a drop past SAFE_DROP are taken back,
+  // from the one before them; what cannot be taken back is said (audit)
+  if (ringLaid.length < plan.blocks.length) {
+    const towerTop = plan.access.kind === 'tower' ? [plan.access.tower[plan.access.tower.length - 1]] : []
+    const holds = () => ring.walkwayHolds(w, ringLaid, plan.y, towerTop) // (the tower's top's own edges as well: audit)
+    while (ringLaid.length && !holds()) {
+      const last = ringLaid[ringLaid.length - 1]; const back = ringLaid[ringLaid.length - 2] || towerTop[0] || null
+      if (back) await move.goTo(bot, new goals.GoalBlock(back.x, plan.y + 1, back.z), { timeoutMs: 8000, stuckMs: 4000, dig: false, place: false, label: 'back along the ring' }).catch(() => null)
+      const dug = await act.dig(bot, new Vec3(last.x, last.y, last.z), { force: true, own: true, allowZones: ['build', 'base'], timeoutMs: 8000 }).catch(() => false)
+      if (!dug) { log('build', `ring by ${move.fmt(c)}: the block at ${move.fmt(last)} has an open edge over a drop and would not come back (${act.lastDigWhy() || '?'}) - left, on the ledger`); break }
+      ringLaid.pop(); placed--
+      mem.update(m => { const r = (m.rings || []).find(q => q.id === ringId); if (r) r.blocks = r.blocks.filter(q => key(q) !== key(last)) })
+      log('build', `ring by ${move.fmt(c)}: took back ${move.fmt(last)} - its edge faced an unlaid block over a drop`)
+    }
+    // (none of the walkway left: the tower alone is our pillar - descendPillar's, and no ring)
+    if (!ringLaid.length && towerTop.length) { for (const q of laid) if (!plan.blocks.some(b => key(b) === key(q))) myPillar.push(q); mem.update(m => { m.rings = (m.rings || []).filter(r => r.id !== ringId) }) }
+  }
+  log('build', `ring by ${move.fmt(c)}: ${placed} of ${plan.blocks.length} laid at y${plan.y}${laid.length > placed ? ` (and ${laid.length - placed} in its tower)` : ''} in ${Math.round((Date.now() - t0) / 1000)}s - serves ${serves.length} cells`)
+  reach = null; await walkReach(bot).catch(() => null)
+  return laid.length
+}
+
 // THE STAND PLAN, SAID ONCE A CELL A BAND: a walk-search stand, else a pillar foot, else none - and for none, why each column
 // round it was no foot. The upper layers' reach misses were 70% of a step at y129-130 with nothing to say which of these
 // the cells lacked, 2026-10-07 16:21 - the data that decides between feetFor's rules and a scaffold ring (measurement only)
@@ -1808,6 +1954,17 @@ async function placeCell (bot, c, j = job) {
         if (r1 && r1.why === 'shut in') return why('shut in - the escape has the body')
         if (act.reach(bot, pos, 4.3)) return true
         if (cellOutOfTime()) return why(`could not get within reach (its stand ${move.fmt(far)} the long way round not reached: ${r1 ? r1.why : '?'})${whereFrom()}`)
+      } else if (stepTry && stepTry.k === key(c) && !ringTried.has(key(c) + '@' + planBand) && !feetFor(bot, c).some(f => !footBad(f))) {
+        // NO STAND AND NO PILLAR FOOT: a ring - the layer's walkway of our own filler (ring.js), laid once a cell a band; the
+        // cell is then NOT TRIED this step (no miss): the next pick finds the ring's top in the walk
+        ringTried.add(key(c) + '@' + planBand)
+        const laid = await ringFor(bot, c)
+        if (laid) {
+          const rs2 = reachStandFor(bot, pos)
+          if (rs2) { const r2 = await goSite(bot, new goals.GoalBlock(rs2.x, rs2.y, rs2.z), 'place', { shouldStop: cellStop }); if (r2 && r2.why === 'shut in') return why('shut in - the escape has the body'); if (act.reach(bot, pos, 4.3)) return true }
+          return why(`not tried: a ring of ${laid} laid for it - its stand comes with the next pick${whereFrom()}`)
+        }
+        if (!noStandOnce.has(key(c)) && !failsOf(c) && !stepTry.alone) { noStandOnce.add(key(c)); return why(`not tried: no stand in my walk reaches it, no pillar foot, no ring - the look-at walk next time${whereFrom()}`) }
       } else if (stepTry && stepTry.k === key(c) && !stepTry.alone && !noStandOnce.has(key(c)) && !failsOf(c)) {
         noStandOnce.add(key(c))
         return why(`not tried: no stand in my walk reaches it${pillared ? ', and the pillar did not get there' : ''} - the look-at walk next time${whereFrom()}`)
@@ -2937,7 +3094,8 @@ function siteTeardownPlan (bot) {
   const left = bandY === Infinity ? [] : job.cells.filter(c => !c.follows && cellDone(bot, c) !== true)
   let nearLeft = null
   if (left.length && left.length < Math.min(200, job.cells.length * 0.03)) { /* (a share as well: on a small build 200 left is still layers of work; audit) */ nearLeft = new Set(); for (const c of left) for (let dx = -6; dx <= 6; dx++) for (let dz = -6; dz <= 6; dz++) nearLeft.add((c.x + dx) + ',' + (c.z + dz)) }
-  const keep = p => (p.y >= bandY && (!nearLeft || nearLeft.has(p.x + ',' + p.z))) || sups.has(key(p)) || isStep(p)
+  globalBot = bot; const rings = ringHolds() // (a ring's blocks while it still serves a cell: kept, whatever the band - ring.js)
+  const keep = p => (p.y >= bandY && (!nearLeft || nearLeft.has(p.x + ',' + p.z))) || sups.has(key(p)) || isStep(p) || rings.has(key(p))
   // (and our ledger's blocks under the snapshot's region - it starts 2 under the base: the rim bank's columns at y112-116
   //  were never in the site diff, so never taken; audit)
   const r = site.region
