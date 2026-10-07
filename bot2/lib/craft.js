@@ -249,7 +249,10 @@ function noteReservedSpent (bot, sp, planks) {
   const stock = woodStock(bot, sp) - planks // (as it will stand after the craft)
   mem.update(mm => { const m = mm.reservedSpent = mm.reservedSpent || {}; const e = m[sp] || { spent: 0, stock }; e.spent += planks; e.stock = Math.min(e.stock, stock); m[sp] = e })
 }
-function chooseRecipe (bot, itemName, n = 1, stack = null) {
+// (`noBank`: the ensure that asked may not withdraw - the chests are no stock to it, and a recipe priced on the bank's planks
+//  sent a chest's craft after a wild log: 505 spruce planks banked "cost nothing", the noWithdraw ensure then explored 192
+//  blocks out for 2 spruce logs, 2026-10-07 09:55)
+function chooseRecipe (bot, itemName, n = 1, stack = null, { noBank = false } = {}) {
   const md = world.data(bot)
   const item = md.itemsByName[itemName]
   if (!item) return null
@@ -292,7 +295,7 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
   //  or banked, it costs the walk to it)
   const gatherTrip = (nm0, short) => {
     const g = GATHER[nm0]; if (!g || !g.blocks) return 0
-    let banked = 0; try { banked = base().bankCount(nm0) } catch {}
+    let banked = 0; try { banked = noBank ? 0 : base().bankCount(nm0) } catch {}
     if (banked >= short) return 0
     const near = world.findBlocks(bot, g.blocks, { maxDistance: 48, count: 1 })[0]
     return near ? world.dist3(near.position || near, bot.entity.position) / 2 : 120
@@ -305,7 +308,7 @@ function chooseRecipe (bot, itemName, n = 1, stack = null) {
     let t = 0
     try {
       if (short === Infinity) return (tripMemo[mk] = nearTrip(sp))
-      const banked = /_log$/.test(nm0) ? base().bankCount(sp + '_log') : base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log')
+      const banked = noBank ? 0 : /_log$/.test(nm0) ? base().bankCount(sp + '_log') : base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log')
       if (banked < short) t = nearTrip(sp)
     } catch {}
     return (tripMemo[mk] = t)
@@ -516,7 +519,7 @@ async function craftItem (bot, name, n, ctx) {
   const md = world.data(bot)
   const item = md.itemsByName[name]
   if (!item) { log('craft', `unknown item ${name}`); return false }
-  const r = chooseRecipe(bot, name, n, ctx && ctx.stack)
+  const r = chooseRecipe(bot, name, n, ctx && ctx.stack, { noBank: !!(ctx && ctx.noWithdraw) })
   if (!r) { log('craft', `no recipe and no source for ${name}`); return false }
   const perCraft = r.result.count || 1
   const crafts = Math.ceil(n / perCraft)

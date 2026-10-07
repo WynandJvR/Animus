@@ -1523,6 +1523,7 @@ function tripRoom () { return Math.max(1, inv.freeSlots(bot) - 2) * 64 }
 // Trees the build still needs: its logs and its fuel as charcoal (8/7 logs a unit), over the logs a tree gives (what the
 // orchard's own harvests have given, 5 - the wild oaks round Notre-Dame - until it has any). Updated whenever the
 // materials plan is made at home; the orchard grows to it and no further.
+const orchardWaitSaid = new Map() // raw -> day it was said the orchard covers it (said once a day)
 let demandTrees = { squares: 0, singles: 0 } // (orchard.demandFor: the squares and the singles the build's wood still wants)
 let demandRead = false // (this run's demand: the last one saved, until the home jobs work it out afresh)
 function orchardPlan () {
@@ -1931,6 +1932,14 @@ async function castleWorkInner () {
   const nearDusk = world.ticksUntilNight(bot) < 2400
   const feasible = r => {
     if (!mats.hasRoute(r)) return false // (no skill for it yet: its cells wait, never a trip)
+    // (A WOOD THE ORCHARD IS GROWING ENOUGH OF waits for it - unless the band is held on it now: a wild spruce trip explored
+    //  out to 192 blocks for 10 logs while the orchard's growing squares covered the last 74 of the castle's spruce,
+    //  2026-10-07 09:55. Its growing trees at their learnt yields against the whole build's shortfall)
+    if (/_log$/.test(r) && r !== 'log' && r !== blockedRaw) {
+      const need = (tot.raw[r] || 0) || (win.raw[r] || 0)
+      const coming = orchard.expectedLogs(bot, r)
+      if (need > 0 && coming >= need) { if (orchardWaitSaid.get(r) !== day.dayNo(bot)) { orchardWaitSaid.set(r, day.dayNo(bot)); log('dir', `${r}: the orchard is growing ~${coming} of the ${need} still short - no wild trip for it while the band is not held on it`) } return false }
+    }
     // (put off for today - gatherFor refuses it at once: picked anyway, the spruce put off for food took the pick every
     //  round and the dark oak 245b off never got one, 2026-10-04)
     { const put = notToday.get(r); if (put && !(day.dayNo(bot) > put.day)) return false }

@@ -301,6 +301,17 @@ async function placeChestInner (bot) {
     // (the pack's own wood is no walk - a chest and a table of it are made at home whatever the hour; audit)
     const packWood = inv.items(bot).reduce((n, i) => n + (/_planks$/.test(i.name) ? i.count : craft().isLogName(i.name) ? 4 * i.count : 0), 0)
     if (late() && packWood < 12) { log('base', 'the chests are full and no chest in the pack - one made in the morning; the haul stays with me'); return null }
+    // (THE CHEST'S WOOD FROM THE BANK, of a wood the build does not place: at home, two logs out of the chests are no walk.
+    //  Without them the craft chose the build's spruce and explored 192 blocks out for 2 logs - a 6-minute "window" phase
+    //  for a chest, 2026-10-07 09:55. preferredWood: never the build's own species while another is held or banked)
+    if (packWood < 8) {
+      const w = craft().preferredWood(bot, 8)
+      let res = new Set(); try { res = require('./materials').reservedSpecies(bot) } catch {}
+      if (w && !res.has(w)) {
+        if (bankCount(w + '_planks') >= 8) await withdraw(bot, w + '_planks', 8).catch(() => 0)
+        else if (bankCount(w + '_log') >= 2) await withdraw(bot, w + '_log', 2).catch(() => 0)
+      }
+    }
     if (!await craft().ensure(bot, 'chest', 1, { noWithdraw: true, shouldStop: packWood >= 12 ? undefined : late })) return null
   }
   // making the chest may have taken us to a tree: storage goes AT home

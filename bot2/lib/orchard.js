@@ -337,6 +337,15 @@ async function harvest (bot, { logs = Infinity, demand = NO_DEMAND, shouldStop, 
   return got
 }
 
+// THE ORCHARD'S COMING WOOD of a species: its growing spots (a sapling of that species standing) at their own learnt yield -
+// a square's, a single's. What a wild trip for the same logs would race (director's feasible)
+function expectedLogs (bot, logName) {
+  const sap = logName.replace(/_log$/, '_sapling'); const y = yields(); const o = orchard()
+  if (!o) return 0
+  let n = 0
+  for (const s of o.spots) { const b = world.at(bot, s.x, s.y, s.z); if (b && b.name === sap && !trunkLog(bot, s)) n += s.quad ? y.square : y.single }
+  return Math.round(n)
+}
 function info (bot) { const o = orchard(); return o ? { spots: o.spots.length, grown: grown(bot).length, empty: empty(bot).length } : null }
 
-module.exports = { ANY_SAP_RE, SINGLE_SAP_RE, sapCounts, trunkLog, demandFor, yields, squareSpecies, quadSap, plantable, orchard, setZone, plant, harvest, grown, empty, wantSaplings, saplingCount, newSpots, spotOK, info, SAPLING_RE }
+module.exports = { ANY_SAP_RE, SINGLE_SAP_RE, sapCounts, trunkLog, demandFor, yields, expectedLogs, squareSpecies, quadSap, plantable, orchard, setZone, plant, harvest, grown, empty, wantSaplings, saplingCount, newSpots, spotOK, info, SAPLING_RE }
