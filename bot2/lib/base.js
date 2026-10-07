@@ -17,8 +17,38 @@ const KIT_KEEP = {
   // (the bow and its arrows are kit: deposited, the next round's tool check took them out again, every round)
   bow: 1, arrow: 64
 }
+// THE HANDS' TOOLS BY NEED, NOT BY NAME: one of a kind - the best the pack holds that still works (inventory.bestTool, what
+// the hands take) - and nothing under it. Kept by name, every tool stayed: four stone swords beside the iron one, a second
+// shovel and pickaxe, back from a grave run, and the band's two kinds found no slot ("no room for dark_oak_stairs ... 3 slots
+// free", the round off on a trip, 2026-10-07 11:51). The rest is haul: the bank's spares (SPARE_KIT, one of each banked,
+// spareKit's own count) come from it. ENOUGH FOR A JOB (inv.TOOL_JOB_USES, the largest ask of any tool check): the hands'
+// tool with fewer uses left than that keeps a spare beside it - one that meets it if the pack has one, the highest tier and
+// the most uses else - or an iron pick at 4 uses went down a mine with its stone spare banked, and a fresh copy made for the
+// check went to the bank instead of the worn one (audit). Which copies go: the most worn first (depositByWear). A kind with
+// no working tool keeps what it has
+const TOOL_KIND_RE = /_(pickaxe|axe|shovel|sword|hoe)$/
+function toolsKept (bot, kind) {
+  const uses = i => inv.durabilityLeft(bot, i)
+  const all = inv.items(bot).filter(i => i.name.endsWith('_' + kind) && uses(i) > 2) // (bestTool's "works")
+  if (!all.length) return null
+  const top = Math.max(...all.map(i => inv.tierOf(i.name)))
+  const main = all.filter(i => inv.tierOf(i.name) === top).sort((a, b) => uses(b) - uses(a))[0] // (the hands' tool: its best copy)
+  const kept = [main]
+  if (uses(main) < inv.TOOL_JOB_USES) {
+    const J = inv.TOOL_JOB_USES
+    const spare = all.filter(i => i !== main).sort((a, b) => ((uses(b) >= J) - (uses(a) >= J)) || (inv.tierOf(b.name) - inv.tierOf(a.name)) || (uses(b) - uses(a)))[0]
+    if (spare) kept.push(spare)
+  }
+  return kept
+}
+function toolKeep (bot, name) {
+  const kept = toolsKept(bot, name.match(TOOL_KIND_RE)[1])
+  if (!kept) return Infinity
+  return kept.filter(i => i.name === name).length
+}
 function keepCount (bot, item) {
-  if (/_(pickaxe|axe|shovel|sword|hoe|helmet|chestplate|leggings|boots)$/.test(item.name)) return Infinity
+  if (TOOL_KIND_RE.test(item.name)) return toolKeep(bot, item.name)
+  if (/_(helmet|chestplate|leggings|boots)$/.test(item.name)) return Infinity
   if (/_bed$/.test(item.name)) return 1
   if (/_boat$/.test(item.name)) return 1 // (the kit's boat: the water here needs one)
   if (KIT_KEEP[item.name] != null) return KIT_KEEP[item.name]
@@ -353,6 +383,22 @@ async function placeChestInner (bot) {
   return null
 }
 
+// `k` copies of a WORN item (a tool, armour) into the open chest, BY SLOT: the most worn first (the haul), or the freshest (a
+// spare for the bank). w.deposit takes the first slot of the type it finds - the fresh pick the check had just made went to
+// the bank, the worn one stayed (audit 2026-10-07). Stackables go as before. The count put in
+async function depositByWear (bot, w, type, k, { freshest = false } = {}) {
+  const md = world.data(bot); const def = md.items[type]
+  if (!def || !def.maxDurability) { await w.deposit(type, null, k); return k }
+  const slots = w.slots.slice(w.inventoryStart, w.inventoryEnd).filter(s => s && s.type === type)
+    .sort((a, b) => (inv.durabilityLeft(bot, a) - inv.durabilityLeft(bot, b)) * (freshest ? -1 : 1))
+  let n = 0
+  for (const s of slots) {
+    if (n >= k) break
+    await bot.transfer({ window: w, itemType: s.type, metadata: s.metadata, count: s.count, sourceStart: s.slot, sourceEnd: s.slot + 1, destStart: 0, destEnd: w.inventoryStart })
+    n += s.count
+  }
+  return n
+}
 // Put everything but the kit into the chests at home.
 // Put `n` of one item into a home chest (the freshest tool of the kind, for a spare kit).
 async function depositItem (bot, name, n = 1) {
@@ -367,7 +413,7 @@ async function depositItem (bot, name, n = 1) {
     if (!w) continue
     let asked = 0; const before = inv.count(bot, name)
     try {
-      for (const it of items) { if (asked >= n) break; const k = Math.min(it.count, n - asked); await w.deposit(it.type, it.metadata, k); asked += k }
+      asked += await depositByWear(bot, w, items[0].type, n, { freshest: true })
       refreshCache(w, p)
     } catch (e) { log('base', `depositing ${name} failed: ${e.message}`) } finally { try { w.close() } catch {} }
     // (what left the pack, counted after the close and the resync - see withdraw)
@@ -457,7 +503,7 @@ async function depositAll (bot, { keep = depositKeepOf } = {}) {
         // (asked BEFORE the await: a deposit that threw "full" half way had moved its items all the same, and counted only on
         //  success the line read "asked 0, the pack moved 230", 2026-10-06 - the accounting's, never a stray move)
         tried += k; askedBy[it.name] = (askedBy[it.name] || 0) + k
-        try { await w.deposit(it.type, null, k); asked += k } catch (e) { if (!depErr) depErr = `${it.name} x${k}: ${e.message}`; if (/full/i.test(e.message)) break }
+        try { asked += await depositByWear(bot, w, it.type, k) } catch (e) { if (!depErr) depErr = `${it.name} x${k}: ${e.message}`; if (/full/i.test(e.message)) break }
       }
       refreshCache(w, target)
     } finally { try { w.close() } catch {} }
@@ -559,4 +605,4 @@ async function roomToCraft (bot, keep = new Set()) {
   return inv.freeSlots(bot) > 0
 }
 
-module.exports = { SPARE_KIT, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+module.exports = { SPARE_KIT, toolsKept, depositByWear, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }

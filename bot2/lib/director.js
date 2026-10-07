@@ -307,7 +307,9 @@ function bowArmed () { return reflex.bowReady() && inv.count(bot, 'arrow') >= 8 
 // Items in the pack beyond the kit we keep on us.
 function haulSize () {
   let n = 0
-  for (const it of inv.items(bot)) { const keep = base.keepCount(bot, it); if (keep !== Infinity) n += Math.max(0, it.count - keep) }
+  // (by NAME, the excess over the keep once: per stack, two stone pickaxes with a keep of one counted no haul at all)
+  const seen = new Set()
+  for (const it of inv.items(bot)) { if (seen.has(it.name)) continue; seen.add(it.name); const keep = base.keepCount(bot, it); if (keep !== Infinity) n += Math.max(0, inv.count(bot, it.name) - keep) }
   return n
 }
 
@@ -1591,14 +1593,17 @@ async function withdrawWindow (needs, lowY = {}) {
   //  none of goes to the chests first, by the deposit task's own rule (depositKeep), at home where the withdraw is anyway)
   if (inv.freeSlots(bot) < Math.min(Object.keys(needs).length + 2, 12) && depositHaulSize() > 0) await base.depositAll(bot, { keep: (b, i) => Math.max(depositKeep(b, i), build.FILLER_ITEMS.test(i.name) ? build.SCAFFOLD_WANT : 0) }).catch(() => false) // (the scaffold's stock stays: ensureScaffold just took it)
   const heads = firsts.filter(nm => countOf(nm) === 0 && stockOf(nm) > 0)
-  await roomForBand(heads, firsts, needs, y, Math.min(heads.length + 1, 6))
+  // (room for the heads AND the withdraw's own free slots - BAND_KEEP_FREE: room for heads + 1 left 3 free, the withdraw keeps
+  //  3 free, and 0 of the band's two kinds came out - "no room for dark_oak_stairs, stripped_spruce_log ... 3 slots free",
+  //  the step ended on dark_oak_stairs "not in hand" with 13 in the chest, 2026-10-07 11:51. One number for both)
+  await roomForBand(heads, firsts, needs, y, Math.min(heads.length, 6) + BAND_KEEP_FREE)
   // (each pass in ONE round of chest openings - base.withdrawMany, the exact items in the band's order; then, kind by kind, only
   //  what a stand-in must cover - a birch stair for a jungle stair: withdrawOf's pool)
   for (const cap of [64, 64 * 4]) {
     if (inv.freeSlots(bot) < 2) return
     const list = order.map(([name, n]) => [name, Math.min(n, cap) - countOf(name)]).filter(([, w]) => w > 0)
     // (three slots kept, not two: the pickups on the way take two, and the band's next anchor - found only by the step - its own)
-    await base.withdrawMany(bot, list.map(([name, w]) => [name, Math.min(w, base.bankCount(name))]), { keepFree: 3 }).catch(() => ({}))
+    await base.withdrawMany(bot, list.map(([name, w]) => [name, Math.min(w, base.bankCount(name))]), { keepFree: BAND_KEEP_FREE }).catch(() => ({}))
     for (const [name, n] of order) {
       if (inv.freeSlots(bot) < 2) return
       const want = Math.min(n, cap) - countOf(name)
@@ -1612,6 +1617,9 @@ async function withdrawWindow (needs, lowY = {}) {
 // build", and the round went off on a trip instead, 2026-10-06. What goes back, in one deposit: first what the window places
 // none of (a trip's haul, the clearing's logs and saplings), then the window's blocks for higher layers than the band's,
 // highest first - never the kit's keep or the scaffold stock, never the waited items themselves
+// (the slots a band's withdraw leaves free - the pickups on the way take two, the band's next anchor its own: the withdraw's
+//  keepFree and the room roomForBand makes above it, one number)
+const BAND_KEEP_FREE = 3
 async function roomForBand (heads, waited, needs, y, room) {
   if (!heads.length || inv.freeSlots(bot) >= room) return
   const keep = nm => Math.max(base.keepCount(bot, { name: nm }), build.FILLER_ITEMS.test(nm) ? build.SCAFFOLD_WANT : 0)

@@ -196,7 +196,12 @@ function rawFoodCount (bot) { let n = 0; for (const it of items(bot)) if (COOKED
 //  clay balls, poppies and red tulips - bricks and red dye for a build: a full pack tossed a clay haul)
 const JUNK = /^(raw_copper|raw_gold|redstone|lapis_lazuli|rotten_flesh|poisonous_potato|spider_eye|pufferfish|tropical_fish|dead_bush|short_grass|tall_grass|fern|leaf_litter|beetroot_seeds|pumpkin_seeds|melon_seeds|bone|arrow|gunpowder|egg|lily_pad|kelp|seagrass|glow_lichen|vine|pointed_dripstone|dripstone_block|moss_carpet|moss_block|azalea|flowering_azalea|orange_tulip|white_tulip|pink_tulip|dandelion|cornflower|azure_bluet|oxeye_daisy|allium|blue_orchid|pink_petals|wildflowers|firefly_bush|bush|calcite|red_sand|mud|podzol|mycelium|deepslate|ink_sac|leather_horse_armor|saddle|name_tag|golden_horse_armor|iron_horse_armor|lead)$/
 
-module.exports = { SAFE_RAW,
+// ENOUGH USES FOR A JOB: the most any tool check asks of a tool before it starts (gather's stone run asks it of the pickaxe;
+// the mine's 4, the night mine's 8, the clay's 4 are under it). The pack's keep holds a tool of each kind that meets it, or a
+// spare beside a tool that does not (base.keepCount) - ONE number: kept lower, the check crafted a new tool the deposit then
+// banked, round after round (audit 2026-10-07)
+const TOOL_JOB_USES = 32
+module.exports = { SAFE_RAW, TOOL_JOB_USES,
   TIERS, TIER_RANK, GOOD_FOOD, RAW_FOOD, COOKED_OF, JUNK, ARMOR_SLOTS,
   items, count, has, counts, freeSlots, tierOf, durabilityLeft, bestTool, toolTier, toolKindFor, equipFor, canHarvest,
   bestWeapon, equipWeapon, wornArmor, armorPieces, armorPoints, REGEN_FOOD, shelterBlock, betterArmorInPack, wearBestArmor, offhandShield, hasShield, equipShield, foodItems, foodPoints, rawFoodCount

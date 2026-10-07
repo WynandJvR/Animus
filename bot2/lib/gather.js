@@ -266,7 +266,7 @@ async function fellMega (bot, corner, re, { allowZones = [], shouldStop, leaves 
   if (Math.floor(bot.entity.position.x) !== entry.x || Math.floor(bot.entity.position.z) !== entry.z) { log('gather', `could not step into the trunk at ${move.fmt({ x: entry.x, y: y0, z: entry.z })}`); return { got: 0, stranded: false } }
   // (a pickaxe for our own pillar on the way down: worn out at the top, the pillar's andesite went by hand - 7.5s a block -
   //  and the descent read the cell it had just dug as "air under me" and stranded at y141, 2026-10-07 04:21)
-  await require('./craft').keepTool(bot, 'pickaxe', { minUses: 32, shouldStop }).catch(() => false)
+  await require('./craft').keepTool(bot, 'pickaxe', { minUses: inv.TOOL_JOB_USES, shouldStop }).catch(() => false)
   const pillar = []
   let upWhy = null; let downWhy = null
   // UP: to two under the square's top log (its last level in reach of the way down) - the column's own logs, our old
