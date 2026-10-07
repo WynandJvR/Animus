@@ -75,7 +75,14 @@ const EDITS = [
   // (a gate or door the path opens refused the click: upstream said it only on the console - retried every tick, the body
   //  stopped, unseen. bot2 logs 'path_use_error' and the watchdog alarms on a streak at one spot; audit)
   ['mineflayer-pathfinder/index.js', "          console.error(err)\n", "          bot.emit('path_use_error', { pos: placingBlock ? { x: placingBlock.x, y: placingBlock.y, z: placingBlock.z } : null, err })\n"],
-  ['mineflayer-pathfinder/index.js', "  function monitorMovement () {\n", "  function monitorMovement () { try { monitorMovement0() } catch (e) { try { resetPath('path_error') } catch {} bot.emit('path_error', e) } } // (bot2: a throw is one reset)\n  function monitorMovement0 () {\n"]
+  ['mineflayer-pathfinder/index.js', "  function monitorMovement () {\n", "  function monitorMovement () { try { monitorMovement0() } catch (e) { try { resetPath('path_error') } catch {} bot.emit('path_error', e) } } // (bot2: a throw is one reset)\n  function monitorMovement0 () {\n"],
+  // A WAYPOINT ON WHAT THE BODY WALKS THROUGH: postProcessPath stands each node on top of the block in its feet cell, read raw
+  // from the world - an OPEN trapdoor or a door, which the movements walk through (non-physical: bot2's movementsFor), was
+  // stood on: the waypoint one block over the floor and pulled toward the plate, the body jumped into the plate for it -
+  // "stuck x3, next node -2265.703125,125,-576.5", a trap at the castle's east passage twice a day, 2026-10-07. A feet block
+  // the movements call non-physical is no floor: the block under it is (the upstream fallback). One rule - the movements'
+  // own verdict, never a list of names (castlewalktest counts the class)
+  ['mineflayer-pathfinder/index.js', "      let np = getPositionOnTopOf(b)\n", "      let np = (b && b.shapes.length && stateMovements && (() => { try { return stateMovements.getBlock(b.position, 0, 0, 0).physical === false } catch { return false } })()) ? null : getPositionOnTopOf(b) // (bot2: a block the movements walk through is no floor)\n"]
 ]
 function patchGates () {
   for (const [f, from, to] of EDITS) {

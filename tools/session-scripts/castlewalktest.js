@@ -38,9 +38,10 @@ const at = (x, y, z) => blockAt({ x, y, z })
 const rw = { floorTop: (x, y, z) => y + world.floorTop(at(x, y, z)), at, isAirish: world.isAirish, bodyPassable: world.bodyPassable, isOpenTrapdoor: world.isOpenTrapdoor, isSolid: world.isSolid, standable: (x, y, z) => world.standable(bot, x, y, z), plateEdge: world.plateEdge, SAFE_DROP: world.SAFE_DROP }
 const W = rooms.walkModel(rw, () => false, { opens: true })
 
-// ---- the planner, as the legs' movementsFor sets it: no dig, no place, doors walked, open trapdoors passable, panel edges
+// ---- the planner, as the legs' movementsFor sets it: no dig, no place, doors walked, open trapdoors passable, panel edges,
+//      fence gates opened on the way (canOpenDoors - movementsFor's; the library default is off)
 const mv = new Movements(bot)
-mv.canDig = false; mv.allow1by1towers = false; mv.scafoldingBlocks = []; mv.allowParkour = false; mv.allowSprinting = false; mv.maxDropDown = world.SAFE_DROP
+mv.canDig = false; mv.canOpenDoors = true; mv.allow1by1towers = false; mv.scafoldingBlocks = []; mv.allowParkour = false; mv.allowSprinting = false; mv.maxDropDown = world.SAFE_DROP
 for (const n of ['magma_block', 'powder_snow', 'sweet_berry_bush', 'cactus', 'campfire', 'soul_campfire', 'wither_rose', 'pointed_dripstone', 'fire', 'soul_fire']) { const b = registry.blocksByName[n]; if (b) mv.blocksToAvoid.add(b.id) }
 const doorIds = new Set(registry.blocksArray.filter(b => /_door$/.test(b.name) && !/iron_door/.test(b.name)).map(b => b.id))
 const gb0 = mv.getBlock.bind(mv)
@@ -124,6 +125,37 @@ for (const p of stands) {
 }
 console.log(`${deadEnds} dead ends the walk steps into (no planner move out); ${deadMissed} the walk model reads as open; ${dropped} dropped by rooms.deadEnd, ${droppedLeavable} of them leavable`)
 console.log(`${modelOnly} stands the model alone reads as closed, kept (${Object.entries(modelOnlyBy).map(([c, n]) => n + ' ' + c).join(', ')})`)
+// WAYPOINTS ON WHAT THE BODY WALKS THROUGH: the pathfinder's postProcessPath stands each node on top of its feet cell's block
+// (getPositionOnTopOf, read raw from the world). For an open trapdoor or a door - non-physical to the leg movements - that
+// was a waypoint a block over the floor, pulled toward the plate: the body jumped into the plate for it, "stuck x3, next
+// node -2265.703125,125,-576.5", 2026-10-07. bot2's patch (patch-mc262.js): a feet block the movements call non-physical
+// is no floor - the block under it is. Every model step into such a cell: its waypoint by the patched rule must be the
+// stand's real standing point (on the floor under it, as upstream stands any node on its floor); the unpatched misses counted
+function onTopOf (block) { // (index.js getPositionOnTopOf, verbatim in effect)
+  if (!block || !block.shapes || block.shapes.length === 0) return null
+  const q = { x: 0.5, y: 0, z: 0.5 }; let n = 1
+  for (const sh of block.shapes) { const h = sh[4]; if (h === q.y) { q.x += (sh[0] + sh[3]) / 2; q.z += (sh[2] + sh[5]) / 2; n++ } else if (h > q.y) { n = 2; q.x = 0.5 + (sh[0] + sh[3]) / 2; q.y = h; q.z = 0.5 + (sh[2] + sh[5]) / 2 } }
+  return { x: block.position.x + q.x / n, y: block.position.y + q.y, z: block.position.z + q.z / n }
+}
+function waypoint (n, patched) {
+  const b = blockAt({ x: n.x, y: n.y, z: n.z })
+  let np = (patched && b && b.shapes && b.shapes.length && mv.getBlock({ x: n.x, y: n.y, z: n.z }, 0, 0, 0).physical === false) ? null : onTopOf(b)
+  if (np === null) np = onTopOf(blockAt({ x: n.x, y: n.y - 1, z: n.z }))
+  return np || { x: n.x + 0.5, y: n.y - 1, z: n.z + 0.5 }
+}
+let wpSteps = 0; let wpOff = 0; let wpOff0 = 0; const wpBy = {}
+for (const p of stands) for (const n of W.next(p)) {
+  const ft = at(n.x, n.y, n.z)
+  if (!ft || !ft.shapes || !ft.shapes.length || /ladder|vine/.test(ft.name)) continue // (a climb's node: its own branch upstream)
+  if (mv.getBlock({ x: n.x, y: n.y, z: n.z }, 0, 0, 0).physical !== false) continue
+  wpSteps++
+  const fp = onTopOf(blockAt({ x: n.x, y: n.y - 1, z: n.z })) // (the real floor's own standing point: a stair floor's is toward its step)
+  const want = { x: fp ? fp.x : n.x + 0.5, y: n.y - 1 + world.floorTop(at(n.x, n.y - 1, n.z)), z: fp ? fp.z : n.z + 0.5 }
+  const off = w => Math.abs(w.x - want.x) > 0.01 || Math.abs(w.y - want.y) > 0.01 || Math.abs(w.z - want.z) > 0.01
+  if (off(waypoint(n, false))) { wpOff0++; const c = ft.name.replace(/^[a-z]+_(?=(trap)?door$)|^dark_oak_|^pale_oak_/, '') + (world.isOpenTrapdoor(ft) ? ' (open)' : ''); wpBy[c] = (wpBy[c] || 0) + 1 }
+  if (off(waypoint(n, true))) wpOff++
+}
+console.log(`${wpSteps} steps into a cell the legs walk through (a door, an open trapdoor): ${wpOff0} waypoints off the floor unpatched (${Object.entries(wpBy).map(([c, k]) => k + ' ' + c).join(', ')}), ${wpOff} with bot2's patch`)
 // WEDGE CELLS: a floor, the feet free, and a block with a box in the HEAD cell that does not fill it - a closed gate, a fence,
 // a wall, a shut trapdoor, a campfire over the head. A body can stand in such a cell beside the block (0.3 wide, the block a
 // plane), and the planner's steps out of it are checked on the cells they go to, never on the one they leave: the first step
@@ -141,6 +173,6 @@ for (let x = 0; x < S.x; x++) for (let y = 1; y < S.y - 2; y++) for (let z = 0; 
 console.log(`${wedges} wedge cells (a part block at the head over a floor); ${wedgeStands} the model calls a stand; the planner offers ${wedgeMoves} steps out of them through their own block`)
 // (the gate: no step the planner refuses, but a ladder's - the climbs are modelled on their own)
 const hard = Object.entries(byClass).filter(([c]) => !/ladder/.test(c)).reduce((t, [, n]) => t + n, 0)
-const fails = [hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
+const fails = [hard && `${hard} non-ladder steps the planner refuses`, startWrong && `${startWrong} stands the planner starts elsewhere`, deadMissed && `${deadMissed} dead ends the model reads as open`, wedgeStands && `${wedgeStands} wedge cells the model calls a stand`, wpOff && `${wpOff} waypoints off the floor in cells the legs walk through`, droppedLeavable && `${droppedLeavable} stands dropped as dead ends the planner leaves`].filter(Boolean)
 console.log(fails.length ? `FAIL ${fails.join('; ')}` : 'PASS')
 process.exit(fails.length ? 1 : 0)
