@@ -560,16 +560,18 @@ function decide () {
   const aroundAll = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && levelWithUs(h) && onSurface(h.e))
   const around = aroundAll.filter(h => !pitted(h.e))
   const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
-  // (by day too when shooters stand round home and the body can't take their arrows - no shield, little armour: a
-  //  pillager patrol and two skeletons shot the bot four times in two minutes, each respawn walking back out to the
-  //  grave, the farm, the tool chest, 2026-09-25)
-  const outgunned = around.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !bowArmed()
+  // (by day too when shooters stand round home and the body can't take their arrows: a pillager patrol and two skeletons shot
+  //  the bot four times in two minutes, each respawn walking back out to the grave, the farm, the tool chest, 2026-09-25)
+  // (the exchange's arithmetic - reflex.outgunned - not "no shield and under 8 armour": four pillagers read as no reason to
+  //  hide for an iron helmet, chestplate and shield, and the bot fought them by turns at the site, 2026-10-07 13:33. A bow
+  //  ready is its own answer: shot from range, never walked into - the reflex's shoot row)
+  const outgunned = reflex.outgunned(around) && !bowArmed()
   // (from dusk: the bed takes the dusk, and a night slept from dusk never came - the first evening went to bed at 19:58)
   // (the bed's own reach - 200 at dusk, 32 at night: it stands in for the bed wherever the bed would be chosen; held to 24 of home,
   //  the second evening went to bed from 41b out, 2026-10-04)
   const spiderNightOn = world.phase(bot) !== 'day' && !!home && dHome < (world.phase(bot) === 'dusk' ? 200 : 32) && stringShort() && spiderNightFit() && !held('spiderNight')
   const spidersOnly = around.length > 0 && around.every(h => SPIDER_RE.test(h.e.name)) // (the spider night's own game: no hideout from it)
-  if (around.length && home && dHome < 48 && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !(spiderNightOn && spidersOnly) && !held('hideout')) {
+  if (around.length && home && dHome < reflex.HIDEOUT_REACH && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !(spiderNightOn && spidersOnly) && !held('hideout')) {
     return { name: 'hideout', why: `${around.length} hostile${around.length > 1 ? 's' : ''} around home (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - waiting inside` }
   }
   // evening: be home before dusk, not at it - a 100-block walk begun at dusk arrives in the dark (a zombie
@@ -1104,7 +1106,7 @@ const TASKS = {
     while (!taskCancelled() && Date.now() - t0 < 4 * 60000) {
       const left = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && levelWithUs(h) && onSurface(h.e))
       const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
-      const outgunned = left.some(h => reflex.RANGED.has(h.e.name)) && !inv.offhandShield(bot) && inv.armorPoints(bot) < 8 && !bowArmed()
+      const outgunned = reflex.outgunned(left) && !bowArmed() // (decide's own rule)
       if (!left.length || (!dim && !outgunned && bot.health > reflex.hurtLine())) break // (the hurt line, as entry and heal use: R11)
       // a bed right here: sleeping skips the rest of the night (the server refuses while monsters are
       // close - keep trying, walled in they drift off)

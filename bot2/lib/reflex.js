@@ -145,6 +145,7 @@ function setActive (kind, detail) {
   if (safeRun && !(kind === 'flee' && /- to the safehouse$/.test(detail || ''))) { safeRun = null; try { bot.pathfinder.setGoal(null) } catch {} }
   if (kind !== 'shoot') endDraw(kind) // (the body is another reflex's now: the string goes)
   if (kind !== 'flee') coverTrail.length = 0 // (only cover ticks unbroken by another row read as pinned - a pause elsewhere is no pin; audit)
+  if (kind !== 'fight') fightCornered = false
   if (active && active.kind === 'fight' && kind !== 'fight') noteFightEnd()
   if (kind === 'fight' && (!active || active.kind !== 'fight')) fightStartHp = bot.health
   if (kind === 'flee' && active && active.kind === 'fight' && fleeTarget && fightStartHp != null) fledFrom.set(fleeTarget.id, Math.max(fledFrom.get(fleeTarget.id) || 0, fightStartHp))
@@ -163,6 +164,7 @@ function clearActive () {
   endDraw('released')
   shieldDown()
   riseY = null
+  fightCornered = false
   if (active && active.kind === 'fight') noteFightEnd()
   if (active) {
     log('reflex', `${active.kind} done after ${Math.round((Date.now() - active.since) / 100) / 10}s (hp ${Math.round(bot.health)})`)
@@ -264,10 +266,17 @@ function chargeAffordable (shooter, hs, hp) {
   //  at 2.4b, hp 17, iron sword and chestplate, a gather trip's caution took cover from a skeleton, the edge of a drop held
   //  the flight, and it shot the bot dead in 18s, 2026-10-03)
   const reachNow = shooter.d < 3.5 || (!!active && active.kind === 'fight' && fightTargetId === shooter.e.id && shooter.d < 5)
-  const pinnedNow = !!pinnedCover && pinnedCover.id === shooter.e.id && Date.now() < pinnedCover.until // (takeCover: a flight that cannot move)
+  const pinnedNow = coverPinned() // (takeCover: a flight that cannot move)
   if (!reachNow && !pinnedNow && cautious && (hp < 18 || hs.some(h => h.e !== shooter.e && h.d < 24 && canSee(h.e)))) return false
   for (const id of fledFrom.keys()) if (!bot.entities[id]) fledFrom.delete(id) // (gone from the world: gone from the list)
   { const f = fledFrom.get(shooter.e.id); if (!reachNow && !pinnedNow && f != null && hp < f) return false }
+  // (and held out to 5 once fighting it: a skeleton steps back as it is closed on - a fixed 3.5 flipped fight and cover each
+  //  tick; audit)
+  return exchangeLeft(shooter, hs, hp) > hurtLine() + (reachNow ? 0 : 4)
+}
+// THE EXCHANGE: the hp left once `shooter` is closed on and cut down, every shooter about firing the while. One reckoning for
+// the charge (chargeAffordable), the patrol that outguns us (outgunned) and the director's hideout
+function exchangeLeft (shooter, hs, hp) {
   // (EVERY shooter about, in sight or not - a patrol's others shoot round the corner: the charge counted one and three
   //  bolts landed 0.65-0.85s apart, 20 -> 8, 2026-10-02; audit)
   // (the CHARGED one always: fled down a slope, a witch 6+ above was out of its own reckoning - dps 0 - and "fight - witch
@@ -286,10 +295,46 @@ function chargeAffordable (shooter, hs, hp) {
   const now = Date.now(); const taken = hurtLog.filter(q => now - q.at < 5000).reduce((a, q) => a + q.d, 0) / 5
   // (the hit to spare is for the run IN: a shooter already in sword reach is no run - turning from a skeleton at 2.5b to take
   //  cover put its arrows in our back, 17 -> 11, while 2.6s of swings ended it, 2026-10-02)
-  // (and held out to 5 once fighting it: a skeleton steps back as it is closed on - a fixed 3.5 flipped fight and cover each
-  //  tick; audit)
-  return hp - secs * Math.max(dps, taken) > hurtLine() + (reachNow ? 0 : 4)
+  return hp - secs * Math.max(dps, taken)
 }
+// OUTGUNNED: the shooters about would take us to the hurt line before the nearest of them is cut down - the exchange's own
+// arithmetic, never a kit rule. "No shield and under 8 armour" read a patrol of four crossbows as a fair fight for an iron
+// helmet, chestplate and shield (8 points), and the bot covered and fought by turns 40b from its safehouse, 20 -> 0 in 62s,
+// 2026-10-07 13:33 (four pillagers: 5.4 hp a second through that kit, a pillager's 24 hp three seconds of an iron blade)
+// `hs`: [{ e, d }] - the caller's list (the director's hostiles round home, the reflex's own)
+function outgunned (hs, hp = bot.health) {
+  const sh = hs.filter(h => RANGED.has(h.e.name) && h.d < 24)
+  if (!sh.length) return false
+  const n = sh.reduce((a, b) => (a.d <= b.d ? a : b))
+  return exchangeLeft(n, hs, hp) <= hurtLine() + (n.d < 3.5 ? 0 : 4)
+}
+// ONE SHOT FROM EACH: what being seen again costs before cover is had back - a crossbow reloads in ~2s, a bow draws in 1-2
+// (SHOOTER_DPS over that, armour off all but magic). Released into sight at hp 5 with two pillagers 8-10b off, "hidden ... back
+// to work", the next bolt came 2s later and the bot was dead in 11, 2026-10-07 13:34
+const VOLLEY_S = 2
+// the shooters' fire on us a second (entities), armour off all but magic - no shield counted: a run or a step shows it no face
+function fireDps (sh) {
+  const cut = 1 - Math.min(20, inv.armorPoints(bot)) / 25
+  return sh.reduce((a, s) => a + (SHOOTER_DPS[s.name] || 2) * (MAGIC.has(s.name) ? 1 : cut), 0)
+}
+function volley (sh) { return fireDps(sh) * VOLLEY_S }
+// TOO HURT TO BE SEEN: one volley from the shooters about would put us at the hurt line, and the hp is coming back (food for
+// regeneration) - out of their sight the body heals before it goes back to the task's walk. Null: fit to be seen (or no
+// healing to wait for: the eat row's and the director's then)
+// (and never at full health: healed is as healed as it gets - against three pillagers unarmoured one volley is past the hurt
+//  line at hp 20, and the hold froze the body while they lingered; audit)
+function tooHurtToShow (sh) {
+  if (!sh.length || bot.food < inv.REGEN_FOOD || bot.health >= 20) return null
+  const v = volley(sh)
+  return bot.health - v <= hurtLine() ? `hp ${Math.round(bot.health)} - one volley (${v.toFixed(1)}) from ${sh.length} shooter${sh.length === 1 ? '' : 's'} is the hurt line: healing out of sight first` : null
+}
+// the director's hideout reach (home within it) - and the safehouse run's when outgunned: one number
+const HIDEOUT_REACH = 48
+// THE LONG RUN'S OWN EXCHANGE: a run past the short one (28) is seconds in the open under every shooter about - sprinting
+// (5.6 b/s) the whole way, their fire on our back. Taken only when that leaves us above the hurt line; cover one move away is
+// the better trade otherwise (audit: 40b under four crossbows is ~7s at ~6.8 hp/s)
+const SPRINT_BPS = 5.6
+function runAffordable (dd, sh, hp = bot.health) { return hp - (dd / SPRINT_BPS) * fireDps(sh) > hurtLine() }
 const hurtLog = [] // { at, d }: hp lost, the last seconds (health events)
 
 // THE BOW. A shooter at range was fought only by walking into its arrows with a stone sword (or not at all: hide, flee)
@@ -725,8 +770,13 @@ const wallTried = new Set()
 function poisoned () { try { const ef = bot.registry.effectsByName; const id = ef && ef.Poison && ef.Poison.id; return id != null && !!(bot.entity.effects && bot.entity.effects[id]) } catch { return false } }
 function hungryNow () { return bot.food <= 14 || (bot.health < 20 && bot.food < inv.REGEN_FOOD) }
 const douseTried = new Map() // (a lit fire's cell -> until when the shovel's douse is not tried again)
-const coverTrail = [] // { t, x, z, id }: where a flight to cover has been, the last 2s
-let pinnedCover = null // { id, until }: the shooter whose cover flight is pinned
+const coverTrail = [] // { t, x, z }: where a flight to cover has been, the last 2s
+// THE FLIGHT IS PINNED, not "pinned by this shooter": cover that cannot be had is the BODY's state (no step, no wall). Kept per
+// shooter, a patrol's nearest changed every second or two - the new one was "close", not cornered, its cover flight began, the
+// old one was nearest again and cornered: fight 0.2-1s, cover, fight, 25 turns in 62s, never a kill, 2026-10-07 13:34
+let pinnedCover = null // { until }
+let fightCornered = false // the fight under way began cornered: it stays the answer while it lasts (cover did not move since)
+function coverPinned () { return (!!pinnedCover && Date.now() < pinnedCover.until) || (fightCornered && !!active && active.kind === 'fight') }
 let hotStuck = null // { k, since, last }: the fire the body has been on, across its bounces (the hot row)
 function campfireLit (b) { try { const v = b.getProperties().lit; return v === true || v === 'true' } catch { return true } }
 let holdSaidAt = 0 // (the out-of-sight hold's line, every 30s while it lasts: a hold must be visible in the log)
@@ -764,7 +814,7 @@ function exposedStepRead (sh, f) {
   return steps ? null : 'no step out but by digging'
 }
 // pinned by this shooter and it is a few steps off (a short run, then the blade): cornered - see chargeAffordable
-function pinnedClose (e, d) { return !!pinnedCover && pinnedCover.id === e.id && Date.now() < pinnedCover.until && d < 6 }
+function pinnedClose (e, d) { return coverPinned() && d < 6 }
 // THE SAFEHOUSE FIRST: a shooter on us within a short run of the safehouse, outside it - the run goes for the door, opened
 // on the way, shut behind us inside: a player runs indoors. Cover cells three steps out, a wall of two blocks and a dug hole
 // were all the reflex knew, and the third pillager death of the night came 8 blocks from its door, shot 12 -> 0 in a hole,
@@ -782,7 +832,11 @@ function safehouseRun (e, label) {
   const h0 = require('./memory').get().home
   const inside = h0 && mv.insideHut({ x: h0.x, y: h0.y, z: h0.z }) ? { x: h0.x, y: h0.y, z: h0.z } : { x: Math.floor((hm.box.x1 + hm.box.x2) / 2), y: hm.box.y1, z: Math.floor((hm.box.z1 + hm.box.z2) / 2) }
   const dd = Math.hypot(me.x - inside.x - 0.5, me.z - inside.z - 0.5)
-  if (dd > 28 || Math.abs(me.y - inside.y) > 5) return false
+  // (a short run - 28 - while cover here can still win; OUTGUNNED, the hideout's own reach: cover and the blade by turns 38-45b
+  //  from the door under four crossbows was the death the run was made for, 2026-10-07 13:34)
+  // (past 28: only outgunned, once the cover here is pinned - no step out of sight, no wall - and only when the run's own
+  //  exchange leaves us above the hurt line: runAffordable; audit)
+  if (Math.abs(me.y - inside.y) > 5 || dd > HIDEOUT_REACH || (dd > 28 && !(coverPinned() && outgunned(hostiles(24)) && runAffordable(dd, shootersAbout(e))))) return false
   // (not past the shooters: one nearer the door than us and near the straight line to it - the run would pass by it; audit)
   const segDist = q => { const ax = inside.x + 0.5 - me.x; const az = inside.z + 0.5 - me.z; const L = ax * ax + az * az || 1; const t = Math.max(0, Math.min(1, ((q.x - me.x) * ax + (q.z - me.z) * az) / L)); return Math.hypot(me.x + t * ax - q.x, me.z + t * az - q.z) }
   if (!safeRun && shootersAbout(e).some(s => Math.hypot(s.position.x - inside.x - 0.5, s.position.z - inside.z - 0.5) < dd && segDist(s.position) < 6)) return false
@@ -812,7 +866,10 @@ function safeRunStep () {
     return 'off'
   }
   if (me.distanceTo(safeRun.lastP) > 0.5) { safeRun.lastP = me.clone(); safeRun.lastAt = Date.now() }
-  if (Date.now() - safeRun.lastAt > 2000 || Date.now() - safeRun.at > 30000 || !fleeTarget || !fleeTarget.isValid) {
+  // (down to the hurt line on the way with a step out of every shooter's sight beside us: that step, not the rest of the run; audit)
+  const hurtOut = bot.health <= hurtLine() && !!fleeTarget && fleeTarget.isValid && RANGED.has(fleeTarget.name) && !!(fleeHeading(fleeTarget) || {}).hidden
+  if (hurtOut) log('reflex', `the safehouse run at hp ${Math.round(bot.health)} - a step out of sight is beside me: taking cover instead`)
+  if (hurtOut || Date.now() - safeRun.lastAt > 2000 || Date.now() - safeRun.at > 30000 || !fleeTarget || !fleeTarget.isValid) {
     safeRun = null; safeRunRefused = Date.now()
     try { bot.pathfinder.setGoal(null) } catch {}
     return 'off'
@@ -891,13 +948,12 @@ function takeCover (e, label) {
   //  stopped steps and a skeleton's 18s of arrows, 2026-10-03. Pinned, the charge is weighed without the trip's caution or the
   //  earlier flight - chargeAffordable - as a shooter in reach is; the arithmetic still decides)
   { const now = Date.now(); const me = bot.entity.position
-    coverTrail.push({ t: now, x: me.x, z: me.z, id: e.id }); while (coverTrail.length && (now - coverTrail[0].t > 2000 || coverTrail[0].id !== e.id)) coverTrail.shift()
+    coverTrail.push({ t: now, x: me.x, z: me.z }); while (coverTrail.length && now - coverTrail[0].t > 2000) coverTrail.shift()
     const old = coverTrail[0]
-    if (old && now - old.t >= 1500 && Math.hypot(me.x - old.x, me.z - old.z) < 0.4 && canSee(e)) pinnedCover = { id: e.id, until: now + 3000 } }
+    if (old && now - old.t >= 1500 && Math.hypot(me.x - old.x, me.z - old.z) < 0.4 && shootersAbout(e).some(s => canSee(s))) pinnedCover = { until: now + 3000 } }
   setActive('flee', label)
-  shieldDown()
   try { bot.pathfinder.setGoal(null) } catch {}
-  const still = () => { for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false) }
+  const still = () => { shieldDown(); for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false) }
   // (out of sight of EVERY shooter about, and nothing landing: a patrol is three to five crossbows - "out of its sight, stay"
   //  read the one picked, and the others shot the bot standing still, keys none, 16 -> 0 in 10s, twice in two minutes,
   //  2026-10-03)
@@ -906,14 +962,23 @@ function takeCover (e, label) {
   const hitNow = Date.now() - lastHurtAt < 2500 && !!lastHurtBy && RANGED.has(lastHurtBy.name)
   if (!hitNow && !shootersAbout(e).some(s => canSee(s))) return still()
   const h = fleeHeading(e)
-  if (h && h.hidden) { bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
+  if (h && h.hidden) { shieldDown(); bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
   const f = bot.entity.position.floored(); const ck = f.x + ',' + f.y + ',' + f.z
   if (!busy && !wallTried.has(ck) && inv.shelterBlock(bot) && e.position.distanceTo(bot.entity.position) >= 3) {
     wallTried.add(ck); if (wallTried.size > 64) wallTried.clear()
+    shieldDown()
     return runBusy('wall off', g => wallOff(e, g), 3500, 'flee')
   }
-  if (h) { bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
-  still(); bot.setControlState('back', !pinned)
+  if (h) { shieldDown(); bot.setControlState('back', false); return steerTo(h, { jump: h.jump, sprint: bot.food > 6 }) }
+  // NO STEP OUT OF SIGHT AND NO WALL: the shield, raised to the nearest shooter that sees us, while the body backs off - it was
+  // lowered on every cover tick, and 25 turns of cover under four crossbows never blocked a bolt with it in the off hand,
+  // 2026-10-07 13:34. Held, not re-raised each tick (a shield blocks only 5 ticks after it goes up)
+  for (const k of ['forward', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
+  bot.setControlState('back', !pinned)
+  const seer = inv.offhandShield(bot) ? shootersAbout(e).filter(s => canSee(s)).sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0] : null
+  if (!seer) return shieldDown()
+  bot.lookAt(seer.position.offset(0, (seer.height || 1.9) * 0.8, 0), true).catch(() => {})
+  shieldUp()
 }
 // every shooter about that can reach us - the one picked first: a patrol, never only the one the rows chose (2026-10-03)
 function shootersAbout (t) {
@@ -1835,6 +1900,12 @@ function tick () {
   const recentlyHurt = now - lastHurtAt < 3000
   const hurtByMelee = recentlyHurt && lastHurtBy && lastHurtBy.isValid && !NEVER_MELEE.has(lastHurtBy.name) && lastHurtBy.position.distanceTo(me) < 6 ? lastHurtBy : null
   let target = close ? close.e : (hurtByMelee || null)
+  // A FIGHT KEEPS ITS TARGET while it is in reach and seen: "the nearest" swapped between a patrol's pillagers every second or
+  // two, each swap a new reckoning (and a new "nearer" for the stand-off clock) - fights of 0.2-1s, no kill, 2026-10-07 13:34
+  if (active && active.kind === 'fight' && fightTargetId != null) {
+    const ft = bot.entities[fightTargetId]
+    if (ft && ft.isValid && ft.position.distanceTo(me) < 5 && !noChase.has(ft.id) && canSee(ft)) target = ft
+  }
   // charge a shooter only with a shield or armour to take the arrows, or when it is already close - an
   // unarmoured run at a skeleton 11b away lost 9 hp before the first swing, and the next one killed the bot
   // (with a bow ready, anything past 5 blocks is shot, not charged)
@@ -1921,6 +1992,10 @@ function tick () {
     runBusy('dig in', g => digIn(g), 30000, null, () => { stopDig(); stopWalk() }).then(() => { if (active && active.kind === 'dig-in') clearActive() })
     return
   }
+  // OUTGUNNED WITHIN REACH OF THE SAFEHOUSE: the run for its door before the blade or the cover here - neither wins against the
+  // patrol's arithmetic (outgunned), the shut door does. Not possible (too far, a shooter on the way, a run that stood still):
+  // the rows below as ever
+  if (target && RANGED.has(target.name) && (safeRun || outgunned(hs, hp)) && safehouseRun(target, `outgunned by ${hs.filter(h => RANGED.has(h.e.name)).length} shooters`)) return
   // (a shooter we are cornered by - pinnedClose - is fought at any hp: the fight row below; cover is what failed there)
   const cornered = !!target && armed && RANGED.has(target.name) && pinnedClose(target, target.position.distanceTo(me))
   // (never a flight from an angry enderman: it teleports beside us - the flight at hp 6 was its last two hits, 2026-10-07; the
@@ -1948,8 +2023,10 @@ function tick () {
       if (!engagementStalled(target, d, hs, now)) takeCover(target, `cover from ${target.name} ${d.toFixed(1)}b (${why})`)
       return
     }
-    if (!active || active.kind !== 'fight') fightTargetId = target.id
+    const fresh = !active || active.kind !== 'fight'
+    if (fresh) fightTargetId = target.id
     setActive('fight', `${target.name} ${d.toFixed(1)}b (${why})`)
+    if (fresh && cornered) fightCornered = true // (after setActive: it clears the mark for any other row)
     if (armed && (!bot.heldItem || !/_(sword|axe)$/.test(bot.heldItem.name))) { runBusy('equip a weapon', () => inv.equipWeapon(bot), 1500); return }
     // THE CHASE THAT CLOSES NOTHING, AND THE FIGHT IN REACH THAT LANDS NOTHING: engagementStalled - no block nearer in 15s (a detour
     //  round a wall takes ~10; audit), no hit of ours landed, no hp lost: the target is let go a minute (noChase), the fight ends
@@ -2011,7 +2088,8 @@ function tick () {
       const hitLately = now - lastHurtAt < 2500 && !!lastHurtBy && RANGED.has(lastHurtBy.name)
       for (const [id, t] of noRelease) if (t < now) noRelease.delete(id)
       const barred = sh.find(s => noRelease.has(s.id))
-      const seenStep = hitLately ? 'hit lately' : barred ? `released into sight of the ${barred.name} lately - holding till they go` : exposedStep(sh)
+      // (and not at an hp one volley takes to the hurt line: hidden is not healed - tooHurtToShow)
+      const seenStep = hitLately ? 'hit lately' : barred ? `released into sight of the ${barred.name} lately - holding till they go` : tooHurtToShow(sh) || exposedStep(sh)
       if (!seenStep) { log('reflex', `hidden from ${sh.length} shooter${sh.length === 1 ? '' : 's'} (${sh.slice(0, 3).map(s => s.name + ' ' + s.position.distanceTo(me).toFixed(1) + 'b').join(', ')}) and a step any way stays hidden - back to work`); lastRelease = { at: now, ids: sh.map(s => s.id) }; return clearActive() }
       const f0 = bot.entity.position.floored(); const ck = f0.x + ',' + f0.y + ',' + f0.z
       const near = sh.slice().sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
@@ -2068,6 +2146,21 @@ function tick () {
       return
     }
     doEat(); return
+  }
+
+  // 5b. HEAL OUT OF SIGHT - hurt, hidden from shooters still about, and one volley of theirs is the hurt line: held still while
+  // the hp comes back (tooHurtToShow), the same hold the cover flee ends in. Let go from the flee to eat, nothing held the body
+  // next: the task walked on at hp 4-5 among a patrol, 2026-10-07 13:34. (Not a witch's: it is outrun, not hidden from; and
+  // never while the eat row's meal is due - its own turn above)
+  if (!active && hp < 20 && !(hungryNow() && inv.foodPoints(bot) > 0)) {
+    const sh = shootersAbout(null).filter(s => !MAGIC.has(s.name) && Math.abs(s.position.y - me.y) < 6)
+    const why = sh.length && !sh.some(s => canSee(s)) ? tooHurtToShow(sh) : null
+    if (why) {
+      fleeTarget = sh.slice().sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
+      setActive('flee', why)
+      for (const k of ['forward', 'back', 'left', 'right', 'sprint', 'jump']) bot.setControlState(k, false)
+      return
+    }
   }
 
   // 6. DRESS - armour in the pack better than what is worn goes on, whoever put it there (a grave, a chest, a pickup).
@@ -2202,4 +2295,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, outgunned, runAffordable, HIDEOUT_REACH, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
