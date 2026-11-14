@@ -1,0 +1,6 @@
+# GBNF grammar for llama.cpp (--grammar-file command.gbnf).
+# Forces the local model to emit exactly: {"command": "...", "reason": "..."}
+# so a small model can never produce a malformed tool call.
+root   ::= "{" ws "\"command\"" ws ":" ws string ws "," ws "\"reason\"" ws ":" ws string ws "}"
+string ::= "\"" ( [^"\\] | "\\" ["\\/bfnrt] )* "\""
+ws     ::= [ \t\n]*

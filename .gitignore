@@ -1,0 +1,61 @@
+# Node
+bot2/node_modules/
+
+# Runtime/personal bot memory (saved waypoints) - not source
+
+# Downloaded/cached schematic files - runtime data, not source
+bot2/schematics/
+
+# Bundled Node runtime (downloaded per-machine, not source)
+node/
+
+# misc
+logs/
+# compact rolling state time-series + supervisor heartbeat (runtime telemetry - live coords)
+logs/state-history.jsonl*
+bot2/heartbeat.json
+*.pid
+
+# generated brain decision log (run data - player names/chat/coords)
+bot2/brain-decisions.jsonl*
+brain-decisions*.jsonl
+*.exe
+
+# build/death resume state (runtime - contains live-world coordinates)
+
+# real connection config (holds the live server address) - copy config.example.json
+bot2/config.json
+# hand/tool-made snapshots of the above (bak-<label>-<hhmmss>) - same live coords, same exclusion
+bot2/*.bak-*
+
+# design/planning docs - kept locally, not in git
+/design-docs/
+/docs/
+
+# session state archives + rotated log artifacts
+state-archive-oldbase/
+*.jsonl.old
+
+# hand/tool-made state snapshots (same live-world coordinates as the runtime state above)
+state-backup-*/
+state-archive-*/
+bot2/memory.json
+bot2/memory.*.json
+bot2/paused.flag
+bot2/site-*.json
+bot2/.mc262-data/
+
+# local test output
+tools/session-scripts/test-events.log
+# poll.sh's marker and window (log lines - live coords)
+tools/session-scripts/poll.mark
+tools/session-scripts/poll.win
+
+# Deploy tooling output (rollback snapshots of bot2 code and the last-deploy stamp) - local only, never source
+tools/session-scripts/rollback/
+tools/session-scripts/last-deploy.txt
+tools/session-scripts/lint/node_modules/
+tools/session-scripts/.deploying
+
+# design walk cache (finished-blueprint walk graph - live coords)
+bot2/design-*.json

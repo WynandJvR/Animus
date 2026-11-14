@@ -1,0 +1,402 @@
+'use strict'
+// Nights. Options, best first: sleep in our bed (skips the night / sets spawn), mine through the
+// night underground, or dig a sealed bunker and wait. The director picks based on the world.
+const { Vec3 } = require('vec3')
+const { goals } = require('mineflayer-pathfinder')
+const world = require('./world')
+const inv = require('./inventory')
+const move = require('./move')
+const act = require('./act')
+const mem = require('./memory')
+const reflex = require('./reflex')
+const { log } = require('./log')
+
+const craft = () => require('./craft')
+
+const BED_RE = /_bed$/
+
+function bedBlock (bot) {
+  const b = mem.get().bed
+  if (!b) return null
+  const blk = bot.blockAt(new Vec3(b.x, b.y, b.z))
+  if (blk && BED_RE.test(blk.name)) return blk
+  if (blk) { // loaded and not a bed any more
+    log('shelter', `my bed at ${move.fmt(b)} is gone`)
+    mem.set('bed', null)
+  }
+  return null
+}
+
+// THE BED LEDGER: the cells of every bed we laid (mem.bedsPlaced) - what makes a standing bed ours. A cell loaded and no
+// bed any more is dropped from it.
+function noteBedPlaced (p) { mem.update(m => { const l = m.bedsPlaced = m.bedsPlaced || []; if (!l.some(q => q.x === p.x && q.y === p.y && q.z === p.z)) l.push({ x: p.x, y: p.y, z: p.z }); if (l.length > 16) l.splice(0, l.length - 16) }) }
+// (the bed we sleep in, and a cell of the ledger: every bed we lay goes through here)
+function layBed (p) { mem.set('bed', p); noteBedPlaced(p) }
+function ourBeds (bot) {
+  const m = mem.get()
+  const cells = (m.bedsPlaced || []).concat(m.bed ? [m.bed] : [])
+  const out = []; const gone = []
+  for (const p of cells) {
+    const b = bot.blockAt(new Vec3(p.x, p.y, p.z))
+    if (b && BED_RE.test(b.name)) { if (!out.some(o => o.position.equals(b.position))) out.push(b) } else if (b) gone.push(p)
+  }
+  if (gone.length) mem.update(m2 => { m2.bedsPlaced = (m2.bedsPlaced || []).filter(q => !gone.some(g => g.x === q.x && g.y === q.y && g.z === q.z)) })
+  return out
+}
+function hasBedItem (bot) { return inv.items(bot).some(i => BED_RE.test(i.name)) }
+
+// Craft a bed from 3 same-colour wool + planks (wool is hunted from sheep).
+async function obtainBed (bot, ctx = {}) {
+  if (hasBedItem(bot)) return true
+  // a bed of ours still standing somewhere near home (left behind by a move): pick it up. OURS - one we laid (the
+  // ledger) or the one we sleep in: "any bed within 48 of home outside the hut" was a player's or a villager's too
+  // (audit R19, 2026-09-27)
+  const home = mem.get().home
+  const stray = ourBeds(bot).filter(b => !move.insideHut(b.position))[0]
+  if (stray) {
+    log('shelter', `picking up the bed standing at ${move.fmt(stray.position)}`)
+    await act.dig(bot, stray.position, { force: true, allowZones: ['base', 'build'] })
+    await act.collectDrops(bot, { radius: 6, maxMs: 6000 })
+    if (hasBedItem(bot)) return true
+  }
+  // a bed lying on the ground near home (dropped when it was moved): pick it up
+  const dropped = Object.values(bot.entities).find(e => {
+    if (!e || e.name !== 'item' || !e.position || (home && world.dist3(e.position, home) > 48)) return false
+    try { const it = e.getDroppedItem(); return it && BED_RE.test(it.name) } catch { return false }
+  })
+  if (dropped) {
+    log('shelter', `picking up the bed lying at ${move.fmt(dropped.position)}`)
+    await move.goTo(bot, new goals.GoalNear(dropped.position.x, dropped.position.y, dropped.position.z, 0.5), { timeoutMs: 30000, label: 'to dropped bed' })
+    await act.collectDrops(bot, { radius: 4, maxMs: 4000 })
+    if (hasBedItem(bot)) return true
+  }
+  // (wool of one colour in the pack AND the chests - the ensure withdraws it: two light grey sheared from the pen sat in the
+  //  chest while the bed went looking for white, 2026-10-03)
+  const woolHeld = () => { const c = Object.assign({}, inv.counts(bot)); for (const [n, k] of Object.entries(require('./base').bankCounts())) c[n] = (c[n] || 0) + k; return Object.keys(c).find(n => /_wool$/.test(n) && c[n] >= 3) }
+  let colour = woolHeld()
+  // (our pen's sheep first, whatever their colour: the white search after it counts white only, and walked 200 blocks for a
+  //  flock with the pen's light grey making three at home; audit)
+  if (!colour) {
+    try {
+      const pen = require('./pen')
+      if ((inv.has(bot, 'shears') || require('./base').bankCount('shears') > 0) && pen.hasWool(bot)) { if (!inv.has(bot, 'shears')) await require('./base').withdraw(bot, 'shears', 1).catch(() => 0); await pen.shear(bot, { shouldStop: ctx.shouldStop }); colour = woolHeld() } // (shear wants them in the pack)
+    } catch (e) { log('shelter', 'shearing the pen for the bed threw: ' + e.message) }
+  }
+  if (colour) return craft().ensure(bot, colour.replace('_wool', '_bed'), 1, ctx)
+  // most sheep are white
+  if (!await craft().ensure(bot, 'white_wool', 3, ctx)) return false
+  return craft().ensure(bot, 'white_bed', 1, ctx)
+}
+
+// Place the bed near home in a spot with a roof or at least walls nearby.
+async function placeBed (bot, near) {
+  const item = inv.items(bot).find(i => BED_RE.test(i.name))
+  if (!item) return false
+  const c = near || world.feetPos(bot)
+  const spots = []
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (const dy of [0, -1, 1]) {
+    const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
+    const floor = world.at(bot, p.x, p.y - 1, p.z); const cell = world.at(bot, p.x, p.y, p.z); const up = world.at(bot, p.x, p.y + 1, p.z)
+    if (!floor || !world.isSolid(floor) || !cell || !world.isAirish(cell) || !up || !world.isAirish(up)) continue
+    if (!move.utilitySpotOK(p)) continue
+    // needs a free head cell beside it (beds are 2 long) in some direction
+    let ok = false
+    for (const [ex, ez] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const f2 = world.at(bot, p.x + ex, p.y - 1, p.z + ez); const c2 = world.at(bot, p.x + ex, p.y, p.z + ez)
+      if (f2 && world.isSolid(f2) && c2 && world.isAirish(c2)) ok = true
+    }
+    if (!ok) continue
+    const roof = !world.openSky(bot, p)
+    spots.push(Object.assign(p, { score: Math.abs(dx) + Math.abs(dz) - (roof ? 6 : 0) }))
+  }
+  spots.sort((a, b) => a.score - b.score)
+  for (const s of spots.slice(0, 6)) {
+    const r = await move.goTo(bot, new goals.GoalNear(s.x, s.y, s.z, 2), { timeoutMs: 20000, label: 'to bed spot', allowZones: ['base'] })
+    if (!r.ok) continue
+    const before = bedCellsNear(bot, s); const packBefore = packBeds(bot)
+    if (await act.place(bot, s, item.name, { faceHint: [[0, -1, 0]], allowZones: ['base'], sneak: false })) {
+      layBed({ x: s.x, y: s.y, z: s.z })
+      log('shelter', `placed my bed at ${move.fmt(s)}`)
+      return true
+    }
+    // a bed occupies two cells: the placed block may be the foot or head - but only a bed that was NOT there before and
+    // left our pack is ours
+    const found = newBedNear(bot, s, before, packBefore)
+    if (found) { layBed({ x: found.position.x, y: found.position.y, z: found.position.z }); log('shelter', `placed my bed at ${move.fmt(found.position)}`); return true }
+  }
+  return false
+}
+
+// The bed in its layout spot: stand on `stand`, click the floor under `foot` - the bed's head goes
+// the way the player faces, so it lies foot->head along the back wall.
+// The beds standing within 3 of p, as keys - a "before" to tell OUR new bed from one that was already there (a villager's,
+// a player's): the fallback claimed any bed near a failed place as "my bed" and the morning dug it (audit B2, 2026-09-27)
+function bedCellsNear (bot, p) { return new Set(world.findBlocks(bot, BED_RE, { maxDistance: 3, count: 8, point: new Vec3(p.x, p.y, p.z) }).map(b => `${b.position.x},${b.position.y},${b.position.z}`)) }
+function packBeds (bot) { return inv.items(bot).filter(i => BED_RE.test(i.name)).reduce((n, i) => n + i.count, 0) }
+function newBedNear (bot, p, before, packBefore) {
+  if (packBeds(bot) >= packBefore) return null // (none left the pack: whatever bed stands there is not ours)
+  return world.findBlocks(bot, BED_RE, { maxDistance: 3, count: 8, point: new Vec3(p.x, p.y, p.z) }).find(b => !before.has(`${b.position.x},${b.position.y},${b.position.z}`)) || null
+}
+
+async function placeBedAt (bot, { foot, head, stand }) {
+  const item = inv.items(bot).find(i => BED_RE.test(i.name))
+  if (!item) return false
+  const r = await move.goTo(bot, new goals.GoalBlock(stand.x, stand.y, stand.z), { timeoutMs: 20000, dig: false, place: false, label: 'to bed stand', allowZones: ['base'] })
+  if (!r.ok) { log('shelter', `couldn't stand at ${move.fmt(stand)} to lay the bed`); return false }
+  bot.clearControlStates()
+  await bot.lookAt(new Vec3(foot.x + 0.5, foot.y, foot.z + 0.5), true).catch(() => {})
+  const before = bedCellsNear(bot, foot); const packBefore = packBeds(bot)
+  await act.place(bot, foot, item.name, { faceHint: [[0, -1, 0]], allowZones: ['base'], sneak: false })
+  await move.sleep(300)
+  const f = world.at(bot, foot.x, foot.y, foot.z); const h = world.at(bot, head.x, head.y, head.z)
+  if (f && BED_RE.test(f.name) && h && BED_RE.test(h.name)) {
+    layBed({ x: foot.x, y: foot.y, z: foot.z })
+    log('shelter', `laid the bed along the back wall at ${move.fmt(foot)}`)
+    return true
+  }
+  // landed the wrong way round: pick it up again rather than leave it across the room
+  const stray = newBedNear(bot, foot, before, packBefore)
+  if (stray) { await act.dig(bot, stray.position, { force: true, allowZones: ['base'] }); await act.collectDrops(bot, { radius: 4, maxMs: 3000 }) }
+  log('shelter', 'the bed did not lie along the back wall - picked it up')
+  return false
+}
+
+async function sleepInBed (bot, { shouldStop } = {}) {
+  let bed = bedBlock(bot)
+  if (!bed) return false
+  // a bed in the safehouse is reached through its door (from outside the back wall it is "2 blocks away"
+  // and unreachable - the walk stuck for a minute every dusk)
+  if (move.insideHut(bed.position) && !move.insideHut(world.feetPos(bot))) {
+    if (!await require('./hut').enterHut(bot, { shouldStop })) return false
+  }
+  const r = await move.goTo(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), { timeoutMs: 90000, label: 'to bed', allowZones: ['base', 'build'] })
+  if (!r.ok) return false
+  bed = bedBlock(bot)
+  if (!bed) return false
+  const t0 = Date.now()
+  while (Date.now() - t0 < 60000) {
+    if (shouldStop && shouldStop()) return false
+    if (!world.canSleepNow(bot)) { await move.sleep(2000); if (world.isDay(bot)) return true; continue }
+    await reflex.waitClear()
+    try {
+      await bot.sleep(bed)
+      log('shelter', 'in bed')
+      mem.update(m => { m.spawnSetAt = m.bed })
+      break
+    } catch (e) {
+      log('shelter', `can't sleep yet: ${e.message}`)
+      await move.sleep(3000)
+    }
+  }
+  // stay in bed until morning (the server may not skip the night if others are awake)
+  while (bot.isSleeping && !world.isDay(bot)) await move.sleep(2000)
+  await move.sleep(500)
+  return true
+}
+
+// THE SPAWN IS SET AT THE BED BY DAY TOO: a bed used in daylight answers "Respawn point set" - no night needed. The
+// spawn moved to another player's bed (the operator played the account) and the bot waited for a night it never reached
+// in time; a death sent it 1500 blocks from its grave, to their base (2026-10-02). Used, and the server's answer heard.
+async function setSpawnAtBed (bot, { shouldStop } = {}) {
+  let bed = bedBlock(bot)
+  if (!bed) return false
+  if (move.insideHut(bed.position) && !move.insideHut(world.feetPos(bot))) {
+    if (!await require('./hut').enterHut(bot, { shouldStop })) return false
+  }
+  const r = await move.goTo(bot, new goals.GoalNear(bed.position.x, bed.position.y, bed.position.z, 2), { timeoutMs: 90000, label: 'to bed', allowZones: ['base', 'build'] })
+  if (!r.ok) return false
+  bed = bedBlock(bot)
+  if (!bed) return false
+  await reflex.waitClear()
+  let heard = null
+  const onMsg = (m, pos) => { const s = String(m && m.toString ? m.toString() : m); if (/respawn point set|set_spawn/i.test(s) || /respawn point set/i.test(JSON.stringify(m && m.json || ''))) heard = s }
+  bot.on('message', onMsg)
+  try {
+    await bot.activateBlock(bed).catch(() => {})
+    for (let i = 0; i < 20 && !heard; i++) await move.sleep(100)
+  } finally { bot.removeListener('message', onMsg) }
+  if (bot.isSleeping) { try { await bot.wake() } catch {} }
+  if (!heard) { log('shelter', `used my bed at ${move.fmt(bed.position)} - no word of the respawn point from the server`); return false }
+  mem.update(m => { m.spawnSetAt = m.bed })
+  log('shelter', `respawn point set at my bed ${move.fmt(bed.position)}`)
+  return true
+}
+
+// Dig a 1x1 pit 2 deep where we stand (dry ground) and put a block over our head. Wait for day.
+function enclosedHere (bot) {
+  const me = world.feetPos(bot)
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, 1]) {
+    const b = world.at(bot, me.x + dx, me.y + dy, me.z + dz)
+    if (!b || !world.isSolid(b)) return false
+  }
+  return true
+}
+
+// Shelter lasts until MORNING - dusk is not day (a bunker entered at dusk used to end at once)
+// Time to come out: day, and either the sun is well up or nothing hostile is about. Dawn (the first
+// ~40s of 'day') still has skeletons and zombies that don't burn yet - one shot the bot dead as it
+// climbed out unarmed.
+function morning (bot) {
+  if (world.phase(bot) !== 'day') return false
+  const t = world.tod(bot)
+  const early = t >= 23000 || t < 1000
+  if (!early) return true
+  return require('./reflex').hostiles(20).length === 0
+}
+async function waitForDay (bot, shouldStop) {
+  while (!morning(bot) && !(shouldStop && shouldStop())) {
+    await move.sleep(3000)
+    if (bot.health <= 0) return false
+  }
+  return true
+}
+
+// Surface shelter: blocks on all four sides at feet and head level, and one overhead.
+// (NEVER INTO THE BUILD'S CELLS: no wall of mine in a cell of the build, its walking space, or a cell an escape just opened
+//  to let the body out. Shut in a chimney nest at dusk, five nights' tries walled the escape's own opening
+//  with dark_oak_planks in a finished stripped_oak_wood cell and left them there on "7/9 sides", 2026-10-07 18:51-18:59.
+//  A wall that would need one of those is no wall-in: said, nothing placed (the director's back-off holds the next try); and a
+//  wall-in that fails takes back what it placed. In the build's zone otherwise as anywhere - the bunker and the dig-in are
+//  refused there already, and this is the night's last defence; audit)
+async function encloseHere (bot, { shouldStop } = {}) {
+  const me = world.feetPos(bot)
+  const build = require('./build'); const job = build.getJob()
+  const opened = new Set(move.escOpenedCells(bot).map(q => `${q.x},${q.y},${q.z}`))
+  const notMine = c => (!!job && job.index.has(`${c.x},${c.y},${c.z}`)) || build.walkProtected(c) || opened.has(`${c.x},${c.y},${c.z}`)
+  const cells = []
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, 1]) cells.push({ x: me.x + dx, y: me.y + dy, z: me.z + dz })
+  cells.push({ x: me.x, y: me.y + 2, z: me.z })
+  { const bad = cells.find(c => { const b = world.at(bot, c.x, c.y, c.z); return !(b && world.isSolid(b)) && notMine(c) }); if (bad) { log('shelter', `not walling in at ${move.fmt(me)}: ${move.fmt(bad)} is a cell of the build, its walking space or an escape's opening`); return false } }
+  let placed = 0; const laid = []
+  for (const c of cells) {
+    const b = world.at(bot, c.x, c.y, c.z)
+    if (b && world.isSolid(b)) { placed++; continue }
+    const f = inv.shelterBlock(bot, { wood: true })
+    if (!f) break
+    if (await act.place(bot, c, f.name, { allowZones: ['base', 'build'] })) { placed++; laid.push(c) }
+  }
+  if (placed < cells.length) {
+    // (what this try laid comes back down: a wall-in that does not close is litter round the body - and maybe its way out)
+    let back = 0
+    for (const c of laid) if (await act.dig(bot, c, { force: true, noWalk: true, allowZones: ['base', 'build'], timeoutMs: 8000 }).catch(() => false)) back++
+    log('shelter', `could only wall in ${placed}/${cells.length} sides${laid.length ? ` - took ${back} of the ${laid.length} I laid back down` : ''}`); return false
+  }
+  log('shelter', `walled in for the night at ${move.fmt(me)}`)
+  mem.update(m => { m.bunker = { x: me.x, y: me.y, z: me.z, walls: cells } })
+  const ok = await waitForDay(bot, shouldStop)
+  // morning: take the walls down again (they are ours and would otherwise litter the landscape) - only the ones this night
+  // laid: a wall already standing beside the body is not ours to take (the castle's own planks counted as "a side"; audit)
+  for (const c of laid) {
+    const b = world.at(bot, c.x, c.y, c.z)
+    if (b && /^(dirt|cobblestone|andesite|diorite|granite|tuff|cobbled_deepslate|netherrack|sand|gravel|.*_planks|.*_log)$/.test(b.name)) await act.dig(bot, c, { force: true, allowZones: ['base', 'build'], timeoutMs: 8000 })
+  }
+  await act.collectDrops(bot, { radius: 4, maxMs: 4000 })
+  return ok
+}
+
+async function bunker (bot, { shouldStop } = {}) {
+  const me = world.feetPos(bot)
+  // already in a hole with walls (last night's bunker, a tunnel): cap it and wait - never dig deeper
+  if (enclosedHere(bot)) {
+    const cap = { x: me.x, y: me.y + 2, z: me.z }
+    const c = world.at(bot, cap.x, cap.y, cap.z)
+    const filler = inv.shelterBlock(bot)
+    if (c && !world.isSolid(c) && filler) {
+      const ok = await act.place(bot, cap, filler.name, { faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] })
+      // a cap cell with nothing beside it (a shallow pit in open ground): go one deeper and plug the
+      // old head cell, which has walls
+      const below = world.at(bot, me.x, me.y - 1, me.z); const below2 = world.at(bot, me.x, me.y - 2, me.z)
+      if (!ok && below && below2 && world.isSolid(below) && world.isSolid(below2) && world.NATURAL_RE.test(below.name) && !world.lavaNear(bot, { x: me.x, y: me.y - 1, z: me.z }, 1) && !world.waterNear(bot, { x: me.x, y: me.y - 1, z: me.z }, 1, -1, 1)) {
+        if (await act.dig(bot, { x: me.x, y: me.y - 1, z: me.z }, { timeoutMs: 10000 })) {
+          await move.sleep(600)
+          const f2 = inv.shelterBlock(bot)
+          if (f2) await act.place(bot, { x: me.x, y: me.y + 1, z: me.z }, f2.name, { faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] })
+        }
+      }
+    }
+    log('shelter', `sheltering in the enclosed spot at ${move.fmt(me)}`)
+    return waitForDay(bot, shouldStop)
+  }
+  let spot = null
+  for (let r = 0; r <= 6 && !spot; r++) {
+    for (let dx = -r; dx <= r && !spot; dx++) for (let dz = -r; dz <= r && !spot; dz++) {
+      if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+      const x = me.x + dx; const z = me.z + dz
+      const gy = world.groundY(bot, x, z, me.y + 3)
+      if (gy == null) continue
+      const y = gy + 1
+      if (!world.standable(bot, x, y, z)) continue
+      if (world.waterNear(bot, { x, y: y - 2, z }, 2, -2, 2) || world.lavaNear(bot, { x, y: y - 2, z }, 2)) continue
+      // three deep: the cap then goes in the ground layer, with ground on every side to place against
+      // (a two-deep pit's cap sits in open air at surface level and can't be placed)
+      const b1 = world.at(bot, x, y - 1, z); const b2 = world.at(bot, x, y - 2, z); const b3 = world.at(bot, x, y - 3, z); const b4 = world.at(bot, x, y - 4, z)
+      if (!b1 || !b2 || !b3 || !b4 || !world.isSolid(b1) || !world.isSolid(b2) || !world.isSolid(b3) || !world.isSolid(b4)) continue
+      if (!world.NATURAL_RE.test(b1.name) || !world.NATURAL_RE.test(b2.name) || !world.NATURAL_RE.test(b3.name) || /gravel|sand/.test(b1.name)) continue
+      // (nor under one: a night's hole under the castle's floor was a shaft the bot could not climb out of, 2026-09-27)
+      if (move.inZone({ x, y, z }, 1) || move.underZone({ x, y, z }, 1)) continue
+      spot = { x, y, z }
+    }
+  }
+  if (!spot) {
+    log('shelter', 'no dry diggable ground for a bunker here - walling in on the surface instead')
+    return encloseHere(bot, { shouldStop })
+  }
+  const r = await move.goTo(bot, new goals.GoalBlock(spot.x, spot.y, spot.z), { timeoutMs: 20000, label: 'to bunker spot' })
+  if (!r.ok) return false
+  log('shelter', `digging in for the night at ${move.fmt(spot)}`)
+  for (const dy of [1, 2, 3]) {
+    const p = { x: spot.x, y: spot.y - dy, z: spot.z }
+    bot.clearControlStates()
+    if (!await act.dig(bot, p, { timeoutMs: 15000 })) return false
+    await move.sleep(400)
+  }
+  // standing off-centre, the hitbox rests on the edge of the next block and never drops in: step to
+  // the middle of the cell so we fall into the pit
+  for (let i = 0; i < 3 && Math.floor(bot.entity.position.y) > spot.y - 3; i++) {
+    const tx = spot.x + 0.5; const tz = spot.z + 0.5
+    const p = bot.entity.position
+    await bot.lookAt(new Vec3(tx, p.y, tz), true).catch(() => {})
+    bot.setControlState('forward', true)
+    const t0 = Date.now()
+    while (Date.now() - t0 < 600 && Math.hypot(bot.entity.position.x - tx, bot.entity.position.z - tz) > 0.15) await move.sleep(25)
+    bot.setControlState('forward', false)
+    await move.sleep(500)
+  }
+  if (Math.floor(bot.entity.position.y) > spot.y - 3) log('shelter', `didn't drop into the pit (at y${Math.floor(bot.entity.position.y)})`)
+  // in the pit; walls are the natural sides. Cap the top.
+  const filler = inv.shelterBlock(bot)
+  const pit = world.feetPos(bot)
+  const cap = { x: pit.x, y: pit.y + 2, z: pit.z }
+  if (filler) {
+    let capped = false
+    for (let i = 0; i < 3 && !capped; i++) capped = await act.place(bot, cap, filler.name, { faceHint: [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] })
+    if (!capped) log('shelter', 'could not cap the bunker - waiting it out anyway')
+  }
+  // seal any side opening at feet/head level
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, 1]) {
+    const c = world.at(bot, pit.x + dx, pit.y + dy, pit.z + dz)
+    const f = inv.shelterBlock(bot)
+    if (c && !world.isSolid(c) && f) await act.place(bot, { x: pit.x + dx, y: pit.y + dy, z: pit.z + dz }, f.name).catch(() => {})
+  }
+  mem.update(m => { m.bunker = { x: pit.x, y: pit.y, z: pit.z } })
+  while (!morning(bot) && !(shouldStop && shouldStop())) {
+    await move.sleep(3000)
+    if (bot.health <= 0) return false
+  }
+  log('shelter', 'morning - leaving the bunker')
+  // climb out: dig the cap and step out, then fill the pit behind us - a player doesn't leave a
+  // two-deep hole in the ground for the next person (or itself) to fall into
+  await act.dig(bot, cap, { timeoutMs: 8000, force: true })
+  const out = await move.goTo(bot, new goals.GoalNear(pit.x, pit.y + 3, pit.z, 2), { timeoutMs: 20000, label: 'out of the bunker' })
+  if (out.ok && Math.floor(bot.entity.position.y) >= pit.y + 3) {
+    for (const dy of [0, 1, 2]) {
+      const p = { x: pit.x, y: pit.y + dy, z: pit.z }
+      const f = inv.shelterBlock(bot)
+      const c = world.at(bot, p.x, p.y, p.z)
+      if (f && c && world.isAirish(c)) await act.place(bot, p, f.name).catch(() => {})
+    }
+  }
+  return true
+}
+
+module.exports = { setSpawnAtBed, enclosedHere, bedBlock, hasBedItem, obtainBed, placeBed, placeBedAt, sleepInBed, bunker, morning, waitForDay }

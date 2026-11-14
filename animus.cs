@@ -1,0 +1,3428 @@
+﻿// Animus control panel - a single native Windows GUI app (WinForms, dark theme).
+// Left column: point the bot at YOUR server (writes bot2/config.json), pick/pull the
+// Ollama brain model, manage schematics, start/stop everything. Right column: the
+// LIVE panel (health/food/position/threat, inventory), a live BOT POV view rendered
+// from the bot's /pov raycast frames, and the activity log + command console.
+// The header band carries the current goal and a chip naming the subsystem that is
+// currently driving the body (threat > hazard > maneuver > stuck > job > activity).
+//
+// Layout: hand-placed absolute pixels driven by ONE central Relayout() on a 12-column
+// grid (AutoScaleMode.None stays - exact pixels on 125%/150% displays). Everything
+// lives in a Dock=Fill AutoScroll host so the window is freely resizable and scrolls
+// instead of clipping below the 980x720 minimum client size.
+// Spacing scale: 4/8/12/16/24. Type scale: FTitle/FHeader/FBody/FLabel/FValue/FMono/FSmall
+// + FLog/FGoal/FCap; glyphs come from Segoe MDL2 Assets (FIconS). All controls are
+// owner-painted (FlatBtn, Bar, Pill, Picker, Dot) for anti-aliased rounded corners.
+// Button tiers: Primary h=36, Secondary h=32, Chip h=26.
+//
+// Compiled to Animus.exe by build-exe.ps1 (uses the .NET Framework compiler that
+// ships with Windows - no SDK needed).
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Management;
+using System.Net;
+using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Windows.Forms;
+using System.Web.Script.Serialization;
+
+class Animus : Form
+{
+    static bool shotMode = false;   // --shot: render and exit, never touch the bot
+    bool autostart = false;         // --start: press Start once the panel is up
+    static string Root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
+    static string BotDir  { get { return Path.Combine(Root, "bot2"); } } // (the one runtime folder: bot/ - the old runtime - is gone)
+    // (the body's command line as run.js spawns it - path.join(__dirname, "main.js"), absolute: pinned to THIS install, so
+    //  another checkout's body is never matched)
+    static string BodyNeedle { get { return Path.Combine(BotDir, "main.js"); } }
+    // (the file the 26.2 data patch itself checks for - patch-mc262.js patchData)
+    static string Mc262Data { get { return Path.Combine(BotDir, "node_modules", "minecraft-data", "minecraft-data", "data", "pc", "26.2", "protocol.json"); } }
+    static string CfgPath { get { return Path.Combine(BotDir, "config.json"); } }
+    static string ModelFile { get { return Path.Combine(Root, "animus-model.txt"); } }
+    const string DefaultModel = "qwen3:14b";
+    const string Goal = "Stay near players, help when asked, and behave like a normal survival player.";
+
+    // ---- spacing scale (4.1) - every offset in layout code comes from here -----
+    const int S1 = 4, S2 = 8, S3 = 12, S4 = 16, S6 = 24;
+    const int LabelW  = 88;   // fixed label column (4.4)
+    const int RowH    = 24;   // info row pitch
+    const int InputH  = 32;
+    const int BtnPrim = 34, BtnSec = 30, BtnChip = 26;
+    const int MinCW   = 980, MinCH = 700;
+    const int RailH   = 56;   // top rail: wordmark, target, dots, run controls
+    const int StateH  = 62;   // state strip: DOING NOW pill | GOAL line
+    const int FooterH = 22;
+    const int MinActH = 140;
+    const int CardHeadH = 34; // card title band - body starts here
+
+    // ---- type scale (4.2) - the only fonts in the file ------------------------
+    static Font FTitle  = new Font("Segoe UI Semibold", 13f);
+    static Font FHeader = new Font("Segoe UI Semibold", 9.25f);
+    static Font FIconS  = new Font("Segoe MDL2 Assets", 8.5f);
+    static Font FLog    = new Font("Segoe UI", 9f);
+    static Font FGoal   = new Font("Segoe UI", 10.5f);
+    static Font FCap    = new Font("Segoe UI Semibold", 7.5f);
+    static Font FBody   = new Font("Segoe UI", 9.75f);
+    static Font FBodyB  = new Font("Segoe UI", 9.75f, FontStyle.Bold);
+    static Font FLabel  = new Font("Segoe UI", 8.25f);
+    static Font FValue  = new Font("Segoe UI Semibold", 9f);
+    static Font FMono   = new Font("Consolas", 8.75f);
+    static Font FSmall  = new Font("Segoe UI", 8f);
+    static Font FSmallB = new Font("Segoe UI", 8f, FontStyle.Bold);
+
+    // ---- palette (4.5) --------------------------------------------------------
+    static Color Bg     = Color.FromArgb(0x0E, 0x10, 0x14);
+    static Color Card   = Color.FromArgb(0x17, 0x19, 0x20);
+    static Color Border = Color.FromArgb(0x25, 0x28, 0x32);
+    static Color Rail   = Color.FromArgb(0x13, 0x15, 0x1B);
+    static Color Input  = Color.FromArgb(0x1F, 0x22, 0x2B);
+    static Color Tile   = Color.FromArgb(0x1C, 0x1F, 0x27);   // stat tiles inside a card
+    static Color Txt    = Color.FromArgb(0xE6, 0xE8, 0xEE);
+    static Color Muted  = Color.FromArgb(0x8C, 0x91, 0xA1);
+    static Color Faint  = Color.FromArgb(0x5E, 0x63, 0x73);
+    static Color Accent = Color.FromArgb(0x70, 0x60, 0xEE);
+    static Color AccentHi = Color.FromArgb(0x82, 0x73, 0xF5);
+    static Color Accent2 = Color.FromArgb(0xA3, 0x98, 0xF7);  // accent on a dark fill (chips, counts)
+    static Color Ghost  = Color.FromArgb(0x26, 0x29, 0x33);
+    static Color GhostHi = Color.FromArgb(0x31, 0x35, 0x41);
+    static Color Danger = Color.FromArgb(0xC4, 0x46, 0x4E);
+    static Color DangerHi = Color.FromArgb(0xD6, 0x55, 0x5D);
+    static Color Green  = Color.FromArgb(0x3F, 0xC2, 0x6B);
+    static Color Blue   = Color.FromArgb(0x5A, 0xA9, 0xE6);
+    static Color Teal   = Color.FromArgb(0x4C, 0xC9, 0xB0);
+    // POV staleness chip (GUI-POV-V3 §4) — exact colours from the design table.
+    static Color PovLive  = Color.FromArgb(110, 199, 132);
+    static Color PovWarn  = Color.FromArgb(224, 177, 88);
+    static Color PovStale = Color.FromArgb(224, 102, 102);
+    static Color Amber  = Color.FromArgb(0xE3, 0xB3, 0x41);
+    static Color Red    = Color.FromArgb(0xF8, 0x51, 0x49);
+    static Color LogBg  = Color.FromArgb(0x12, 0x12, 0x18);
+
+    // ---- controls -------------------------------------------------------------
+    Panel rootScroll;
+    Panel cServer, cBrain, cSchem, cLive, cPov, cAct, cInv;
+    Label title, lblTarget, lblOllama, lblBot, lblBrain, lblStatus, lblGoal, chip;
+    Button btnSetup;
+    Panel railBar, cState;
+    Canvas invCanvas;
+    List<string> invItems = new List<string>();
+    bool setupOpen = false;
+    TextBox tbHost, tbPort, tbUser, tbVer, tbOps, tbCmd, tbGoal;
+    TextBox tbAliases, tbBedrock, tbFloodgate, tbCtlHost, tbCtlPort;
+    Label lbHost, lbPort, lbVer, lbUser, lbAuth, lbOps, lbAliases, lbBed, lbPre, lbApiH, lbApiP;
+    Label lbModel, lbBrainGoal, lbSchemHint, capNow, capGoal;
+    Button btnSave, btnSaveRe, btnRefresh, btnUse, btnApplyGoal, btnAddSchem, btnOpenSchem;
+    Button btnStart, btnStop, btnSend, btnBuild;
+    Dictionary<string, object> lastState;   // latest /state (UI thread) - the build dialog reads pos/home/job
+    Picker cbModel, cbSchem;
+    Button btnOffline, btnMs, btnBrainOn;
+    Label lvName, lvPos, lvBiome, lvTime, lvThreat, lvPlayers, lvHp, lvFood, lvActivity;
+    Label lkPos, lkBiome, lkTime, lkThreat, lkPlayers, lkActivity, lkHp, lkFood;
+    Bar hpFill, foodFill;
+    // the build's progress at a glance (operator, 2026-10-04: "is there a quick way in the gui to see the progress of a
+    // build?" - it was only in the Build dialog's note). Read from /state.buildProgress, already polled: nothing new asked
+    Label lkBuild, lvBuild; Bar buildFill;
+    Label lkHpIcon, lkFoodIcon;
+    RichTextBox liveLog;
+    List<Rectangle> liveTiles = new List<Rectangle>();   // painted behind the status tiles
+    Rectangle dotPill;                                  // painted behind the three rail dots
+    Canvas pov;
+    List<Button> quickBtns = new List<Button>();
+    ToolTip tips = new ToolTip();
+
+    string authValue = "offline";
+    bool brainEnabled = true;
+    string brainGoal = "";
+    string goalText = "—";
+    string chipText = "OFFLINE";
+
+    System.Windows.Forms.Timer statusTimer, liveTimer, povTimer;
+    JavaScriptSerializer json = new JavaScriptSerializer();
+    volatile bool livePolling = false;   // one in-flight live poll at a time
+    volatile bool povBusy = false;
+    volatile bool botUp = false;
+    volatile bool statusPolling = false; // one in-flight status scan at a time
+    Process botProc, brainProc;          // headless children this panel owns
+    volatile int stateFails = 0;         // consecutive /state failures (offline after 3)
+    int liveTick = 0;
+    string lastLogText = "";             // /log delta tracking (whole last response)
+    string lastLogLine = null;           // last rendered /log line (ms-stamped, so unique)
+    List<string> cmdHistory = new List<string>();
+    int histPos = -1;
+
+    // POV state (povFront is only swapped/disposed on the UI thread)
+    Bitmap povFront;
+    string povMode = "no signal — bot offline";
+    string povHud = "";
+    // v3 §4: staleness chip + achieved-fps readout.
+    string povChip = "";
+    Color povChipCol = Color.FromArgb(110, 199, 132);
+    // Achieved-fps ring: distinct frame builds (unix ms), touched only on the POV
+    // background thread (one poll in flight at a time, guarded by povBusy).
+    long[] povBuilds = new long[16];
+    int povBuildAt = 0;
+    long povLastBuilt = 0;
+    bool laidOut = false;
+    bool inLayout = false;
+
+    [STAThread]
+    static void Main(string[] a)
+    {
+        // Process-wide, set once before any WebClient exists: the .NET Framework
+        // default of 2 connections per host throttled /state+/log+/brain+/pov and
+        // showed up as intermittent false "offline" (GUI-POV-V2 §2.2).
+        ServicePointManager.DefaultConnectionLimit = 16;
+        Application.EnableVisualStyles();
+        if (a.Length >= 2 && a[0] == "--shot")
+        {
+            // A SCREENSHOT MUST NOT STOP THE BOT (2026-08-31). --shot builds the real
+            // form and closes it, and OnFormClosing's rule is "closing the panel stops
+            // the bot" - so taking a picture of the panel killed the live bot and its
+            // brain. The rule stays; this path opts out of it, because a --shot process
+            // never OWNED the bot.
+            shotMode = true;
+            try
+            {
+                Animus f = new Animus();
+                f.StartPosition = FormStartPosition.Manual;
+                // "screen": render via PrintWindow - DrawToBitmap cannot render a
+                // RichTextBox's text, so the activity log only shows up this way.
+                bool onScreen = Array.IndexOf(a, "screen") >= 0;
+                f.Location = new Point(-4000, -4000); // off-screen so children realize + paint
+                f.ShowInTaskbar = false;
+                if (a.Length >= 3)
+                {
+                    Match m = Regex.Match(a[2], "^(\\d+)x(\\d+)$");
+                    if (m.Success) f.ClientSize = new Size(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value));
+                }
+                if (Array.IndexOf(a, "setup") >= 0) f.ShowSetup(true);
+                f.Show();
+                for (int i = 0; i < 30; i++) { Application.DoEvents(); Thread.Sleep(120); } // long enough for a live poll to land
+                // "build": picture the build dialog instead of the panel
+                Form shot = f;
+                if (Array.IndexOf(a, "build") >= 0)
+                {
+                    shot = f.MakeBuildDialog();
+                    shot.StartPosition = FormStartPosition.Manual;
+                    shot.Location = new Point(-4000, -4000);
+                    shot.Show(f);
+                    for (int i = 0; i < 5; i++) { Application.DoEvents(); Thread.Sleep(100); }
+                }
+                Bitmap b = new Bitmap(shot.Width, shot.Height);
+                if (onScreen)
+                    using (Graphics g = Graphics.FromImage(b))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        try { PrintWindow(shot.Handle, hdc, 2 /* PW_RENDERFULLCONTENT */); }
+                        finally { g.ReleaseHdc(hdc); }
+                    }
+                else shot.DrawToBitmap(b, new Rectangle(0, 0, b.Width, b.Height));
+                b.Save(a[1]);
+                f.Close();
+            }
+            catch (Exception ex) { File.WriteAllText(a[1] + ".err", ex.ToString()); }
+            return;
+        }
+        // --start: open the panel AND press Start. The panel is the thing that owns the
+        // bot, so "restart the bot" must never mean "run node behind the panel's back".
+        bool autostart = Array.IndexOf(a, "--start") >= 0;
+        Application.Run(new Animus(autostart));
+    }
+
+    Animus() : this(false) { }
+
+    Animus(bool autostart)
+    {
+        this.autostart = autostart;
+        // Hand-placed layout: disable font/DPI auto-scaling so the exact pixel
+        // coordinates are honored on scaled displays (125%/150%) instead of being
+        // reflowed into an overlapping mess. Relayout() does all the arithmetic.
+        AutoScaleMode = AutoScaleMode.None;
+        Text = "Animus";
+        // animus.ico is embedded as a resource (build-exe.ps1 /resource) so each size
+        // picks its own frame; ExtractAssociatedIcon only yields a blurry 32px one.
+        try
+        {
+            using (Stream st = typeof(Animus).Assembly.GetManifestResourceStream("animus.ico"))
+                if (st != null) Icon = new Icon(st);   // all frames: WinForms picks 16 and 32 itself
+                else Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        }
+        catch { }
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
+        BackColor = Bg;
+        Font = FBody;
+        tips.AutoPopDelay = 10000; tips.InitialDelay = 400; tips.ReshowDelay = 100;
+
+        // minimum window = the OS size whose CLIENT area is 980x720
+        ClientSize = new Size(MinCW, MinCH);
+        MinimumSize = Size;
+        ClientSize = new Size(1120, 940);
+
+        // Three fixed bands: a rail that never scrolls (identity + run controls), the
+        // scrolling body, and a one-line status strip. The rail lives on the FORM, not
+        // inside the scroller, so Start/Stop can never be scrolled off the screen.
+        rootScroll = new Panel();
+        rootScroll.AutoScroll = true;
+        rootScroll.BackColor = Bg;
+        Controls.Add(rootScroll);
+        DarkScroll(rootScroll);
+
+        BuildRail();
+        BuildStateStrip();
+        BuildServerCard();
+        BuildBrainCard();
+        BuildSchemCard();
+        BuildLiveCard();
+        BuildPovCard();
+        BuildInvCard();
+        BuildActivityCard();
+        BuildFooter();
+
+        rootScroll.Resize += delegate { Relayout(); };
+        ShowSetup(false);
+        Relayout();
+        laidOut = true;
+
+        RefreshTarget();
+        RefreshSchem();
+        Log("Ready. Set your server, pick a model, then Start Bot + Brain.");
+        RunBg(RefreshModels);
+
+        statusTimer = new System.Windows.Forms.Timer();
+        statusTimer.Interval = 2000;
+        statusTimer.Tick += delegate { RefreshStatus(); };
+        statusTimer.Start();
+        RefreshStatus();
+
+        liveTimer = new System.Windows.Forms.Timer();
+        liveTimer.Interval = 1000;
+        // Guard is set at QUEUE time, not inside the worker: a delayed ThreadPool
+        // dispatch could otherwise let a second tick queue a concurrent poller.
+        liveTimer.Tick += delegate { if (!livePolling) { livePolling = true; RunBg(PollLive); } };
+        liveTimer.Start();
+
+        povTimer = new System.Windows.Forms.Timer();
+        povTimer.Interval = 300;
+        povTimer.Tick += delegate { if (!povBusy) { povBusy = true; RunBg(PollPov); } };
+        povTimer.Start();
+
+        // Shown, not BeginInvoke: in the constructor the form has no window handle yet,
+        // and BeginInvoke on a handle-less control throws before the panel ever appears.
+        // WinForms focuses the first tab stop on show, which selects all of its text - with
+        // setup open that painted the host field solid blue. Nothing is focused until clicked.
+        Shown += delegate { ActiveControl = null; tbHost.SelectionLength = 0; };
+        if (autostart) Shown += delegate { btnStart.PerformClick(); };
+    }
+
+    // =========================================================================
+    // CONSTRUCTION
+    // =========================================================================
+    // ---- the rail: who am I, is it up, and the two buttons that matter --------
+    void BuildRail()
+    {
+        railBar = new Panel();
+        railBar.BackColor = Rail;
+        Controls.Add(railBar);
+        railBar.BringToFront();
+        railBar.Paint += RailPaint;
+
+        title = Lbl(railBar, "Animus", FTitle, Txt);
+        lblTarget = Lbl(railBar, "", FSmall, Muted);
+        lblTarget.AutoEllipsis = true;
+
+        lblOllama = MakeStatus("Ollama");
+        lblBot    = MakeStatus("Bot");
+        lblBrain  = MakeStatus("Brain");
+
+        btnSetup = MakeBtn(railBar, "Setup", BtnPrim, Ghost, GhostHi, Txt, FBodyB, 8,
+                           delegate { ShowSetup(!setupOpen); });
+        btnBuild = MakeBtn(railBar, "Build", BtnPrim, Ghost, GhostHi, Txt, FBodyB, 8, delegate { ShowBuildDialog(); });
+        ((FlatBtn)btnBuild).Glyph = "\uE90F";
+        tips.SetToolTip(btnBuild, "Send the bot to build a blueprint somewhere: pick it, set the spot, go.");
+        ((FlatBtn)btnSetup).Glyph = "\uE713";
+        tips.SetToolTip(btnSetup, "Server, brain model and schematics — everything you set once.");
+
+        btnStart = Primary(railBar, "Start", Accent, AccentHi, delegate {
+            SetStop("Stop", Danger); // reset the stop button when (re)starting
+            string m = cbModel.Text.Trim(); RunBg(delegate { StartBot(); StartBrain(m); });
+        });
+        tips.SetToolTip(btnStart, "Bot + brain run headless — their output lands in the activity log below. "
+                                + "This panel owns them: closing it stops the bot.");
+        btnStop = Primary(railBar, "Stop", Danger, DangerHi, delegate { RunBg(StopAll); });
+        ((FlatBtn)btnStart).Glyph = "\uE768";
+        ((FlatBtn)btnStop).Glyph = "\uE71A";
+        tips.SetToolTip(btnStop, "Stop the bot and the brain.");
+        UpdateRunButtons();
+    }
+
+    // Only ONE of Start/Stop is the loud button: the one that changes the current state.
+    // The other stays clickable but quiet, so "is it running?" is answered by colour alone.
+    bool runShownUp = false, runShownInit = false;
+    void UpdateRunButtons()
+    {
+        if (btnStart == null || btnStop == null) return;
+        bool up = botUp;
+        // A bot that came up without our Start button (reconnect, external launch) must not
+        // wear a stale "Stopped"; a FAILED stop is resolved once the bot is actually down.
+        if (up && btnStop.Text == "Stopped") { btnStop.Text = "Stop"; runShownInit = false; }
+        if (!up && btnStop.Text == "Stop FAILED") { btnStop.Text = "Stop"; runShownInit = false; }
+        if (runShownInit && up == runShownUp) return;
+        runShownInit = true; runShownUp = up;
+        StyleBtn(btnStart, up ? Ghost : Accent, up ? GhostHi : AccentHi, up ? Muted : Color.White);
+        if (btnStop.Text == "Stop" || btnStop.Text == "Stopped")
+            StyleBtn(btnStop, up ? Danger : Ghost, up ? DangerHi : GhostHi, up ? Color.White : Muted);
+    }
+
+    static void StyleBtn(Button b, Color bg, Color hi, Color fg)
+    {
+        b.BackColor = bg; b.FlatAppearance.MouseOverBackColor = hi; b.ForeColor = fg;
+        b.Invalidate();
+    }
+
+    void RailPaint(object s, PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (Pen p = new Pen(Border))
+            g.DrawLine(p, 0, railBar.Height - 1, railBar.Width, railBar.Height - 1);
+        DrawLogo(g, new Rectangle(S6, (RailH - 32) / 2, 32, 32));
+        if (dotPill.Width > 0)
+            using (GraphicsPath gp = RoundPath(dotPill, dotPill.Height / 2))
+            {
+                using (SolidBrush b = new SolidBrush(Card)) g.FillPath(b, gp);
+                using (Pen pen = new Pen(Border)) g.DrawPath(pen, gp);
+            }
+    }
+
+    // The mark: an indigo rounded tile with a stylised block-and-eye. Shared by the
+    // rail and the window icon so the taskbar and the panel look like one product.
+    static void DrawLogo(Graphics g, Rectangle r)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath gp = RoundPath(r, Math.Max(3, r.Width * 7 / 32)))
+        using (LinearGradientBrush lb = new LinearGradientBrush(r, Color.FromArgb(0x8B, 0x7B, 0xFF),
+                                                              Color.FromArgb(0x4E, 0x3C, 0xD0), 45f))
+            g.FillPath(lb, gp);
+        float u = r.Width / 32f;
+        // isometric cube outline
+        PointF c = new PointF(r.X + 16 * u, r.Y + 16.5f * u);
+        // same geometry as tools/make-icon.cs - keep the two in step
+        PointF top = new PointF(c.X, c.Y - 10 * u), bot = new PointF(c.X, c.Y + 10 * u);
+        PointF lt = new PointF(c.X - 9 * u, c.Y - 5 * u), rt = new PointF(c.X + 9 * u, c.Y - 5 * u);
+        PointF lb2 = new PointF(c.X - 9 * u, c.Y + 5 * u), rb = new PointF(c.X + 9 * u, c.Y + 5 * u);
+        using (SolidBrush face = new SolidBrush(Color.FromArgb(80, 255, 255, 255)))
+            g.FillPolygon(face, new PointF[] { top, rt, c, lt });
+        using (Pen pen = new Pen(Color.White, Math.Max(1.2f, 2.2f * u)))
+        {
+            pen.LineJoin = LineJoin.Round;
+            g.DrawPolygon(pen, new PointF[] { top, rt, rb, bot, lb2, lt });
+            g.DrawLine(pen, lt, c); g.DrawLine(pen, rt, c); g.DrawLine(pen, c, bot);
+        }
+    }
+
+    // ---- state strip: the one line that answers "what is it doing right now" --
+    void BuildStateStrip()
+    {
+        cState = MakeCard();
+        cState.Paint += delegate(object s, PaintEventArgs e) {
+            // hairline between the NOW and GOAL columns
+            int x = chip.Right + S6 - S1;
+            using (Pen p = new Pen(Border)) e.Graphics.DrawLine(p, x, 12, x, cState.Height - 12);
+        };
+        capNow = Lbl(cState, "DOING NOW", FCap, Faint);
+        capGoal = Lbl(cState, "GOAL", FCap, Faint);
+        chip = new Pill();
+        chip.Text = chipText; chip.Font = FSmallB; chip.ForeColor = Muted;
+        cState.Controls.Add(chip);
+
+        lblGoal = Lbl(cState, goalText, FGoal, Txt);
+        lblGoal.TextAlign = ContentAlignment.MiddleLeft;
+        lblGoal.AutoEllipsis = true;
+    }
+
+    void BuildServerCard()
+    {
+        cServer = MakeCard();
+        AddHeader(cServer, "Server connection", "\uE774");
+        lbHost = FieldLabel(cServer, "Server host / IP");
+        tbHost = MakeInput(cServer, Cfg("host", "127.0.0.1"));
+        lbPort = FieldLabel(cServer, "Port");
+        tbPort = MakeInput(cServer, Cfg("port", "25565"));
+        lbVer  = FieldLabel(cServer, "Version");
+        tbVer  = MakeInput(cServer, Cfg("version", "1.21.11"));
+        lbUser = FieldLabel(cServer, "Bot username");
+        tbUser = MakeInput(cServer, Cfg("username", "Claudebot"));
+        lbAuth = FieldLabel(cServer, "Auth");
+        btnOffline = MakeToggle(cServer, "Offline");
+        btnMs = MakeToggle(cServer, "Microsoft");
+        btnOffline.Click += delegate { SelectAuth("offline"); };
+        btnMs.Click += delegate { SelectAuth("microsoft"); };
+        SelectAuth(Cfg("auth", "offline"));
+        lbOps = FieldLabel(cServer, "Operators (comma-separated)");
+        tbOps = MakeInput(cServer, CfgArray("operators"));
+        lbAliases = FieldLabel(cServer, "Aliases — extra names it answers to in chat (comma-separated)");
+        tbAliases = MakeInput(cServer, CfgArray("aliases"));
+        lbBed = FieldLabel(cServer, "Bedrock port");
+        tbBedrock = MakeInput(cServer, Cfg("bedrockPort", "19132"));
+        lbPre = FieldLabel(cServer, "Bedrock prefix");
+        tbFloodgate = MakeInput(cServer, Cfg("floodgatePrefix", "."));
+        lbApiH = FieldLabel(cServer, "API host");
+        tbCtlHost = MakeInput(cServer, Cfg("controlHost", "127.0.0.1"));
+        lbApiP = FieldLabel(cServer, "API port");
+        tbCtlPort = MakeInput(cServer, Cfg("controlPort", "3001"));
+        btnSave   = Secondary(cServer, "Save", delegate { SaveConnection(false); });
+        btnSaveRe = Primary(cServer, "Save + Reconnect", Accent, AccentHi, delegate { SaveConnection(true); });
+        ((FlatBtn)btnSaveRe).Glyph = "\uE72C";
+    }
+
+    void BuildBrainCard()
+    {
+        cBrain = MakeCard();
+        AddHeader(cBrain, "Brain", "\uE82F");
+        lbModel = FieldLabel(cBrain, "Model (Ollama)");
+        cbModel = MakePicker(cBrain, true);
+        cbModel.Text = LoadModel();
+        btnRefresh = Secondary(cBrain, "Refresh", delegate { RunBg(RefreshModels); });
+        ((FlatBtn)btnRefresh).Glyph = "\uE72C";
+        btnUse = Secondary(cBrain, "Use / Pull", delegate {
+            string m = cbModel.Text.Trim(); RunBg(delegate { UseModel(m); });
+        });
+        lbBrainGoal = FieldLabel(cBrain, "Goal — what it does when idle (applies live)");
+        tbGoal = MakeInput(cBrain, Goal);
+        btnBrainOn = MakeToggle(cBrain, "Brain on");
+        btnBrainOn.Click += delegate { brainEnabled = !brainEnabled; StyleToggle(btnBrainOn, brainEnabled); RunBg(ApplyBrain); };
+        StyleToggle(btnBrainOn, brainEnabled);
+        btnApplyGoal = Secondary(cBrain, "Apply goal", delegate { RunBg(ApplyBrain); });
+    }
+
+    void BuildSchemCard()
+    {
+        cSchem = MakeCard();
+        AddHeader(cSchem, "Schematics", "\uE80A");
+        cbSchem = MakePicker(cSchem, false);
+        btnAddSchem = Secondary(cSchem, "Add file…", delegate { AddSchem(); });
+        btnOpenSchem = Secondary(cSchem, "Open folder", delegate { OpenSchemFolder(); });
+        ((FlatBtn)btnAddSchem).Glyph = "\uE710";
+        ((FlatBtn)btnOpenSchem).Glyph = "\uE8B7";
+        lbSchemHint = FieldLabel(cSchem, "To build one, use the Build button in the top bar.");
+    }
+
+    void BuildLiveCard()
+    {
+        cLive = MakeCard();
+        AddHeader(cLive, "Status", "\uE9D9");
+        cLive.Paint += delegate(object s, PaintEventArgs e) {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            foreach (Rectangle r in liveTiles)
+                using (GraphicsPath gp = RoundPath(r, 8))
+                using (SolidBrush b = new SolidBrush(Tile)) g.FillPath(b, gp);
+        };
+        lvName = Lbl(cLive, "Bot offline — press Start", FBodyB, Muted);
+        lvName.AutoEllipsis = true;
+        lkHpIcon = Lbl(cLive, "\uEB52", FIconS, Color.FromArgb(0xF0, 0x5A, 0x6E));   // HeartFill
+        lkHp = Lbl(cLive, "Health", FLabel, Muted);
+        lvHp = ValueLabel(cLive); lvHp.TextAlign = ContentAlignment.MiddleRight;
+        hpFill = MakeBar(cLive);
+        lkFoodIcon = Lbl(cLive, "\U0001F356", new Font("Segoe UI Symbol", 9f), Amber);   // meat on the bone
+        lkFood = Lbl(cLive, "Food", FLabel, Muted);
+        lvFood = ValueLabel(cLive); lvFood.TextAlign = ContentAlignment.MiddleRight;
+        foodFill = MakeBar(cLive);
+        lkPos = TileCap(cLive, "POSITION");     lvPos = ValueLabel(cLive);
+        lkTime = TileCap(cLive, "TIME");        lvTime = ValueLabel(cLive);
+        lkBiome = TileCap(cLive, "BIOME");      lvBiome = ValueLabel(cLive);
+        lkThreat = TileCap(cLive, "THREAT");    lvThreat = ValueLabel(cLive);
+        lkPlayers = TileCap(cLive, "PLAYERS NEARBY"); lvPlayers = ValueLabel(cLive);
+        lkActivity = TileCap(cLive, "ACTIVITY");   lvActivity = ValueLabel(cLive);
+        lkBuild = TileCap(cLive, "BUILD");         lvBuild = ValueLabel(cLive);
+        buildFill = MakeBar(cLive); buildFill.Fill = Accent; buildFill.Back = Tile;
+    }
+
+    // Inventory used to be a 400-character run-on sentence squeezed under the vitals.
+    // Same data, drawn as wrapped pills: countable at a glance, and it grows into the
+    // slack instead of being truncated at "…".
+    void BuildInvCard()
+    {
+        cInv = MakeCard();
+        AddHeader(cInv, "Inventory", "\uE7B8");
+        invCanvas = new Canvas();
+        invCanvas.BackColor = Card;
+        cInv.Controls.Add(invCanvas);
+        invCanvas.Paint += InvPaint;
+    }
+
+    void InvPaint(object sender, PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        if (invItems.Count == 0)
+        {
+            TextRenderer.DrawText(g, botUp ? "empty" : "—", FSmall, invCanvas.ClientRectangle, Faint,
+                TextFormatFlags.Left | TextFormatFlags.Top);
+            return;
+        }
+        int x = 0, y = 0, lineH = 24, w = invCanvas.ClientSize.Width;
+        foreach (string raw in invItems)
+        {
+            string name = raw, count = "";
+            Match m = Regex.Match(raw, @"^(.*?)\s*[x×]\s*(\d+)$");
+            if (m.Success) { name = m.Groups[1].Value; count = m.Groups[2].Value; }
+            name = name.Replace('_', ' ');
+            int nw = TextRenderer.MeasureText(g, name, FSmall).Width;
+            int cw = count.Length > 0 ? TextRenderer.MeasureText(g, count, FSmallB).Width + S2 : 0;
+            int pw = nw + cw + 2 * S2 + S1;
+            if (x > 0 && x + pw > w) { x = 0; y += lineH + S1; }
+            if (y + lineH > invCanvas.ClientSize.Height) break;   // silently clip; tooltip has all of it
+            Rectangle r = new Rectangle(x, y, pw, lineH);
+            using (GraphicsPath p = RoundPath(new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), 8))
+            {
+                using (SolidBrush b = new SolidBrush(Input)) g.FillPath(b, p);
+                using (Pen pen = new Pen(Border)) g.DrawPath(pen, p);
+            }
+            TextRenderer.DrawText(g, name, FSmall, new Rectangle(r.X + S2, r.Y, nw + 2, lineH), Txt,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            if (count.Length > 0)
+                TextRenderer.DrawText(g, count, FSmallB, new Rectangle(r.X + S2 + nw + S2, r.Y, cw, lineH), Accent2,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            x += pw + S1 + 2;
+        }
+    }
+
+    void BuildPovCard()
+    {
+        cPov = MakeCard();
+        AddHeader(cPov, "Bot view", "\uE722");
+        pov = new Canvas();
+        pov.BackColor = LogBg;
+        cPov.Controls.Add(pov);
+        Round(pov, 8);
+        pov.Paint += PovPaint;
+    }
+
+    void BuildActivityCard()
+    {
+        cAct = MakeCard();
+        AddHeader(cAct, "Activity", "\uE81C");
+        liveLog = new RichTextBox();
+        liveLog.ReadOnly = true; liveLog.ScrollBars = RichTextBoxScrollBars.Vertical;
+        liveLog.BorderStyle = BorderStyle.None; liveLog.DetectUrls = false; liveLog.WordWrap = true;
+        liveLog.HideSelection = false;
+        // Flat on the card, not a sunken black box inside it: one less border for the eye
+        // to parse, and the log is the thing you read most.
+        liveLog.BackColor = Card; liveLog.ForeColor = Color.FromArgb(0xBF, 0xBF, 0xCC);
+        liveLog.Font = FLog;
+        cAct.Controls.Add(liveLog);
+        DarkScroll(liveLog);
+
+        tbCmd = MakeInput(cAct, "");
+        SetPlaceholder(tbCmd, "Tell the bot what to do…   e.g. come · follow Steve · gather oak_log 10");
+        tbCmd.KeyDown += CmdKeyDown;
+        btnSend = Primary(cAct, "Send", Accent, AccentHi, delegate { SendCmd(); });
+        ((FlatBtn)btnSend).Glyph = "\uE724";
+
+        // quick actions - one click for the commands you use every session
+        string[] quick = { "come", "stop", "follow", "state", "inventory", "eat", "sleep" };
+        for (int i = 0; i < quick.Length; i++)
+        {
+            string q = quick[i];
+            Button b = MakeBtn(cAct, q, BtnChip, Ghost, GhostHi, Muted, FSmallB, BtnChip / 2, delegate { SendQuick(q); });
+            tips.SetToolTip(b, "Send  " + q);
+            quickBtns.Add(b);
+        }
+    }
+
+    void BuildFooter()
+    {
+        // On the FORM, not in the scroller. It is positioned in form coordinates, and a
+        // child sitting below the scroller's own client area is exactly how you conjure a
+        // permanent scrollbar out of a page that already fits.
+        lblStatus = Lbl(this, "", FSmall, Faint);
+        lblStatus.AutoEllipsis = true;
+        lblStatus.TextAlign = ContentAlignment.MiddleLeft;
+    }
+    // =========================================================================
+    // LAYOUT - the single source of truth for every coordinate (4.3)
+    //
+    // TWO VIEWS, ONE WINDOW (2026-08-31). DASHBOARD is what you watch: the POV and the
+    // activity log down the left, vitals and inventory down the right. SETUP is the
+    // material you touch once - server, brain model, schematics - and it takes the whole
+    // body when you ask for it. The old panel showed both at all times, which is why
+    // twelve config fields owned half the screen in every session forever after the one
+    // in which they were filled in. Operator: "it looks very messy".
+    // =========================================================================
+    void ShowSetup(bool on)
+    {
+        setupOpen = on;
+        cServer.Visible = on; cBrain.Visible = on; cSchem.Visible = on;
+        cLive.Visible = !on; cPov.Visible = !on; cInv.Visible = !on; cAct.Visible = !on;
+        if (btnSetup != null) btnSetup.Text = on ? "Close setup" : "Setup";
+        // don't open setup with the host field focused and its text selected (blue)
+        if (on) { ActiveControl = null; tbHost.SelectionLength = 0; }
+        Relayout();
+    }
+
+    void Relayout()
+    {
+        if (rootScroll == null || inLayout) return;
+        inLayout = true;
+        rootScroll.SuspendLayout();
+        try
+        {
+            int W = ClientSize.Width, H = ClientSize.Height;
+            railBar.SetBounds(0, 0, W, RailH);
+            rootScroll.SetBounds(0, RailH, W, Math.Max(120, H - RailH - FooterH - S2));
+            lblStatus.SetBounds(S6, H - FooterH - S1, Math.Max(120, W - 2 * S6), FooterH);
+            LayRail(W);
+
+            // Grid width follows the scroll VIEWPORT (which already excludes the vertical
+            // scrollbar), floored just under the 980 minimum client so a vertical scrollbar
+            // never provokes a horizontal one.
+            int floorW = MinCW - SystemInformation.VerticalScrollBarWidth;
+            int CW = Math.Max(rootScroll.ClientSize.Width, floorW) - 2 * S6;
+            int X0 = S6, viewH = rootScroll.ClientSize.Height;
+
+            // The state strip belongs to BOTH views: "what is it doing right now" is never
+            // something you should have to switch away from setup to read.
+            cState.SetBounds(X0, S4, CW, StateH);
+            LayState(CW);
+            int top = S4 + StateH + S4;
+
+            int bottom = setupOpen ? LaySetup(X0, top, CW, viewH) : LayDash(X0, top, CW, viewH);
+            // Zero, not viewH: asking for a virtual height EQUAL to the viewport is what
+            // put a permanent, useless vertical scrollbar down the side of a page that fits.
+            int need = bottom + S3;
+            rootScroll.AutoScrollMinSize = new Size(0, need > viewH ? need : 0);
+        }
+        finally { rootScroll.ResumeLayout(); inLayout = false; }
+    }
+
+    void LayRail(int W)
+    {
+        int tx = S6 + 32 + S3;
+        title.SetBounds(tx, 8, 160, 24);
+        int y = (RailH - BtnPrim) / 2;
+        int x = W - S6;
+        x -= 96;        btnStop.SetBounds(x, y, 96, BtnPrim);
+        x -= S2 + 104;  btnStart.SetBounds(x, y, 104, BtnPrim);
+        x -= S4 + 124;  btnSetup.SetBounds(x, y, 124, BtnPrim);
+        x -= S2 + 100;  btnBuild.SetBounds(x, y, 100, BtnPrim);
+
+        // The three dots collapse to bare dots before they would collide with the
+        // target line; the tooltip keeps naming them either way.
+        bool compact = x - (tx + 160) < 3 * 74 + 2 * S6;
+        int dw = compact ? 22 : 74;
+        int pillW = 3 * dw + 2 * S3 - (compact ? 0 : S2);
+        int px = x - S4 - pillW;
+        dotPill = new Rectangle(px, (RailH - 30) / 2, pillW, 30);
+        int dx = px + S3;
+        PlaceDot(lblOllama, "Ollama", dx, dw, compact);
+        PlaceDot(lblBot, "Bot", dx + dw, dw, compact);
+        PlaceDot(lblBrain, "Brain", dx + 2 * dw, dw, compact);
+        railBar.Invalidate();
+
+        lblTarget.SetBounds(tx, 31, Math.Max(60, px - S4 - tx), 16);
+    }
+
+    void LayState(int inner)
+    {
+        PlaceChip();
+        capNow.SetBounds(S4, 10, Math.Max(80, chip.Width), 14);
+        int gx = chip.Right + 2 * S6 - S1;
+        capGoal.SetBounds(gx, 10, 120, 14);
+        lblGoal.SetBounds(gx, 26, Math.Max(60, inner - gx - S4), 26);
+        cState.Invalidate();
+    }
+
+    // ---- dashboard -----------------------------------------------------------
+    int LayDash(int X0, int top, int CW, int viewH)
+    {
+        int RW = Math.Min(420, Math.Max(300, CW * 36 / 100));
+        int LW = CW - S4 - RW;
+        int X1 = X0 + LW + S4;
+        int floor = Math.Max(viewH - S3, top + 430);   // both columns end on this line
+
+        // LEFT: the picture, then the log. The POV canvas is sized 16:9 FROM the column
+        // width, so a frame fills it edge to edge - the old fixed 224 px box letterboxed
+        // every frame between two black bars.
+        int availW = LW - 2 * S3;
+        int povH = Math.Max(150, Math.Min(360, availW * 9 / 16));
+        // When the height cap bites, NARROW the canvas to match instead of leaving a
+        // 16:9 frame pillarboxed between two black bars inside an over-wide box.
+        int povW = Math.Min(availW, povH * 16 / 9);
+        int povCardH = CardHeadH + povH + S3;
+        cPov.SetBounds(X0, top, LW, povCardH);
+        pov.SetBounds(S3 + (availW - povW) / 2, CardHeadH, povW, povH);
+
+        int actY = top + povCardH + S4;
+        int actH = Math.Max(MinActH + 74, floor - actY);
+        cAct.SetBounds(X0, actY, LW, actH);
+        LayAct(LW - 2 * S3, actH);
+
+        // RIGHT: vitals (fixed height) then inventory, which absorbs the slack.
+        int liveH = LayLive(RW - 2 * S3) + S3;
+        cLive.SetBounds(X1, top, RW, liveH);
+        int invY = top + liveH + S4;
+        int invH = Math.Max(96, floor - invY);
+        cInv.SetBounds(X1, invY, RW, invH);
+        invCanvas.SetBounds(S3, CardHeadH, RW - 2 * S3, Math.Max(20, invH - CardHeadH - S3));
+
+        return Math.Max(actY + actH, invY + invH);
+    }
+
+    // ---- setup ---------------------------------------------------------------
+    int LaySetup(int X0, int top, int CW, int viewH)
+    {
+        bool two = CW >= 820;
+        int LW = two ? (CW - S4) * 58 / 100 : CW;
+        int X1 = two ? X0 + LW + S4 : X0;
+        int RW = two ? CW - S4 - LW : CW;
+
+        int sh = LayServer(LW - 2 * S3) + S3;
+        cServer.SetBounds(X0, top, LW, sh);
+        int y = two ? top : top + sh + S4;
+        int bh = LayBrain(RW - 2 * S3) + S3;
+        cBrain.SetBounds(X1, y, RW, bh); y += bh + S4;
+        int ch = LaySchem(RW - 2 * S3) + S3;
+        cSchem.SetBounds(X1, y, RW, ch);
+        return Math.Max(top + sh, y + ch);
+    }
+
+    void PlaceDot(Label l, string name, int x, int w, bool compact)
+    {
+        Dot d = l as Dot;
+        if (d != null) d.Caption = compact ? "" : name;
+        l.SetBounds(x, (RailH - 20) / 2, w - (compact ? 0 : S1), 20);
+        tips.SetToolTip(l, name);
+        l.Invalidate();
+    }
+
+    void PlaceChip()
+    {
+        int w = TextRenderer.MeasureText(chip.Text, FSmallB).Width + 30;
+        if (w < 96) w = 96;
+        chip.SetBounds(S4, 28, w, 24);
+    }
+
+    // ---- per-card layouts (return the y of the last control's bottom) ---------
+    const int FieldRow = 56;   // label (15) + gap + input (32) + breathing room
+
+    int LayServer(int inner)
+    {
+        int y = CardHeadH;
+        lbHost.SetBounds(S3, y, inner, 15);
+        PlaceInput(tbHost, S3, y + 18, inner);
+        y += FieldRow;
+
+        int w3 = (inner - 2 * S2) / 3;
+        lbPort.SetBounds(S3, y, w3, 15); PlaceInput(tbPort, S3, y + 18, w3);
+        lbVer.SetBounds(S3 + w3 + S2, y, w3, 15); PlaceInput(tbVer, S3 + w3 + S2, y + 18, w3);
+        lbUser.SetBounds(S3 + 2 * (w3 + S2), y, inner - 2 * (w3 + S2), 15);
+        PlaceInput(tbUser, S3 + 2 * (w3 + S2), y + 18, inner - 2 * (w3 + S2));
+        y += FieldRow;
+
+        lbAuth.SetBounds(S3, y, 172, 15);
+        btnOffline.SetBounds(S3, y + 19, 78, BtnSec);
+        btnMs.SetBounds(S3 + 78 + S2, y + 19, 88, BtnSec);
+        int opsX = S3 + 174 + S3;
+        lbOps.SetBounds(opsX, y, Math.Max(60, inner - 174 - S3), 15);
+        PlaceInput(tbOps, opsX, y + 18, Math.Max(60, inner - 174 - S3));
+        y += FieldRow;
+
+        lbAliases.SetBounds(S3, y, inner, 15);
+        PlaceInput(tbAliases, S3, y + 18, inner);
+        y += FieldRow;
+
+        int w4 = (inner - 3 * S2) / 4;
+        lbBed.SetBounds(S3, y, w4, 15); PlaceInput(tbBedrock, S3, y + 18, w4);
+        lbPre.SetBounds(S3 + w4 + S2, y, w4, 15); PlaceInput(tbFloodgate, S3 + w4 + S2, y + 18, w4);
+        lbApiH.SetBounds(S3 + 2 * (w4 + S2), y, w4, 15); PlaceInput(tbCtlHost, S3 + 2 * (w4 + S2), y + 18, w4);
+        int lastX = S3 + 3 * (w4 + S2), lastW = inner - 3 * (w4 + S2);
+        lbApiP.SetBounds(lastX, y, lastW, 15); PlaceInput(tbCtlPort, lastX, y + 18, lastW);
+        y += FieldRow;
+
+        int saveW = 96, reW = 158;
+        btnSave.SetBounds(S3 + inner - reW - S2 - saveW, y + 2, saveW, BtnSec);
+        btnSaveRe.SetBounds(S3 + inner - reW, y, reW, BtnPrim);
+        return y + BtnPrim;
+    }
+
+    int LayBrain(int inner)
+    {
+        int y = CardHeadH;
+        lbModel.SetBounds(S3, y, inner, 15);
+        int bw1 = 96, bw2 = 100;
+        int cw = Math.Max(80, inner - bw1 - bw2 - 2 * S2);
+        PlacePicker(cbModel, S3, y + 18, cw);
+        btnRefresh.SetBounds(S3 + cw + S2, y + 19, bw1, BtnSec);
+        btnUse.SetBounds(S3 + cw + S2 + bw1 + S2, y + 19, bw2, BtnSec);
+        y += FieldRow;
+
+        lbBrainGoal.SetBounds(S3, y, inner, 15);
+        PlaceInput(tbGoal, S3, y + 18, inner);
+        y += FieldRow;
+
+        btnBrainOn.SetBounds(S3, y, 100, BtnSec);
+        btnApplyGoal.SetBounds(S3 + inner - 100, y, 100, BtnSec);
+        return y + BtnSec;
+    }
+
+    int LaySchem(int inner)
+    {
+        int y = CardHeadH;
+        int bw1 = 100, bw2 = 120;
+        int cw = Math.Max(80, inner - bw1 - bw2 - 2 * S2);
+        PlacePicker(cbSchem, S3, y, cw);
+        btnAddSchem.SetBounds(S3 + cw + S2, y + 1, bw1, BtnSec);
+        btnOpenSchem.SetBounds(S3 + cw + S2 + bw1 + S2, y + 1, bw2, BtnSec);
+        lbSchemHint.SetBounds(S3, y + BtnSec + S2, inner, 15);
+        return y + BtnSec + S2 + 15;
+    }
+
+    int LayLive(int inner)
+    {
+        int y = CardHeadH + 2;
+        lvName.SetBounds(S3, y, inner, 20);
+        y += 30;
+
+        VitalRow(lkHpIcon, lkHp, lvHp, hpFill, y, inner);
+        y += 36;
+        VitalRow(lkFoodIcon, lkFood, lvFood, foodFill, y, inner);
+        y += 40;
+
+        liveTiles.Clear();
+        int half = (inner - S2) / 2;
+        TileAt(lkPos, lvPos, S3, y, half);
+        TileAt(lkTime, lvTime, S3 + half + S2, y, inner - half - S2);
+        y += TileH + S2;
+        TileAt(lkBiome, lvBiome, S3, y, half);
+        TileAt(lkThreat, lvThreat, S3 + half + S2, y, inner - half - S2);
+        y += TileH + S2;
+        TileAt(lkPlayers, lvPlayers, S3, y, inner);
+        y += TileH + S2;
+        TileAt(lkActivity, lvActivity, S3, y, inner);
+        y += TileH + S2;
+        // (the build's tile is a bar taller: done / total over the line, the fill under it)
+        liveTiles.Add(new Rectangle(S3, y, inner, TileH + 10));
+        lkBuild.SetBounds(S3 + S3, y + 7, inner - 2 * S3, 14);
+        lvBuild.SetBounds(S3 + S3, y + 21, Math.Max(40, inner - 2 * S3), 19);
+        buildFill.SetBounds(S3 + S3, y + 44, Math.Max(40, inner - 2 * S3), 6);
+        cLive.Invalidate();
+        return y + TileH + 10;
+    }
+
+    const int TileH = 46;
+    void TileAt(Label k, Label v, int x, int y, int w)
+    {
+        liveTiles.Add(new Rectangle(x, y, w, TileH));
+        k.SetBounds(x + S3, y + 7, w - 2 * S3, 14);
+        v.SetBounds(x + S3, y + 21, Math.Max(40, w - 2 * S3), 19);
+    }
+
+    void VitalRow(Label icon, Label k, Label v, Bar bar, int y, int inner)
+    {
+        icon.SetBounds(S3, y, 18, 16);
+        k.SetBounds(S3 + 20, y, 80, 16);
+        v.SetBounds(S3 + inner - 96, y, 96, 16);
+        bar.SetBounds(S3, y + 21, inner, 8);
+    }
+
+    void LayAct(int inner, int cardH)
+    {
+        int quickY = cardH - S3 - BtnChip;
+        int cmdY = quickY - S3 - InputH;
+        int logH = Math.Max(48, cmdY - S3 - CardHeadH);
+        liveLog.SetBounds(S3, CardHeadH, inner, logH);
+        int sendW = 92;
+        PlaceInput(tbCmd, S3, cmdY, inner - S2 - sendW);
+        btnSend.SetBounds(S3 + inner - sendW, cmdY - 1, sendW, BtnPrim);
+        int qx = S3;
+        for (int i = 0; i < quickBtns.Count; i++)
+        {
+            Button b = quickBtns[i];
+            int w = TextRenderer.MeasureText(b.Text, FSmallB).Width + 2 * S3;
+            w = ((w + 3) / 4) * 4;
+            if (w < 70) w = 70;
+            b.SetBounds(qx, quickY, w, BtnChip);
+            qx += w + S2;
+        }
+    }
+    // =========================================================================
+    // FACTORIES
+    // =========================================================================
+    Label Lbl(Control parent, string text, Font f, Color c)
+    {
+        Label l = new Label();
+        l.Text = text; l.Font = f; l.ForeColor = c;
+        l.BackColor = Color.Transparent; l.AutoSize = false;
+        l.SetBounds(0, 0, 100, 16);
+        parent.Controls.Add(l);
+        return l;
+    }
+
+    // A card is PAINTED, not region-clipped (which is what the old Round() did). Clipping
+    // gives you a rounded silhouette but no edge: every card was the same flat grey slab
+    // as its neighbour, so the eye had nothing to group by. A filled rounded path plus a
+    // one-pixel border reads as a surface, and the parent background shows through the
+    // corners properly instead of being cut out of the control's own region.
+    Panel MakeCard()
+    {
+        Panel p = new Panel();
+        p.BackColor = Bg;
+        p.SetBounds(0, 0, 200, 100);
+        p.Paint += CardPaint;
+        p.Resize += delegate { p.Invalidate(); };
+        rootScroll.Controls.Add(p);
+        return p;
+    }
+
+    static void CardPaint(object s, PaintEventArgs e)
+    {
+        Control c = (Control)s;
+        if (c.Width < 4 || c.Height < 4) return;
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath p = RoundPath(new Rectangle(0, 0, c.Width - 1, c.Height - 1), 12))
+        {
+            using (SolidBrush b = new SolidBrush(Card)) g.FillPath(b, p);
+            using (Pen pen = new Pen(Border)) g.DrawPath(pen, p);
+        }
+        // hairline under the title band - the only rule in the whole panel, and it is
+        // what makes a card's heading read as a heading instead of another value.
+        if (c.Height > CardHeadH + 8 && c.Height > StateH)
+            using (Pen pen = new Pen(Mix(Card, Border, 0.7)))
+                g.DrawLine(pen, S3, CardHeadH - S2, c.Width - S3, CardHeadH - S2);
+    }
+
+    static GraphicsPath RoundPath(Rectangle r, int rad)
+    {
+        GraphicsPath p = new GraphicsPath();
+        if (rad * 2 > r.Width) rad = Math.Max(1, r.Width / 2);
+        if (rad * 2 > r.Height) rad = Math.Max(1, r.Height / 2);
+        int d = rad * 2;
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
+    // Section headings are MUTED, not accent-purple. Accent is reserved for the things
+    // you can act on (primary buttons, an on toggle, an item count) - when every heading
+    // shouts in the accent colour, nothing does.
+    void AddHeader(Control parent, string text, string glyph)
+    {
+        Label ic = Lbl(parent, glyph, FIconS, Accent2);
+        ic.SetBounds(S3, 10, 18, 16);
+        ic.TextAlign = ContentAlignment.MiddleLeft;
+        Label l = Lbl(parent, text, FHeader, Txt);
+        l.SetBounds(S3 + 20, 8, 400, 18);
+    }
+
+    Label TileCap(Control parent, string text)
+    {
+        return Lbl(parent, text, FCap, Faint);
+    }
+
+    Label FieldLabel(Control parent, string text)
+    {
+        Label l = Lbl(parent, text, FLabel, Muted);
+        l.AutoEllipsis = true;
+        return l;
+    }
+
+    Label ValueLabel(Control parent)
+    {
+        Label l = Lbl(parent, "—", FValue, Txt);
+        l.AutoEllipsis = true;
+        l.TextAlign = ContentAlignment.MiddleLeft;
+        return l;
+    }
+
+    Bar MakeBar(Control parent)
+    {
+        Bar b = new Bar();
+        b.SetBounds(0, 0, 100, 8);
+        parent.Controls.Add(b);
+        return b;
+    }
+
+    void SetBar(Bar bar, double v, double max)
+    {
+        double f = max <= 0 ? 0 : Math.Max(0, Math.Min(1, v / max));
+        Color c = v > max * 0.6 ? Green : v > max * 0.3 ? Amber : Red;
+        if (Math.Abs(f - bar.Frac) < 0.001 && bar.Fill == c) return;
+        bar.Frac = f; bar.Fill = c;
+        bar.Invalidate();
+    }
+
+    // Anti-aliased capsule bar. The old nested-panel bar was clipped by a Region, which
+    // has no anti-aliasing - the ends came out as stair-steps.
+    class Bar : Control
+    {
+        public double Frac;
+        public Color Fill = Green;
+        public Color Back = Card; // (what it sits on: the card, or a tile)
+        public Bar()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush bg = new SolidBrush(Back)) g.FillRectangle(bg, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath p = RoundPath(r, Height / 2))
+            using (SolidBrush t = new SolidBrush(Input)) g.FillPath(t, p);
+            int w = (int)Math.Round(Frac * (Width - 1));
+            if (w >= Height)
+                using (GraphicsPath p = RoundPath(new Rectangle(0, 0, w, Height - 1), Height / 2))
+                using (SolidBrush fb = new SolidBrush(Fill)) g.FillPath(fb, p);
+            else if (w > 0)
+                using (SolidBrush fb = new SolidBrush(Fill)) g.FillEllipse(fb, 0, 0, Height - 1, Height - 1);
+        }
+    }
+
+    // Rounded status pill (the DOING NOW chip): tinted fill, coloured dot, coloured text.
+    class Pill : Label
+    {
+        public Pill()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            AutoSize = false;
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush bg = new SolidBrush(Card)) g.FillRectangle(bg, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Color c = ForeColor;
+            using (GraphicsPath p = RoundPath(new Rectangle(0, 0, Width - 1, Height - 1), (Height - 1) / 2))
+            {
+                using (SolidBrush b = new SolidBrush(Mix(Card, c, 0.16))) g.FillPath(b, p);
+                using (Pen pen = new Pen(Mix(Card, c, 0.35))) g.DrawPath(pen, p);
+            }
+            int d = 7, cy = (Height - d) / 2;
+            using (SolidBrush b = new SolidBrush(c)) g.FillEllipse(b, 11, cy, d, d);
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(23, 0, Width - 30, Height), c,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+    }
+
+    TextBox MakeInput(Control parent, string val)
+    {
+        Panel wrap = new Panel();
+        wrap.SetBounds(0, 0, 100, InputH);
+        wrap.BackColor = Card;               // the card shows through the rounded corners
+        wrap.Paint += InputPaint;
+        wrap.Resize += delegate { wrap.Invalidate(); };
+        parent.Controls.Add(wrap);
+        TextBox tb = new TextBox();
+        tb.BorderStyle = BorderStyle.None; tb.BackColor = Input; tb.ForeColor = Txt;
+        tb.Font = FBody; tb.Text = val == null ? "" : val;
+        tb.SetBounds(S3, S2, 80, 20);
+        wrap.Controls.Add(tb);
+        return tb;
+    }
+
+    static void InputPaint(object s, PaintEventArgs e)
+    {
+        Control c = (Control)s;
+        if (c.Width < 4 || c.Height < 4) return;
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath p = RoundPath(new Rectangle(0, 0, c.Width - 1, c.Height - 1), 8))
+        {
+            using (SolidBrush b = new SolidBrush(Input)) g.FillPath(b, p);
+            using (Pen pen = new Pen(Border)) g.DrawPath(pen, p);
+        }
+    }
+
+    static void PlaceInput(TextBox tb, int x, int y, int w)
+    {
+        Panel wrap = tb.Parent as Panel;
+        if (wrap == null) return;
+        if (w < 40) w = 40;
+        wrap.SetBounds(x, y, w, InputH);
+        tb.SetBounds(S3, S2, w - 2 * S3, 20);
+    }
+
+    // grey hint text that clears on focus (WinForms has no native placeholder)
+    void SetPlaceholder(TextBox tb, string hint)
+    {
+        bool[] showing = { tb.Text.Length == 0 };
+        if (showing[0]) { tb.Text = hint; tb.ForeColor = Muted; }
+        tb.GotFocus += delegate { if (showing[0]) { tb.Text = ""; tb.ForeColor = Txt; showing[0] = false; } };
+        tb.LostFocus += delegate { if (tb.Text.Length == 0) { tb.Text = hint; tb.ForeColor = Muted; showing[0] = true; } };
+    }
+
+    // The native ComboBox cannot be themed: it kept a white 1px frame and a light-grey
+    // arrow block on the dark card. A Picker is the same rounded input as every other
+    // field, plus a chevron that opens a dark menu of the choices. Editable pickers
+    // (model) accept typed names; read-only ones (schematic) are pick-only.
+    Picker MakePicker(Control parent, bool editable)
+    {
+        Picker pk = new Picker(editable);
+        parent.Controls.Add(pk);
+        return pk;
+    }
+
+    static void PlacePicker(Picker p, int x, int y, int w)
+    {
+        if (w < 60) w = 60;
+        p.SetBounds(x, y, w, InputH);
+        p.tb.SetBounds(S3, S2, w - 2 * S3 - 22, 20);
+    }
+
+    class Picker : Panel
+    {
+        public TextBox tb = new TextBox();
+        public List<string> Items = new List<string>();
+        bool hot;
+        public Picker(bool editable)
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            BackColor = Card; Cursor = Cursors.Hand;
+            tb.BorderStyle = BorderStyle.None; tb.BackColor = Input; tb.ForeColor = Txt; tb.Font = FBody;
+            tb.ReadOnly = !editable;
+            if (!editable) { tb.Cursor = Cursors.Hand; tb.Click += delegate { Open(); }; tb.TabStop = false; }
+            Controls.Add(tb);
+            Click += delegate { Open(); };
+            tb.KeyDown += delegate(object s, KeyEventArgs e) {
+                if (e.KeyCode == Keys.F4 || (e.Alt && e.KeyCode == Keys.Down)) { e.Handled = true; Open(); }
+            };
+            MouseEnter += delegate { SetHot(); };
+            MouseLeave += delegate { SetHot(); };
+            tb.MouseEnter += delegate { SetHot(); };
+            tb.MouseLeave += delegate { SetHot(); };
+        }
+        // hover = pointer anywhere over the picker, including its child TextBox
+        void SetHot()
+        {
+            bool h = ClientRectangle.Contains(PointToClient(Cursor.Position));
+            if (h != hot) { hot = h; Invalidate(); }
+        }
+        public override string Text { get { return tb.Text; } set { tb.Text = value; } }
+        public new bool Focused { get { return tb.Focused; } }
+        public int SelectedIndex
+        {
+            get { return Items.IndexOf(tb.Text); }
+            set { if (value >= 0 && value < Items.Count) tb.Text = Items[value]; }
+        }
+        void Open()
+        {
+            ContextMenuStrip m = new ContextMenuStrip();
+            m.Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors());
+            m.ShowImageMargin = false; m.Font = FBody; m.BackColor = Input;
+            if (Items.Count == 0)
+            {
+                ToolStripMenuItem none = new ToolStripMenuItem("(nothing to pick)");
+                none.Enabled = false; m.Items.Add(none);
+            }
+            foreach (string it in Items)
+            {
+                string v = it;
+                ToolStripMenuItem mi = new ToolStripMenuItem(v);
+                mi.ForeColor = v == tb.Text ? Accent2 : Txt;
+                mi.Click += delegate { tb.Text = v; };
+                m.Items.Add(mi);
+            }
+            m.MinimumSize = new Size(Width, 0);
+            m.Closed += delegate { BeginInvoke((MethodInvoker)m.Dispose); };
+            m.Show(this, new Point(0, Height + 2));
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush s = new SolidBrush(Card)) g.FillRectangle(s, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath p = RoundPath(new Rectangle(0, 0, Width - 1, Height - 1), 8))
+            {
+                using (SolidBrush b = new SolidBrush(Input)) g.FillPath(b, p);
+                using (Pen pen = new Pen(hot ? Mix(Border, Muted, 0.35) : Border)) g.DrawPath(pen, p);
+            }
+            TextRenderer.DrawText(g, "\uE70D", FIconS, new Rectangle(Width - 30, 0, 22, Height), Muted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    class DarkMenuColors : ProfessionalColorTable
+    {
+        public override Color MenuItemSelected { get { return GhostHi; } }
+        public override Color MenuItemBorder { get { return GhostHi; } }
+        public override Color MenuBorder { get { return Border; } }
+        public override Color ToolStripDropDownBackground { get { return Input; } }
+        public override Color ImageMarginGradientBegin { get { return Input; } }
+        public override Color ImageMarginGradientMiddle { get { return Input; } }
+        public override Color ImageMarginGradientEnd { get { return Input; } }
+        public override Color SeparatorDark { get { return Border; } }
+    }
+
+    Button MakeBtn(Control parent, string text, int h, Color bg, Color hi, Color fg, Font f, int radius, EventHandler onClick)
+    {
+        FlatBtn b = new FlatBtn();
+        b.Text = text; b.SetBounds(0, 0, 76, h);
+        b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderSize = 0;
+        b.BackColor = bg; b.ForeColor = fg; b.Cursor = Cursors.Hand;
+        b.Font = f; b.Radius = radius;
+        b.Surface = parent == railBar ? Rail : Card;
+        b.FlatAppearance.MouseOverBackColor = hi;
+        b.Click += onClick;
+        parent.Controls.Add(b);
+        return b;
+    }
+
+    // Fully owner-painted button: anti-aliased rounded fill (Region clipping gave jagged
+    // corners), hover + pressed states, and an optional Segoe MDL2 glyph before the text.
+    class FlatBtn : Button
+    {
+        public int Radius = 8;
+        public Color Surface = Card;
+        public string Glyph = "";
+        bool hover, down;
+        public FlatBtn()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
+        protected override bool ShowFocusCues { get { return false; } }
+        protected override void OnEnabledChanged(EventArgs e) { hover = down = false; Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnVisibleChanged(EventArgs e) { hover = down = false; base.OnVisibleChanged(e); }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush s = new SolidBrush(Surface)) g.FillRectangle(s, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Color fill = hover ? FlatAppearance.MouseOverBackColor : BackColor;
+            if (down) fill = Mix(fill, Color.Black, 0.12);
+            if (!Enabled) fill = Mix(fill, Surface, 0.5);
+            using (GraphicsPath p = RoundPath(new Rectangle(0, 0, Width - 1, Height - 1), Radius))
+            {
+                using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, p);
+                if (Focused && ShowKeyboardCues)   // keyboard focus must be visible
+                    using (Pen pen = new Pen(Accent2)) g.DrawPath(pen, p);
+            }
+            Color fg = Enabled ? ForeColor : Faint;
+            if (Glyph.Length == 0)
+            {
+                TextRenderer.DrawText(g, Text, Font, ClientRectangle, fg,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                return;
+            }
+            Size ts = TextRenderer.MeasureText(g, Text, Font, Size.Empty, TextFormatFlags.NoPadding);
+            int gw = 16, gap = 7, total = gw + gap + ts.Width;
+            int x = Math.Max(6, (Width - total) / 2);
+            TextRenderer.DrawText(g, Glyph, FIconS, new Rectangle(x, 0, gw, Height), fg,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(x + gw + gap, 0, Width - x - gw - gap, Height), fg,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+        }
+    }
+
+    Button Primary(Control parent, string text, Color bg, Color hi, EventHandler onClick)
+    { return MakeBtn(parent, text, BtnPrim, bg, hi, Color.White, FBodyB, 10, onClick); }
+
+    Button Secondary(Control parent, string text, EventHandler onClick)
+    { return MakeBtn(parent, text, BtnSec, Ghost, GhostHi, Txt, FBodyB, 8, onClick); }
+
+    Button MakeToggle(Control parent, string text)
+    {
+        return MakeBtn(parent, text, BtnSec, Ghost, GhostHi, Muted, FBodyB, 8, delegate { });
+    }
+
+    void SelectAuth(string v)
+    {
+        authValue = (v == "microsoft") ? "microsoft" : "offline";
+        StyleToggle(btnOffline, authValue == "offline");
+        StyleToggle(btnMs, authValue == "microsoft");
+    }
+
+    void StyleToggle(Button b, bool on)
+    {
+        b.BackColor = on ? Accent : Ghost;
+        b.ForeColor = on ? Color.White : Muted;
+        b.FlatAppearance.MouseOverBackColor = on ? AccentHi : GhostHi;
+        b.Invalidate();
+    }
+
+    // A green "● Ollama" in one flat colour is a word that happens to start with a dot.
+    // Painting the dot separately lets the DOT carry the state and the WORD stay legible.
+    class Dot : Label
+    {
+        public bool Up;
+        public string Caption = "";
+        public Dot()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            BackColor = Card;
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            using (SolidBrush bg = new SolidBrush(Card)) g.FillRectangle(bg, ClientRectangle);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int d = 8, cy = (Height - d) / 2;
+            Color c = Up ? Green : Faint;
+            if (Up)  // a soft halo so "up" reads instantly in peripheral vision
+                using (SolidBrush h = new SolidBrush(Color.FromArgb(60, c)))
+                    g.FillEllipse(h, -3, cy - 3, d + 6, d + 6);
+            using (SolidBrush b = new SolidBrush(c)) g.FillEllipse(b, 0, cy, d, d);
+            if (Caption.Length > 0)
+                TextRenderer.DrawText(g, Caption, Font, new Rectangle(d + 7, 0, Width - d - 7, Height),
+                    Up ? Txt : Faint, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    Label MakeStatus(string name)
+    {
+        Dot d = new Dot();
+        d.Caption = name; d.Font = FSmall; d.SetBounds(0, 0, 78, 20);
+        railBar.Controls.Add(d);
+        return d;
+    }
+
+    static Color Mix(Color a, Color b, double t)
+    {
+        return Color.FromArgb(
+            (int)Math.Round(a.R + (b.R - a.R) * t),
+            (int)Math.Round(a.G + (b.G - a.G) * t),
+            (int)Math.Round(a.B + (b.B - a.B) * t));
+    }
+
+    // ---- rounded corners that survive resize (1.6) ---------------------------
+    static void Round(Control c, int r)
+    {
+        ApplyRound(c, r);
+        c.Resize += delegate { ApplyRound(c, r); };
+    }
+
+    static void ApplyRound(Control c, int r)
+    {
+        int w = c.Width, h = c.Height;
+        if (w <= r || h <= r) return;
+        GraphicsPath p = new GraphicsPath();
+        p.AddArc(0, 0, r, r, 180, 90);
+        p.AddArc(w - r, 0, r, r, 270, 90);
+        p.AddArc(w - r, h - r, r, r, 0, 90);
+        p.AddArc(0, h - r, r, r, 90, 90);
+        p.CloseAllFigures();
+        Region old = c.Region;
+        c.Region = new Region(p);
+        p.Dispose();
+        if (old != null) old.Dispose();
+    }
+
+    // ---- dark OS scrollbars (1.5) -------------------------------------------
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    static extern int SetWindowTheme(IntPtr hWnd, string appName, string idList);
+
+    static void DarkScroll(Control c)
+    {
+        c.HandleCreated += delegate { try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { } };
+        if (c.IsHandleCreated) { try { SetWindowTheme(c.Handle, "DarkMode_Explorer", null); } catch { } }
+    }
+
+    // dark title bar on Win10/11
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int val, int size);
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        try { int on = 1; DwmSetWindowAttribute(Handle, 20, ref on, 4); } catch { }
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (laidOut) Relayout();
+    }
+
+    // =========================================================================
+    // LIVE PANEL
+    // =========================================================================
+    static string ControlPort { get { return Cfg("controlPort", "3001"); } }
+    static string ApiBase { get { return "http://127.0.0.1:" + ControlPort; } }
+
+    void PollLive()
+    {
+        // livePolling was already set at queue time by the timer tick.
+        try
+        {
+            string stateTxt = WebGet(ApiBase + "/state");
+            if (stateTxt != null) { stateFails = 0; botUp = true; }
+            else
+            {
+                stateFails++;
+                // Hysteresis: offline only after 3 consecutive failures, online after 1
+                // success. Absorbs a dropped request or a 1-2 s pathfinder stall.
+                if (stateFails < 3 && botUp) return;
+                botUp = false;
+            }
+            if (!botUp)
+            {
+                BeginInvoke((MethodInvoker)delegate {
+                    lvName.Text = "Bot offline — press Start";
+                    lvName.ForeColor = Muted;
+                    UpdateRunButtons();
+                    SetChip("OFFLINE", Muted);
+                    lblGoal.ForeColor = Muted;
+                });
+                return;
+            }
+            Dictionary<string, object> st = null;
+            try { st = json.Deserialize<Dictionary<string, object>>(stateTxt); } catch { }
+            string logTxt = WebGet(ApiBase + "/log");
+            liveTick++;
+            string brainTxt = (liveTick % 4 == 1) ? WebGet(ApiBase + "/brain") : null;
+            BeginInvoke((MethodInvoker)delegate { ApplyLive(st, logTxt, brainTxt); });
+        }
+        catch { }
+        finally { livePolling = false; }
+    }
+
+    void ApplyLive(Dictionary<string, object> st, string logTxt, string brainTxt)
+    {
+        if (brainTxt != null)
+        {
+            try
+            {
+                Dictionary<string, object> b = json.Deserialize<Dictionary<string, object>>(brainTxt);
+                Dictionary<string, object> cfg = Obj(b, "settings");
+                if (cfg != null)
+                {
+                    bool en = cfg.ContainsKey("enabled") && cfg["enabled"] is bool && (bool)cfg["enabled"];
+                    if (en != brainEnabled) { brainEnabled = en; StyleToggle(btnBrainOn, brainEnabled); }
+                    if (cfg.ContainsKey("goal") && cfg["goal"] != null)
+                    {
+                        brainGoal = "" + cfg["goal"];
+                        if (!tbGoal.Focused) tbGoal.Text = brainGoal;
+                    }
+                    // THE MODEL BOX MUST TRACK THE LIVE SETTING (2026-08-26). It was filled once at
+                    // startup from LoadModel() and never refreshed, so it showed whatever was last
+                    // typed here while the brain ran something else. Operator, pointing at it:
+                    // "why does the ui still say this then?" - and rightly: the box read qwen3:14b
+                    // while llama3.2 was resident and serving every decision. Worse, that stored
+                    // setting is what the brain OBEYS - brain-llm.js does (settings.model || LLM_MODEL)
+                    // - so the env var loses to it, and a stale box is not cosmetic, it is the source
+                    // of truth being invisible. Same focus guard as the goal field.
+                    if (cfg.ContainsKey("model") && cfg["model"] != null)
+                    {
+                        string liveModel = "" + cfg["model"];
+                        if (!cbModel.Focused && cbModel.Text != liveModel) cbModel.Text = liveModel;
+                    }
+                }
+            }
+            catch { }
+        }
+        if (st != null)
+        {
+            lvName.Text = S(st, "name") + "   ·   " + S(st, "dimension") + "   ·   " + S(st, "gameMode");
+            lvName.ForeColor = Txt;
+            UpdateRunButtons();
+            double hp = D(st, "health"), food = D(st, "food");
+            lvHp.Text = (hp % 1 == 0 ? hp.ToString("0") : hp.ToString("0.#")) + " / 20";
+            lvFood.Text = food.ToString("0") + " / 20";
+            SetBar(hpFill, hp, 20); SetBar(foodFill, food, 20);
+            Dictionary<string, object> pos = Obj(st, "pos");
+            SetVal(lvPos, pos == null ? "—" : ((int)D(pos, "x")) + ", " + ((int)D(pos, "y")) + ", " + ((int)D(pos, "z")));
+            string biome = S(st, "biome");
+            SetVal(lvBiome, biome.Length == 0 ? "—" : biome.Replace('_', ' '));
+            bool day = B(st, "isDay");
+            bool rain = B(st, "isRaining");
+            SetVal(lvTime, (day ? "day" : "night") + (rain ? " · raining" : ""));
+            lvTime.ForeColor = day ? Txt : Amber;
+            Dictionary<string, object> threat = Obj(st, "threat");
+            SetVal(lvThreat, threat == null ? "none" : S(threat, "type") + " (" + S(threat, "dist") + "m)");
+            lvThreat.ForeColor = threat == null ? Muted : Red;
+            // NOTE: JavaScriptSerializer hands nested JSON arrays back as ArrayList,
+            // not object[] - cast through IList or every list reads as null/empty.
+            System.Collections.IList players = st.ContainsKey("players") ? st["players"] as System.Collections.IList : null;
+            if (players != null && players.Count > 0)
+            {
+                List<string> names = new List<string>();
+                foreach (object p in players)
+                {
+                    Dictionary<string, object> pd = p as Dictionary<string, object>;
+                    if (pd != null) names.Add(S(pd, "name"));
+                }
+                SetVal(lvPlayers, string.Join(", ", names.ToArray()));
+            }
+            else SetVal(lvPlayers, "alone");
+            Dictionary<string, object> act = Obj(st, "activity");
+            // "Doing: idle" was the same lie the header chip used to tell, in a second place. An
+            // activity of null does NOT mean idle - it means no ACTIVITY, while a hold or a waiting
+            // build may still own the bot. Operator, twice: "why does the gui say its idle?" and
+            // "just saying idle if its holding a job is confusing". Same fields, same order as the
+            // chip, so the two lines can never disagree about what the bot is doing.
+            if (act != null) SetVal(lvActivity, S(act, "name") + " · " + S(act, "detail") + " · " + S(act, "forSec") + "s");
+            else {
+                Dictionary<string, object> hAct = Obj(st, "hold");
+                Dictionary<string, object> sAct = Obj(st, "savedBuild");
+                if (hAct != null) SetVal(lvActivity, "holding · " + S(hAct, "label") + " · until " + S(hAct, "wake"));
+                else if (sAct != null) SetVal(lvActivity, (B(sAct, "held") ? "build stood down · " : "build waiting · ") + S(sAct, "name"));
+                else SetVal(lvActivity, "idle");
+            }
+            lvActivity.ForeColor = act == null ? Muted : Txt;
+            System.Collections.IList inv = st.ContainsKey("inventory") ? st["inventory"] as System.Collections.IList : null;
+            invItems.Clear();
+            if (inv != null) foreach (object it in inv) invItems.Add("" + it);
+            // /state lists items in SLOT order, which changes every time the bot picks
+            // something up or swaps a tool into its hand - the pills kept reshuffling.
+            // Stable order instead: tools/gear first, then everything alphabetically.
+            invItems.Sort(delegate(string x, string y) {
+                int gx = InvGear.IsMatch(x) ? 0 : 1, gy = InvGear.IsMatch(y) ? 0 : 1;
+                return gx != gy ? gx - gy : string.CompareOrdinal(x, y);
+            });
+            tips.SetToolTip(invCanvas, invItems.Count == 0 ? "empty"
+                : string.Join("\r\n", invItems.ToArray()));
+            invCanvas.Invalidate();
+
+            // the build: name, placed / total (percent), and the top few things it still waits on
+            Dictionary<string, object> bpr = Obj(st, "buildProgress");
+            if (bpr != null && D(bpr, "total") > 0)
+            {
+                double bDone = D(bpr, "done"), bTot = D(bpr, "total");
+                Dictionary<string, object> bNeed = Obj(bpr, "topStillNeeded");
+                List<string> bWait = new List<string>();
+                if (bNeed != null) foreach (KeyValuePair<string, object> kv in bNeed) { if (bWait.Count >= 3) break; bWait.Add(kv.Value + " " + kv.Key); }
+                lkBuild.Text = "BUILD · " + S(bpr, "name").ToUpperInvariant().Replace('_', ' '); // (the name on the caption: the line keeps the numbers and the waits)
+                SetVal(lvBuild, bDone.ToString("0") + " / " + bTot.ToString("0") + " (" + (100.0 * bDone / bTot).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "%)" +
+                    (bDone >= bTot ? " · done" : bWait.Count > 0 ? " · needs " + string.Join(", ", bWait.ToArray()) : ""));
+                lvBuild.ForeColor = Txt;
+                buildFill.Frac = Math.Max(0, Math.Min(1, bDone / bTot)); buildFill.Fill = bDone >= bTot ? Green : Accent; buildFill.Invalidate();
+            }
+            else { lkBuild.Text = "BUILD"; SetVal(lvBuild, "no build"); lvBuild.ForeColor = Muted; buildFill.Frac = 0; buildFill.Invalidate(); }
+
+            lastState = st;
+            UpdateOverlay(st);
+        }
+        if (logTxt != null && logTxt != lastLogText)
+        {
+            // append only the new tail so the box doesn't jump while you're reading
+            // /log is a SLIDING window (tail of a ring), so a prefix test fails as soon as
+            // the window shifts and the whole tail was re-appended every poll. Dedupe by the
+            // last rendered line instead: render only what comes after its LAST occurrence;
+            // if it fell out of the window (gap, bot restart), render all after a separator.
+            lastLogText = logTxt;
+            List<string> lines = new List<string>();
+            foreach (string l in logTxt.Split('\n')) { string t = l.TrimEnd('\r'); if (t.Trim().Length > 0) lines.Add(t); }
+            int from = 0;
+            bool gap = false;
+            if (lastLogLine != null)
+            {
+                int at = lines.LastIndexOf(lastLogLine);
+                if (at >= 0) from = at + 1; else gap = true;
+            }
+            if (from < lines.Count)
+            {
+                List<string> add = lines.GetRange(from, lines.Count - from);
+                if (gap && liveLog.TextLength > 0) add.Insert(0, "\u0001gap");
+                lastLogLine = lines[lines.Count - 1];
+                WriteLog(add.ToArray());
+            }
+        }
+    }
+
+    void SetVal(Label l, string v)
+    {
+        l.Text = v;
+        tips.SetToolTip(l, v);
+    }
+
+    // ---- overlay: goal line + firing-subsystem chip (3.1 / 3.2) --------------
+    void UpdateOverlay(Dictionary<string, object> st)
+    {
+        Dictionary<string, object> checklist = Obj(st, "checklist");
+        Dictionary<string, object> activity  = Obj(st, "activity");
+        Dictionary<string, object> maneuver  = Obj(st, "maneuver");
+        Dictionary<string, object> stuck     = Obj(st, "stuck");
+        Dictionary<string, object> threat    = Obj(st, "threat");
+        Dictionary<string, object> hazards   = Obj(st, "hazards");
+        Dictionary<string, object> progress  = Obj(st, "progress");
+        bool busy = B(st, "busy"), moving = B(st, "moving");
+        string goal = st.ContainsKey("goal") && st["goal"] != null ? "" + st["goal"] : "";
+
+        // --- goal line (3.2) ---
+        if (checklist != null)
+            goalText = "Goal: " + S(checklist, "step") + "  (" + S(checklist, "n") + "/" + S(checklist, "of") + ")";
+        else if (brainGoal.Length > 0) goalText = "Goal: " + brainGoal;
+        else goalText = "Goal: —";
+        lblGoal.Text = goalText.StartsWith("Goal: ") ? goalText.Substring(6) : goalText;
+        lblGoal.ForeColor = Txt;
+        tips.SetToolTip(lblGoal, goalText);
+
+        // --- firing subsystem (3.1) - first match wins ---
+        if (threat != null) { SetChip("THREAT · " + S(threat, "type") + " " + S(threat, "dist") + "m", Red); return; }
+        if (hazards != null && (B(hazards, "inLava") || B(hazards, "onFire") || B(hazards, "drowning")))
+        {
+            string h = B(hazards, "inLava") ? "lava" : B(hazards, "onFire") ? "fire" : "drowning";
+            SetChip("HAZARD · " + h, Red); return;
+        }
+        if (maneuver != null)
+        {
+            string tier = S(maneuver, "tier");
+            Color c = tier == "SURVIVE" ? Red : tier == "PRESERVE" ? Amber : tier == "PROGRESS" ? Accent : Muted;
+            SetChip(S(maneuver, "label"), c); return;
+        }
+        if (stuck != null) { SetChip("STUCK " + S(stuck, "forSec") + "s", Amber); return; }
+        if (progress != null && B(progress, "stalled")) { SetChip("STALLED", Amber); return; }
+        if (busy && checklist != null)
+        { SetChip("JOB " + S(checklist, "n") + "/" + S(checklist, "of") + " · " + S(checklist, "step"), Accent); return; }
+        if (activity != null)
+        { SetChip(S(activity, "name") + " · " + S(activity, "detail") + " (" + S(activity, "forSec") + "s)", Accent); return; }
+        if (moving && goal.Length > 0) { SetChip("moving · " + goal, Accent); return; }
+        // BEFORE FALLING THROUGH TO "idle" (2026-08-26, operator: "just saying idle if its holding
+        // a job is confusing"). Everything above this point is a subsystem that is ACTING. A bot
+        // that is holding is not acting and not idle - it is waiting on something nameable, and
+        // three different situations used to render identically as "idle": sheltering until dawn,
+        // sitting on a saved build it cannot start, and genuinely having nothing to do.
+        Dictionary<string, object> hold = Obj(st, "hold");
+        if (hold != null)
+        { SetChip("HOLDING · " + S(hold, "label") + " · until " + S(hold, "wake"), Amber); return; }
+        Dictionary<string, object> saved = Obj(st, "savedBuild");
+        if (saved != null)
+        {
+            bool bheld = B(saved, "held");
+            SetChip((bheld ? "BUILD STOOD DOWN · " : "BUILD WAITING · ") + S(saved, "name"), bheld ? Muted : Amber);
+            return;
+        }
+        SetChip(brainEnabled ? "idle · brain on" : "idle", Muted);
+    }
+
+    void SetChip(string text, Color c)
+    {
+        if (text == null || text.Trim().Length == 0) text = "idle";
+        if (text.Length > 46) text = text.Substring(0, 45) + "…";
+        chipText = text;
+        chip.Text = text;
+        chip.ForeColor = c;
+        tips.SetToolTip(chip, text);
+        PlaceChip();
+        // The chip is as wide as its text, so the goal line has to move with it -
+        // laying the goal out once at start-up left "BUILD WAITING" printing straight
+        // through it.
+        if (cState != null && cState.Width > 0) LayState(cState.Width);
+    }
+
+    static string S(Dictionary<string, object> d, string k)
+    { return d != null && d.ContainsKey(k) && d[k] != null ? d[k].ToString() : "—"; }
+    static double D(Dictionary<string, object> d, string k)
+    {
+        if (d == null || !d.ContainsKey(k) || d[k] == null) return 0;
+        try { return Convert.ToDouble(d[k]); } catch { return 0; }
+    }
+    static bool B(Dictionary<string, object> d, string k)
+    { return d != null && d.ContainsKey(k) && d[k] is bool && (bool)d[k]; }
+    static Dictionary<string, object> Obj(Dictionary<string, object> d, string k)
+    { return d != null && d.ContainsKey(k) ? d[k] as Dictionary<string, object> : null; }
+
+    // =========================================================================
+    // BOT POV (2.6 / 2.7)
+    // =========================================================================
+    class Canvas : Panel
+    {
+        public Canvas()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+    }
+
+    void PollPov()
+    {
+        // povBusy was already set at queue time by the timer tick.
+        try
+        {
+            int status;
+            string body = WebGet(ApiBase + "/pov", out status, 1000);
+            if (body == null || status != 200)
+            {
+                // The POV panel never makes its own liveness judgement: a connect
+                // failure while botUp is still true is transient (the /state
+                // hysteresis owns the verdict) — hold the last frame and retry.
+                if (status == 0 && botUp) return;
+                string mode = status == 404 ? "POV unavailable — older bot (no /pov)"
+                            : status == 0 ? "no signal — bot offline"
+                            : "no signal — bot not spawned";
+                BeginInvoke((MethodInvoker)delegate { povMode = mode; povChip = ""; povTimer.Interval = 2000; pov.Invalidate(); });
+                return;
+            }
+            PovInfo info;
+            Bitmap bmp = DecodeFrame(body, out info);
+            if (bmp == null)
+            {
+                // Back off too: a permanently bad decoder pairing used to hot-loop at 300 ms.
+                BeginInvoke((MethodInvoker)delegate { povMode = "no signal — bad frame"; povChip = ""; povTimer.Interval = 2000; pov.Invalidate(); });
+                return;
+            }
+            BeginInvoke((MethodInvoker)delegate {
+                Bitmap old = povFront;
+                povFront = bmp; povHud = info.Hud; povMode = null;
+                povChip = info.Chip; povChipCol = info.ChipCol;
+                tips.SetToolTip(pov, info.Tip);
+                povTimer.Interval = 300;
+                if (old != null) old.Dispose();
+                pov.Invalidate();
+            });
+        }
+        catch { }
+        finally { povBusy = false; }
+    }
+
+    // Vanilla Minecraft's directional light multipliers, indexed by face:
+    // 0 = top, 1 = bottom, 2 = X side (east/west), 3 = Z side (north/south).
+    static readonly double[] FaceMul = { 1.00, 0.50, 0.60, 0.80 };
+
+    // Background-thread decode: header JSON + pixel plane (+ optional v2 face plane)
+    // -> 32bpp Bitmap. v1 frames (no "v" in the header, or a missing/short face
+    // plane) render flat, exactly as before — a new GUI never garbles an old bot.
+    // Everything the HUD strip needs out of one decode (v3 §4). A small carrier
+    // class keeps DecodeFrame's signature from growing four more `out` params.
+    class PovInfo
+    {
+        public string Hud = "";
+        public string Chip = "";
+        public Color ChipCol = Color.FromArgb(110, 199, 132);
+        public string Tip = "";
+    }
+
+    Bitmap DecodeFrame(string body, out PovInfo info)
+    {
+        info = new PovInfo();
+        int nl = body.IndexOf('\n');
+        if (nl <= 0) return null;
+        string head = body.Substring(0, nl);
+        string rest = body.Substring(nl + 1).Trim();
+        JavaScriptSerializer js = new JavaScriptSerializer();
+        Dictionary<string, object> h = js.Deserialize<Dictionary<string, object>>(head);
+        if (h == null) return null;
+        int w = (int)D(h, "w"), ht = (int)D(h, "h");
+        if (w <= 0 || ht <= 0) return null;
+        int px = 2 * w * ht, fp = w * ht;
+
+        int ver = h.ContainsKey("v") ? (int)D(h, "v") : 1;
+        string data = rest;
+        string faces = null;
+        if (ver >= 2 && rest.Length >= px + 1 + fp && rest[px] == '\n')
+        {
+            data = rest.Substring(0, px);
+            faces = rest.Substring(px + 1, fp);
+        }
+        if (data.Length < px) return null;
+        double fovH = D(h, "fovH"); if (fovH <= 0) fovH = 70;
+        double maxDist = D(h, "maxDist"); if (maxDist <= 0) maxDist = 32;
+        double pitch = D(h, "pitch"), yaw = D(h, "yaw");
+        bool day = B(h, "day");
+        int ageMs = (int)D(h, "ageMs");
+        // v3 §3.4: additive header keys. Both are optional — an older bot sends
+        // neither, and D()/B() already return 0/false for absent keys, so the
+        // ContainsKey guard below only distinguishes "0 ms" from "not reported".
+        bool busy = B(h, "busy");
+        int buildMs = h.ContainsKey("buildMs") ? (int)D(h, "buildMs") : -1;
+        Dictionary<string, object> pos = Obj(h, "pos");
+
+        System.Collections.IList pal = h.ContainsKey("palette") ? h["palette"] as System.Collections.IList : null;
+        Color[] palCol = new Color[64];
+        for (int i = 0; i < 64; i++) palCol[i] = Color.FromArgb(138, 130, 120);
+        if (pal != null)
+            for (int i = 0; i < pal.Count && i < 62; i++) palCol[i] = ColorForBlock("" + pal[i]);
+
+        Color skyTop = day ? Color.FromArgb(96, 148, 210) : Color.FromArgb(12, 14, 24);
+        Color skyHor = day ? Color.FromArgb(160, 190, 225) : Color.FromArgb(28, 32, 48);
+        Color voidC  = Color.FromArgb(18, 18, 22);
+
+        double tanHalfV = Math.Tan(fovH * Math.PI / 360.0) * ht / (double)w;
+        double maxElev = pitch + Math.Atan(tanHalfV);
+
+        Bitmap bmp = new Bitmap(w, ht, PixelFormat.Format32bppRgb);
+        BitmapData bd = bmp.LockBits(new Rectangle(0, 0, w, ht), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+        try
+        {
+            byte[] buf = new byte[bd.Stride * ht];
+            for (int row = 0; row < ht; row++)
+            {
+                double ndcY = 1.0 - 2.0 * (row + 0.5) / ht;
+                double elev = pitch + Math.Atan(ndcY * tanHalfV);
+                Color rowSky;
+                if (elev > 0 && maxElev > 0)
+                {
+                    double t = elev / maxElev; if (t > 1) t = 1;
+                    rowSky = Mix(skyHor, skyTop, t);
+                }
+                // Below-horizon misses used to paint near-black voidC, which put black
+                // blotches in downhill vistas where the eye expects haze.
+                else rowSky = Mix(skyHor, voidC, 0.35);
+                int o = row * bd.Stride;
+                for (int col = 0; col < w; col++)
+                {
+                    int k = 2 * (row * w + col);
+                    int pi = B64(data[k]);
+                    int qd = B64(data[k + 1]);
+                    Color c;
+                    if (pi == 63) c = rowSky;
+                    else
+                    {
+                        c = palCol[pi];
+                        if (faces != null)
+                        {
+                            // Face shading BEFORE fog: every edge where two faces meet
+                            // gets a guaranteed brightness step, so geometry reads.
+                            int fi = B64(faces[row * w + col]);
+                            if (fi < 0 || fi > 3) fi = 0;
+                            double m = FaceMul[fi];
+                            if (m < 1.0)
+                                c = Color.FromArgb((int)(c.R * m), (int)(c.G * m), (int)(c.B * m));
+                        }
+                        double d = (qd >= 63 ? 63 : qd) / 63.0;
+                        double f = 0.60 * Math.Pow(d, 1.5);
+                        c = Mix(c, skyHor, f);
+                    }
+                    int p = o + col * 4;
+                    buf[p] = c.B; buf[p + 1] = c.G; buf[p + 2] = c.R; buf[p + 3] = 255;
+                }
+            }
+            Marshal.Copy(buf, 0, bd.Scan0, buf.Length);
+        }
+        finally { bmp.UnlockBits(bd); }
+
+        string ps = pos == null ? "—" : ((int)D(pos, "x")) + ", " + ((int)D(pos, "y")) + ", " + ((int)D(pos, "z"));
+        int yawDeg = (int)Math.Round(yaw * 180.0 / Math.PI);
+        double fps = NoteBuild(ageMs);
+        info.Hud = ps + "  ·  yaw " + yawDeg + "°  ·  " + Fmt1(fps) + " fps";
+
+        // Staleness chip (v3 §4). The raw ms number is gone: a bare "6000" told
+        // the user nothing, so freshness now reads as a word plus seconds, and a
+        // deliberate body-first backoff says "busy" rather than looking broken.
+        string secs = Fmt1(ageMs / 1000.0) + "s";
+        if (ageMs <= 700) { info.Chip = "live"; info.ChipCol = PovLive; }
+        else if (ageMs <= 2500) { info.Chip = (busy ? "busy " : "lag ") + secs; info.ChipCol = PovWarn; }
+        else { info.Chip = "stale " + secs; info.ChipCol = PovStale; }
+
+        string tip = "POV frame age " + ageMs + " ms — how old the picture is.\r\n"
+                   + "live ≤ 0.7s  ·  lag / busy ≤ 2.5s  ·  stale > 2.5s\r\n";
+        if (busy)
+            tip += "busy: the bot is deliberately slowing POV to keep its body responsive — "
+                 + "a choppy panel here is correct.\r\n";
+        tip += "achieved " + Fmt1(fps) + " fps";
+        if (buildMs >= 0) tip += "  ·  last frame took " + buildMs + " ms to build";
+        info.Tip = tip;
+        return bmp;
+    }
+
+    static string Fmt1(double v)
+    { return v.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture); }
+
+    // Achieved framerate, measured GUI-side (v3 §4) — never assumed from the poll
+    // interval. builtAt is reconstructed as now - ageMs, so repeated polls that are
+    // served the SAME cached frame collapse onto one value; only distinct builds
+    // are counted. 60 ms of tolerance absorbs clock/serialisation jitter while
+    // staying far below the ~300 ms gap between real builds.
+    double NoteBuild(int ageMs)
+    {
+        long nowMs = DateTime.UtcNow.Ticks / 10000L;
+        long builtAt = nowMs - ageMs;
+        if (povLastBuilt == 0 || Math.Abs(builtAt - povLastBuilt) > 60)
+        {
+            povLastBuilt = builtAt;
+            povBuilds[povBuildAt] = builtAt;
+            povBuildAt = (povBuildAt + 1) % povBuilds.Length;
+        }
+        int n = 0;
+        for (int i = 0; i < povBuilds.Length; i++)
+            if (povBuilds[i] != 0 && nowMs - povBuilds[i] <= 3000) n++;
+        return n / 3.0;
+    }
+
+    static int B64(char c)
+    {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '-') return 62;
+        return 63;
+    }
+
+    void PovPaint(object sender, PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        Rectangle r = pov.ClientRectangle;
+        using (SolidBrush b = new SolidBrush(LogBg)) g.FillRectangle(b, r);
+        Bitmap f = povFront;
+        if (f != null)
+        {
+            // letterbox the 16:9 frame inside the panel, nearest-neighbour (crisp voxels)
+            double ar = f.Width / (double)f.Height;
+            int dw = r.Width, dh = (int)Math.Round(dw / ar);
+            if (dh > r.Height) { dh = r.Height; dw = (int)Math.Round(dh * ar); }
+            Rectangle dst = new Rectangle(r.X + (r.Width - dw) / 2, r.Y + (r.Height - dh) / 2, dw, dh);
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            g.DrawImage(f, dst);
+            if (povMode != null)
+                using (SolidBrush dim = new SolidBrush(Color.FromArgb(165, 0, 0, 0))) g.FillRectangle(dim, r);
+            int cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+            using (Pen p = new Pen(Color.FromArgb(160, 255, 255, 255)))
+            {
+                g.DrawLine(p, cx - 4, cy, cx + 4, cy);
+                g.DrawLine(p, cx, cy - 4, cx, cy + 4);
+            }
+            Rectangle strip = new Rectangle(r.X + S2, r.Bottom - 20, r.Width - S4, 16);
+            // Both HUD runs sit on a dark backing plate: the colour of the chip IS
+            // the message, so an amber "busy" or a red "stale" — and the fps figure
+            // beside it — must stay readable over a bright sky or a snow field,
+            // which plain 60%-white text does not.
+            if (povHud.Length > 0)
+            {
+                Size hs = TextRenderer.MeasureText(g, povHud, FSmall);
+                PovPlate(g, new Rectangle(strip.X - S1, strip.Y - 1, hs.Width + S1, strip.Height + 2));
+                TextRenderer.DrawText(g, povHud, FSmall, strip,
+                    Color.FromArgb(196, 255, 255, 255), TextFormatFlags.Left);
+            }
+            if (povChip.Length > 0)
+            {
+                Size cs = TextRenderer.MeasureText(g, povChip, FSmallB);
+                PovPlate(g, new Rectangle(strip.Right - cs.Width - S1, strip.Y - 1,
+                                          cs.Width + S1 * 2, strip.Height + 2));
+                TextRenderer.DrawText(g, povChip, FSmallB, strip,
+                    Color.FromArgb(235, povChipCol.R, povChipCol.G, povChipCol.B),
+                    TextFormatFlags.Right);
+            }
+        }
+        if (povMode != null)
+            TextRenderer.DrawText(g, povMode, FSmall, r, Muted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
+
+    static void PovPlate(Graphics g, Rectangle box)
+    {
+        using (SolidBrush b = new SolidBrush(Color.FromArgb(120, 0, 0, 0))) g.FillRectangle(b, box);
+    }
+
+    // ---- block name -> colour (2.7 rule table, first match wins) -------------
+    static Regex[] PovRx;
+    static Color[] PovCol;
+    static Dictionary<string, Color> DyeMap;
+    static Regex DyeRx = new Regex("^(white|light_gray|gray|black|brown|red|orange|yellow|lime|green|cyan|light_blue|blue|purple|magenta|pink)_(wool|concrete|terracotta|carpet|bed)", RegexOptions.Compiled);
+
+    static void InitPovColors()
+    {
+        if (PovRx != null) return;
+        // First match wins, so order matters: soul_sand MUST precede sand|sandstone
+        // (it used to fall through and render as bright beach sand in the nether).
+        string[] pats = {
+            "^(water|bubble_column|kelp|seagrass|tall_seagrass)", "lava", "^grass_block$",
+            "^(short_grass|grass|tall_grass|fern|large_fern)$",
+            "^(dirt|coarse_dirt|rooted_dirt|farmland|mud|podzol)", "red_sand",
+            "soul_sand|soul_soil", "sand|sandstone",
+            "gravel", "snow", "ice", "(_log|_wood|_stem|_hyphae)$", "leaves$", "planks$",
+            "deepslate", "obsidian|blackstone|basalt", "netherrack", "coal_ore", "iron_ore",
+            "copper_ore", "gold_ore", "redstone_ore", "diamond_ore", "emerald_ore", "lapis_ore",
+            "^(stone|cobblestone|stone_bricks|mossy_cobblestone|andesite|tuff|bedrock|smooth_stone|infested)",
+            "^moss_|^cactus$|^vine$|^lily_pad$",
+            "diorite|calcite|quartz", "granite", "glass",
+            "torch|lantern|fire|glowstone|shroomlight|campfire",
+            "^(wheat|carrots|potatoes|beetroots|sugar_cane|bamboo)",
+            "poppy|tulip|dandelion|orchid|allium|daisy|cornflower|lily",
+            "chest|barrel|crafting_table|bookshelf|fence|ladder", "^clay$" };
+        int[,] rgb = {
+            {47,86,166},{226,110,26},{110,162,64},{92,132,60},{134,96,67},{190,102,33},
+            {84,62,50},{219,207,163},{104,99,94},{240,244,248},{145,183,253},{87,63,38},
+            {60,110,40},{162,130,78},{78,78,84},{24,20,32},{114,58,57},{72,72,72},
+            {205,178,154},{175,112,82},{214,190,100},{160,60,60},{98,219,214},{70,190,110},
+            {60,90,180},{125,125,125},{66,124,50},{200,200,198},{149,103,85},{168,200,220},
+            {255,200,90},{140,160,70},{196,156,170},{162,130,78},{158,164,176} };
+        PovRx = new Regex[pats.Length];
+        PovCol = new Color[pats.Length];
+        for (int i = 0; i < pats.Length; i++)
+        {
+            PovRx[i] = new Regex(pats[i], RegexOptions.Compiled);
+            PovCol[i] = Color.FromArgb(rgb[i, 0], rgb[i, 1], rgb[i, 2]);
+        }
+        DyeMap = new Dictionary<string, Color>();
+        DyeMap["white"] = Color.FromArgb(233, 236, 236);
+        DyeMap["light_gray"] = Color.FromArgb(142, 142, 134);
+        DyeMap["gray"] = Color.FromArgb(62, 68, 71);
+        DyeMap["black"] = Color.FromArgb(20, 21, 25);
+        DyeMap["brown"] = Color.FromArgb(96, 59, 31);
+        DyeMap["red"] = Color.FromArgb(161, 39, 34);
+        DyeMap["orange"] = Color.FromArgb(240, 118, 19);
+        DyeMap["yellow"] = Color.FromArgb(248, 197, 39);
+        DyeMap["lime"] = Color.FromArgb(112, 185, 25);
+        DyeMap["green"] = Color.FromArgb(84, 109, 27);
+        DyeMap["cyan"] = Color.FromArgb(21, 137, 145);
+        DyeMap["light_blue"] = Color.FromArgb(58, 175, 217);
+        DyeMap["blue"] = Color.FromArgb(53, 57, 157);
+        DyeMap["purple"] = Color.FromArgb(121, 42, 172);
+        DyeMap["magenta"] = Color.FromArgb(189, 68, 179);
+        DyeMap["pink"] = Color.FromArgb(237, 141, 172);
+    }
+
+    static Color ColorForBlock(string name)
+    {
+        InitPovColors();
+        if (name == null) return Color.FromArgb(138, 130, 120);
+        string n = name.ToLowerInvariant();
+        int c = n.IndexOf(':');
+        if (c >= 0) n = n.Substring(c + 1);
+        for (int i = 0; i < PovRx.Length; i++) if (PovRx[i].IsMatch(n)) return PovCol[i];
+        Match m = DyeRx.Match(n);
+        if (m.Success && DyeMap.ContainsKey(m.Groups[1].Value)) return DyeMap[m.Groups[1].Value];
+        return Color.FromArgb(138, 130, 120);
+    }
+
+    // =========================================================================
+    // COMMAND CONSOLE
+    // =========================================================================
+    void CmdKeyDown(object s, KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; SendCmd(); }
+        else if (e.KeyCode == Keys.Up && cmdHistory.Count > 0)
+        {
+            e.SuppressKeyPress = true;
+            histPos = Math.Max(0, histPos < 0 ? cmdHistory.Count - 1 : histPos - 1);
+            tbCmd.Text = cmdHistory[histPos]; tbCmd.SelectionStart = tbCmd.TextLength;
+        }
+        else if (e.KeyCode == Keys.Down && histPos >= 0)
+        {
+            e.SuppressKeyPress = true;
+            histPos++;
+            if (histPos >= cmdHistory.Count) { histPos = -1; tbCmd.Text = ""; }
+            else { tbCmd.Text = cmdHistory[histPos]; tbCmd.SelectionStart = tbCmd.TextLength; }
+        }
+    }
+
+    void SendCmd()
+    {
+        string c = tbCmd.Text.Trim();
+        if (c.Length == 0 || c.StartsWith("command…")) return;
+        cmdHistory.Add(c); histPos = -1;
+        tbCmd.Text = ""; tbCmd.Focus();
+        SendQuick(c);
+    }
+
+    void SendQuick(string c)
+    {
+        if (!botUp) { Log("Bot is offline — press Start first."); return; }
+        RunBg(delegate {
+            string r = WebPost(ApiBase + "/op/cmd", c);
+            if (r == null) Log("Command failed — bot not responding.");
+            // the reply also lands in the activity log via the bot's own (ui-cmd) line
+        });
+    }
+
+    void ApplyBrain()
+    {
+        if (!botUp) { Log("Brain settings apply live once the bot is running."); return; }
+        string goal = "";
+        tbGoal.Invoke((MethodInvoker)delegate { goal = tbGoal.Text.Trim(); });
+        string body = json.Serialize(new Dictionary<string, object> {
+            { "model", cbModel.Text.Trim() }, { "goal", goal }, { "enabled", brainEnabled } });
+        string r = WebPost(ApiBase + "/brain", body);
+        Log(r != null ? ("Brain " + (brainEnabled ? "on" : "paused") + ", goal applied.") : "Could not reach the bot to apply brain settings.");
+    }
+
+    // ---- tiny HTTP (short timeouts so a dead bot never freezes the UI) -------
+    class QuickClient : WebClient
+    {
+        readonly int ms;
+        public QuickClient() : this(3000) { }
+        public QuickClient(int timeoutMs) { ms = timeoutMs; }
+        protected override WebRequest GetWebRequest(Uri address)
+        {
+            WebRequest r = base.GetWebRequest(address);
+            r.Timeout = ms;
+            return r;
+        }
+    }
+
+    static string WebGet(string url)
+    {
+        int status;
+        return WebGet(url, out status);
+    }
+
+    // Returns the body, and the HTTP status via out (0 = connect/timeout failure).
+    // c.Encoding = UTF8 so «», … and → from /log and /state don't decode as ANSI.
+    // Liveness endpoints use the 3000 ms default (a real bot can block its loop for
+    // 1 s+); /pov passes its own 1000 ms budget since it is cosmetic.
+    static string WebGet(string url, out int status)
+    {
+        return WebGet(url, out status, 3000);
+    }
+
+    static string WebGet(string url, out int status, int timeoutMs)
+    {
+        status = 0;
+        try
+        {
+            using (QuickClient c = new QuickClient(timeoutMs))
+            {
+                c.Encoding = Encoding.UTF8;
+                string s = c.DownloadString(url);
+                status = 200;
+                return s;
+            }
+        }
+        catch (WebException ex)
+        {
+            try
+            {
+                HttpWebResponse hr = ex.Response as HttpWebResponse;
+                if (hr != null) status = (int)hr.StatusCode;
+            }
+            catch { }
+            return null;
+        }
+        catch { return null; }
+    }
+
+    // For slow operator commands (a "build" parses the whole blueprint before it answers):
+    // a long timeout, and an HTTP error's BODY is returned ("HTTP 500: error: …") instead
+    // of null, so the caller can show the bot's actual reason. null = no answer at all.
+    static string WebPostSlow(string url, string body, int timeoutMs)
+    {
+        try
+        {
+            using (QuickClient c = new QuickClient(timeoutMs))
+            {
+                c.Encoding = Encoding.UTF8;
+                return c.UploadString(url, body);
+            }
+        }
+        catch (WebException ex)
+        {
+            HttpWebResponse hr = ex.Response as HttpWebResponse;
+            if (hr == null) return null;
+            try
+            {
+                using (StreamReader rd = new StreamReader(hr.GetResponseStream(), Encoding.UTF8))
+                    return "HTTP " + (int)hr.StatusCode + ": " + rd.ReadToEnd();
+            }
+            catch { return "HTTP " + (int)hr.StatusCode; }
+            finally { hr.Close(); }
+        }
+        catch { return null; }
+    }
+
+    static string WebPost(string url, string body)
+    {
+        try
+        {
+            using (QuickClient c = new QuickClient())
+            {
+                c.Encoding = Encoding.UTF8;
+                return c.UploadString(url, body);
+            }
+        }
+        catch { return null; }
+    }
+
+    // ---- status + log ------------------------------------------------------
+    void RefreshTarget()
+    {
+        lblTarget.Text = Cfg("username", "?") + "  ·  " + Cfg("host", "?") + ":" + Cfg("port", "?") +
+                         "  ·  " + Cfg("version", "?") + "  ·  " + Cfg("auth", "?");
+        tips.SetToolTip(lblTarget, lblTarget.Text);
+    }
+
+    // Off the UI thread, always. This used to run a 300 ms TCP connect and TWO full
+    // process enumerations inside a 2 s UI timer - a guaranteed periodic hitch in a
+    // panel whose whole job is to feel live.
+    void RefreshStatus()
+    {
+        if (statusPolling) return;
+        statusPolling = true;
+        RunBg(delegate {
+            try
+            {
+                bool oll = PortOpen(11434);
+                bool bot = ProcAlive(botProc), brain = ProcAlive(brainProc);
+                // Only pay for the WMI sweep when a handle can't answer (bot started
+                // outside this panel, or run.js re-execed itself).
+                if (!bot || !brain)
+                {
+                    bool wBot, wBrain;
+                    ScanChildren(out wBot, out wBrain);
+                    bot = bot || wBot; brain = brain || wBrain;
+                }
+                bot = bot || botUp;
+                bool fOll = oll, fBot = bot, fBrain = brain;
+                try { BeginInvoke((MethodInvoker)delegate {
+                    SetDot(lblOllama, fOll); SetDot(lblBot, fBot); SetDot(lblBrain, fBrain);
+                }); } catch { }
+            }
+            finally { statusPolling = false; }
+        });
+    }
+
+    static bool ProcAlive(Process p) { try { return p != null && !p.HasExited; } catch { return false; } }
+
+    // One WMI sweep, both answers: two NodePidsMatching() calls would pay for the
+    // (not cheap) process enumeration twice on every status tick.
+    void ScanChildren(out bool bot, out bool brain)
+    {
+        bot = false; brain = false;
+        try
+        {
+            using (ManagementObjectSearcher q = new ManagementObjectSearcher(
+                "SELECT CommandLine FROM Win32_Process WHERE Name = 'node.exe'"))
+                foreach (ManagementObject o in q.Get())
+                {
+                    string cl = null;
+                    try { cl = o["CommandLine"] as string; } catch { }
+                    if (string.IsNullOrEmpty(cl)) continue;
+                    if (cl.IndexOf("run.js", StringComparison.OrdinalIgnoreCase) >= 0) bot = true;
+                    else if (cl.IndexOf("brain-llm.js", StringComparison.OrdinalIgnoreCase) >= 0) brain = true;
+                }
+        }
+        catch { }
+    }
+
+    void SetDot(Label l, bool up)
+    {
+        Dot d = l as Dot;
+        if (d == null || d.Up == up) return;
+        d.Up = up;
+        d.Invalidate();
+    }
+
+    void Log(string msg)
+    {
+        if (lblStatus.InvokeRequired) { lblStatus.BeginInvoke((MethodInvoker)delegate { Log(msg); }); return; }
+        lblStatus.Text = msg;              // single-line status strip; hover for the full text
+        tips.SetToolTip(lblStatus, msg);   // the live activity box carries the history
+    }
+
+    // Push one line into the activity box. The panel's own events (start/stop) and the
+    // children's console output share the log with the bot's /log feed, so there is one
+    // place to look when something goes wrong - not a console window behind the panel.
+    void AppendLog(string line)
+    {
+        if (liveLog == null) return;
+        if (liveLog.InvokeRequired) { try { liveLog.BeginInvoke((MethodInvoker)delegate { AppendLog(line); }); } catch { } return; }
+        WriteLog(new string[] { line.Replace("\n", " ") });
+    }
+
+    // ---- activity log rendering ----------------------------------------------
+    // The raw feed is "[2026-09-27T18:22:44.044+02:00] (body) (body) message…" - a wall
+    // of ISO stamps and repeated tags. Rendered as: short time (faint) · tag (coloured
+    // per subsystem) · message, with over-long diagnostic lines cut (the full text stays
+    // in the bot's log files). Warnings/errors are tinted so they stand out.
+    static readonly Regex LogIsoRx = new Regex(@"^\[(\d{4}-\d\d-\d\dT(\d\d:\d\d:\d\d)[^\]]*)\]\s*((?:\([\w\-\.]+\)\s*)*)(.*)$");
+    static readonly Regex LogTagRx = new Regex(@"^\[([\w\-\.]+)\]\s*(.*)$");
+    static readonly Regex LogWarnRx = new Regex(@"\b(error|fail(ed|s)?|died|death|killed|crash|exception|stuck|refus\w*|can't|cannot|lost)\b", RegexOptions.IgnoreCase);
+    static readonly Regex LogGoodRx = new Regex(@"\b(arrived|done|complete[d]?|built|placed|crafted|saved|connected|spawned|success)\b", RegexOptions.IgnoreCase);
+    static readonly Regex InvGear = new Regex(@"(sword|pickaxe|_axe|shovel|_hoe|bow\b|crossbow|trident|shield|helmet|chestplate|leggings|boots|boat|bucket|shears|flint_and_steel|fishing_rod|elytra|mace|spyglass|compass|clock|totem_of_undying|brush|carrot_on_a_stick|lead\b)");
+    const int LogMaxLine = 260;
+    const int LogTagW = 9;   // fits "blueprint"; longer tags are cut so messages stay aligned
+
+    static Color TagColor(string tag)
+    {
+        switch (tag)
+        {
+            case "move": case "nav": case "path": return Blue;
+            case "build": case "blueprint": case "schem": return Accent2;
+            case "brain": case "llm": case "chat": case "say": return Teal;
+            case "combat": case "threat": case "death": case "grave": case "graves": return Red;
+            case "food": case "farm": case "gather": case "mine": case "mining": case "craft": case "smelt": return Amber;
+            case "gui": case "login": return Green;
+            default: return Muted;
+        }
+    }
+
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, ref Point p);
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+    const int EM_GETSCROLLPOS = 0x04DD, EM_SETSCROLLPOS = 0x04DE, WM_SETREDRAW = 0x000B;
+
+    void WriteLog(string[] lines)
+    {
+        if (liveLog == null) return;
+        // Follow the tail only when the reader is already at the bottom; otherwise keep
+        // their scroll position exactly where it is while lines arrive.
+        bool atBottom = true;
+        if (liveLog.IsHandleCreated && liveLog.TextLength > 0)
+        {
+            int lastVisible = liveLog.GetCharIndexFromPosition(new Point(2, liveLog.ClientSize.Height - 2));
+            atBottom = liveLog.GetLineFromCharIndex(lastVisible) >= liveLog.GetLineFromCharIndex(liveLog.TextLength) - 1;
+        }
+        Point scroll = Point.Empty;
+        int selStart = liveLog.SelectionStart, selLen = liveLog.SelectionLength;
+        if (liveLog.IsHandleCreated)
+        {
+            SendMessage(liveLog.Handle, EM_GETSCROLLPOS, IntPtr.Zero, ref scroll);
+            SendMessage(liveLog.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+        }
+        try
+        {
+            liveLog.ReadOnly = false;
+            foreach (string raw0 in lines)
+            {
+                string raw = raw0.TrimEnd('\r', ' ');
+                if (raw.Length == 0) continue;
+                if (raw == "\u0001gap")
+                {
+                    if (liveLog.TextLength > 0) Put("\n", FLog, Txt);
+                    liveLog.SelectionIndent = 0; liveLog.SelectionHangingIndent = 0;
+                    Put("        ···  log resumed", FSmall, Faint);
+                    continue;
+                }
+                string time = "", tag = "", msg = raw;
+                Match m = LogIsoRx.Match(raw);
+                if (m.Success)
+                {
+                    time = m.Groups[2].Value;
+                    Match t = Regex.Match(m.Groups[3].Value, @"\(([\w\-\.]+)\)");
+                    if (t.Success) tag = t.Groups[1].Value;
+                    msg = m.Groups[4].Value;
+                }
+                else
+                {
+                    Match t = LogTagRx.Match(raw);
+                    if (t.Success) { tag = t.Groups[1].Value; msg = t.Groups[2].Value; }
+                    time = DateTime.Now.ToString("HH:mm:ss");
+                    // a child's console line may itself carry the bot's stamped format
+                    Match inner = LogIsoRx.Match(msg);
+                    if (inner.Success)
+                    {
+                        time = inner.Groups[2].Value;
+                        Match t2 = Regex.Match(inner.Groups[3].Value, @"\(([\w\-\.]+)\)");
+                        if (t2.Success) tag = t2.Groups[1].Value;
+                        msg = inner.Groups[4].Value;
+                    }
+                }
+                if (!m.Success && tag.Length == 0 && raw0.StartsWith(" ")) time = "";   // continuation line
+                if (msg.Length > LogMaxLine) msg = msg.Substring(0, LogMaxLine - 1) + "…";
+                Color mc = LogWarnRx.IsMatch(msg) ? Amber : LogGoodRx.IsMatch(msg) ? Mix(Txt, Green, 0.35) : Color.FromArgb(0xC8, 0xCB, 0xD6);
+
+                if (liveLog.TextLength > 0) Put("\n", FLog, Txt);
+                // wrapped continuation lines hang under the message, not under the time
+                liveLog.Select(liveLog.TextLength, 0);
+                liveLog.SelectionIndent = 0;
+                liveLog.SelectionHangingIndent = LogHang();
+                Put((time.Length > 0 ? time : "        ") + "  ", FMono, Faint);
+                Put(tag.PadRight(LogTagW).Substring(0, LogTagW) + "  ", FMono, TagColor(tag.ToLowerInvariant()));
+                Put(msg, FLog, mc);
+            }
+            // keep the box bounded: drop the oldest third - but only while following the
+            // tail, so a reader scrolled up never has the text yanked out from under them
+            if (liveLog.TextLength > 80000 && atBottom && selLen == 0)
+            {
+                int cut = liveLog.GetFirstCharIndexFromLine(liveLog.GetLineFromCharIndex(liveLog.TextLength / 3) + 1);
+                if (cut > 0) { liveLog.Select(0, cut); liveLog.SelectedText = ""; }
+            }
+        }
+        finally
+        {
+            liveLog.ReadOnly = true;
+            if (liveLog.IsHandleCreated)
+            {
+                if (atBottom && selLen == 0) { liveLog.Select(liveLog.TextLength, 0); liveLog.ScrollToCaret(); }
+                else
+                {
+                    // the reader is reading or has text selected: give both back untouched
+                    if (selStart + selLen <= liveLog.TextLength) liveLog.Select(selStart, selLen);
+                    SendMessage(liveLog.Handle, EM_SETSCROLLPOS, IntPtr.Zero, ref scroll);
+                }
+                SendMessage(liveLog.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+                liveLog.Invalidate();
+            }
+        }
+    }
+
+    int logHang = -1;
+    int LogHang()
+    {
+        if (logHang < 0)
+            using (Graphics g = liveLog.CreateGraphics())
+                logHang = TextRenderer.MeasureText(g, "00:00:00  " + "".PadRight(LogTagW) + "  ", FMono,
+                                                   Size.Empty, TextFormatFlags.NoPadding).Width;
+        return logHang;
+    }
+
+    void Put(string text, Font f, Color c)
+    {
+        liveLog.Select(liveLog.TextLength, 0);
+        liveLog.SelectionFont = f;
+        liveLog.SelectionColor = c;
+        liveLog.SelectedText = text;
+    }
+
+    static void RunBg(ThreadStart work)
+    {
+        ThreadPool.QueueUserWorkItem(delegate { try { work(); } catch (Exception e) { Debug.WriteLine(e); } });
+    }
+
+    // ---- config writing ----------------------------------------------------
+    static List<string> SplitNames(string csv)
+    {
+        List<string> outp = new List<string>();
+        foreach (string s in csv.Split(',')) { string t = s.Trim(); if (t.Length > 0) outp.Add(t); }
+        return outp;
+    }
+
+    void SaveConnection(bool reconnect)
+    {
+        string host = tbHost.Text.Trim(), port = tbPort.Text.Trim(), user = tbUser.Text.Trim();
+        string ver = tbVer.Text.Trim(), auth = authValue;
+        string bedrock = tbBedrock.Text.Trim(), floodgate = tbFloodgate.Text.Trim();
+        string ctlHost = tbCtlHost.Text.Trim(), ctlPort = tbCtlPort.Text.Trim();
+        List<string> ops = SplitNames(tbOps.Text);
+        List<string> aliases = SplitNames(tbAliases.Text);
+        if (!Regex.IsMatch(port, "^\\d+$")) { Log("Port must be a number."); return; }
+        if (bedrock.Length > 0 && !Regex.IsMatch(bedrock, "^\\d+$")) { Log("Bedrock port must be a number."); return; }
+        if (ctlPort.Length > 0 && !Regex.IsMatch(ctlPort, "^\\d+$")) { Log("Control port must be a number."); return; }
+        // A RUNNING bot applies the change itself (and restarts if asked) via POST /config;
+        // otherwise edit config.json directly for the next start.
+        if (botUp)
+        {
+            Dictionary<string, object> body = new Dictionary<string, object> {
+                { "host", host }, { "port", port }, { "version", ver },
+                { "auth", auth }, { "username", user }, { "operators", ops },
+                { "aliases", aliases }, { "bedrockPort", bedrock }, { "floodgatePrefix", floodgate },
+                { "controlHost", ctlHost }, { "controlPort", ctlPort },
+                { "reconnect", reconnect } };
+            string b = json.Serialize(body);
+            RunBg(delegate {
+                string r = WebPost(ApiBase + "/config", b);
+                Log(r == null ? "Could not reach the bot to save." :
+                    reconnect ? "Saved — bot is reconnecting with the new settings…" : "Saved to the running bot.");
+                BeginInvoke((MethodInvoker)RefreshTarget);
+            });
+            return;
+        }
+        try
+        {
+            string txt = File.ReadAllText(CfgPath);
+            txt = SetStr(txt, "host", host);
+            txt = SetNum(txt, "port", port);
+            txt = SetStr(txt, "username", user);
+            txt = SetStr(txt, "version", ver);
+            txt = SetStr(txt, "auth", auth);
+            txt = SetArr(txt, "operators", ops);
+            txt = SetArr(txt, "aliases", aliases);
+            if (bedrock.Length > 0) txt = SetNum(txt, "bedrockPort", bedrock);
+            txt = SetStr(txt, "floodgatePrefix", floodgate);
+            if (ctlHost.Length > 0) txt = SetStr(txt, "controlHost", ctlHost);
+            if (ctlPort.Length > 0) txt = SetNum(txt, "controlPort", ctlPort);
+            File.WriteAllText(CfgPath, txt);
+            RefreshTarget();
+            Log("Saved. Settings apply when you press Start.");
+        }
+        catch (Exception e) { Log("Could not save config: " + e.Message); }
+    }
+
+    static string SetStr(string txt, string key, string val)
+    {
+        string pat = "(\"" + Regex.Escape(key) + "\"\\s*:\\s*\")[^\"]*(\")";
+        string rep = JsonEsc(val);
+        return Regex.Replace(txt, pat, delegate(Match m) { return m.Groups[1].Value + rep + m.Groups[2].Value; });
+    }
+    static string SetNum(string txt, string key, string num)
+    {
+        string pat = "(\"" + Regex.Escape(key) + "\"\\s*:\\s*)\\d+";
+        return Regex.Replace(txt, pat, delegate(Match m) { return m.Groups[1].Value + num; });
+    }
+    static string SetArr(string txt, string key, List<string> items)
+    {
+        string[] q = new string[items.Count];
+        for (int i = 0; i < items.Count; i++) q[i] = "\"" + JsonEsc(items[i]) + "\"";
+        string arr = "[" + string.Join(", ", q) + "]";
+        string pat = "(\"" + Regex.Escape(key) + "\"\\s*:\\s*)\\[[^\\]]*\\]";
+        return Regex.Replace(txt, pat, delegate(Match m) { return m.Groups[1].Value + arr; });
+    }
+    static string JsonEsc(string s) { return s.Replace("\\", "\\\\").Replace("\"", "\\\""); }
+
+    // ---- model management --------------------------------------------------
+    void RefreshModels()
+    {
+        EnsureOllama();
+        string list = RunCapture("ollama", "list");
+        if (list == null) { Log("Could not reach Ollama to list models."); return; }
+        List<string> names = ParseModelNames(list);
+        cbModel.BeginInvoke((MethodInvoker)delegate {
+            string current = cbModel.Text;
+            cbModel.Items.Clear();
+            foreach (string n in names) cbModel.Items.Add(n);
+            if (current != null && current.Trim().Length > 0) cbModel.Text = current;
+            else if (names.Count > 0) cbModel.Text = names[0];
+        });
+        Log(names.Count == 0 ? "No models installed — type a name and hit Use / Pull." : (names.Count + " Ollama models available."));
+    }
+
+    void UseModel(string m)
+    {
+        if (m == null || m.Trim().Length == 0) { Log("Type or pick a model first."); return; }
+        m = m.Trim();
+        EnsureOllama();
+        string list = RunCapture("ollama", "list");
+        bool installed = list != null && list.IndexOf(m, StringComparison.OrdinalIgnoreCase) >= 0;
+        if (!installed)
+        {
+            Log("Pulling " + m + " … (progress shows in the pull window)");
+            RunSync("cmd.exe", "/c ollama pull " + m, Root);
+            list = RunCapture("ollama", "list");
+            installed = list != null && list.IndexOf(m, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        if (installed) { SaveModel(m); Log("Brain model set to " + m + "."); RefreshModels(); if (botUp) ApplyBrain(); }
+        else Log("Pull failed — '" + m + "' is not in 'ollama list'. Keeping " + LoadModel() + ".");
+    }
+
+    static List<string> ParseModelNames(string list)
+    {
+        List<string> names = new List<string>();
+        if (list == null) return names;
+        string[] lines = list.Replace("\r", "").Split('\n');
+        foreach (string line in lines)
+        {
+            string t = line.Trim();
+            if (t.Length == 0 || t.StartsWith("NAME")) continue;
+            string[] parts = Regex.Split(t, "\\s+");
+            if (parts.Length > 0 && parts[0].Contains(":")) names.Add(parts[0]);
+        }
+        return names;
+    }
+
+    static string LoadModel()
+    {
+        try { if (File.Exists(ModelFile)) { string m = File.ReadAllText(ModelFile).Trim(); if (m.Length > 0) return m; } }
+        catch { }
+        return DefaultModel;
+    }
+    static void SaveModel(string m) { try { File.WriteAllText(ModelFile, m.Trim()); } catch { } }
+
+    void EnsureOllama()
+    {
+        if (PortOpen(11434)) return;
+        if (!OnPath("ollama")) { Log("WARNING: 'ollama' is not on your PATH. Install Ollama."); return; }
+        Log("Starting Ollama server…");
+        try
+        {
+            ProcessStartInfo psi = new ProcessStartInfo("ollama", "serve");
+            psi.UseShellExecute = false; psi.CreateNoWindow = true;
+            Process.Start(psi);
+        }
+        catch (Exception e) { Log("Could not start Ollama: " + e.Message); }
+        for (int i = 0; i < 20 && !PortOpen(11434); i++) Thread.Sleep(500);
+        Log(PortOpen(11434) ? "Ollama up." : "Ollama still not responding on :11434.");
+    }
+
+    // ---- launch actions ----------------------------------------------------
+    void StartBot()
+    {
+        // (the body too, and the port: a body left alive without its supervisor - a Stop that failed - is a bot still on the
+        //  server, and a second one on the same account must not start beside it)
+        if (NodeAlive("run.js") || NodeAlive(BodyNeedle) || ControlPortAnswers()) { Log("Bot already running."); return; }
+        if (!OnPath("node")) { Log("ERROR: 'node' is not on your PATH. Install Node.js and retry."); return; }
+        if (!Directory.Exists(Path.Combine(BotDir, "node_modules")))
+        { Log("Installing bot dependencies (first run)…"); RunSync("cmd.exe", "/c npm install", BotDir); }
+        // (the Minecraft 26.2 data the npm releases do not carry yet: without it the bot cannot join a 26.2 server. Asked of
+        //  the data itself on every start, not of the install: a patch that failed once (no git, offline) or an npm install
+        //  by hand that wiped it is made good at the next Start. Its own lines land in the activity log as [setup])
+        if (!File.Exists(Mc262Data))
+        {
+            Log("Adding the Minecraft 26.2 data…");
+            int rc = RunSync("cmd.exe", "/c node patch-mc262.js", BotDir);
+            if (rc != 0 || !File.Exists(Mc262Data))
+                Log("26.2 data patch FAILED (exit " + rc + ") - the bot cannot join a 26.2 server; it needs git - see the [setup] lines");
+        }
+        string auth = Cfg("auth", "?");
+        Log("Starting bot → " + Cfg("host", "?") + ":" + Cfg("port", "?") + " (auth=" + auth + ")…");
+        AppendLog("[gui] starting bot → " + Cfg("host", "?") + ":" + Cfg("port", "?") + " (auth=" + auth + ")");
+        if (auth == "microsoft") AppendLog("[gui] first run signs in with a microsoft.com/link code — it appears here.");
+        try { botProc = SpawnNode("bot", "run.js", null); }
+        catch (Exception e) { Log("Could not start the bot: " + e.Message); return; }
+        if (WaitPort(int.Parse(ControlPort), 300)) Log("Bot up — live panel is on.");
+        else Log("Bot didn't come up on :" + ControlPort + " — read the [bot] lines in the activity log.");
+    }
+
+    void StartBrain(string model)
+    {
+        if (NodeAlive("brain-llm.js")) { Log("Brain already running."); return; }
+        if (model == null || model.Trim().Length == 0) model = LoadModel();
+        model = model.Trim();
+        EnsureOllama();
+        string list = RunCapture("ollama", "list");
+        if (list != null && list.IndexOf(model, StringComparison.OrdinalIgnoreCase) < 0)
+        { Log(model + " isn't pulled yet — pulling it first…"); UseModel(model); }
+        Log("Starting brain (" + model + ")…");
+        AppendLog("[gui] starting brain (" + model + ")");
+        Dictionary<string, string> env = new Dictionary<string, string>();
+        env["LLM_URL"] = "http://127.0.0.1:11434/api/chat";
+        env["OLLAMA_NATIVE"] = "1";
+        env["LLM_MODEL"] = model;
+        env["BOT_URL"] = ApiBase;
+        env["GOAL"] = Goal;
+        Process p;
+        try { p = brainProc = SpawnNode("brain", "brain-llm.js", env); }
+        catch (Exception e) { Log("Could not start the brain: " + e.Message); return; }
+        // Close the loop: "Starting brain…" used to stay in the footer for the whole
+        // session even with the Brain light green. Report the outcome once it's known -
+        // unless Stop (or a restart) replaced this process meanwhile: then that owns the footer.
+        Thread.Sleep(3000);
+        if (brainProc != p) return;
+        try
+        {
+            int port;
+            bool botOk = int.TryParse(ControlPort, out port) && PortOpen(port);
+            if (p.HasExited) Log("Brain exited right after starting — read the [brain] lines in the activity log.");
+            else if (!botOk) Log("Brain started (" + model + ") — but the bot isn't up on :" + ControlPort + ", see the [bot] lines.");
+            else Log("Brain started (" + model + ").");
+        }
+        catch { }
+    }
+
+    // ---- schematics --------------------------------------------------------
+    static string SchemDir { get { return Path.Combine(BotDir, "schematics"); } }
+
+    // Blueprint names the bot can load (name without extension - blueprint.js resolves it).
+    static List<string> SchemNames()
+    {
+        List<string> names = new List<string>();
+        try
+        {
+            if (Directory.Exists(SchemDir))
+                foreach (string f in Directory.GetFiles(SchemDir)) if (Regex.IsMatch(f, @"\.(schem|litematic|nbt)$", RegexOptions.IgnoreCase)) // every format bot2/lib/blueprint.js reads
+                {
+                    string n = Path.GetFileNameWithoutExtension(f);
+                    if (!names.Contains(n)) names.Add(n);   // (names with spaces are refused at Start)
+                }
+        }
+        catch { }
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        return names;
+    }
+
+    void RefreshSchem()
+    {
+        cbSchem.Items.Clear();
+        cbSchem.Items.AddRange(SchemNames());
+        if (cbSchem.Items.Count > 0) cbSchem.SelectedIndex = 0;
+        else cbSchem.Text = "(none yet — add one)";
+    }
+
+    void AddSchem()
+    {
+        OpenFileDialog dlg = new OpenFileDialog();
+        dlg.Title = "Add a schematic the bot can build";
+        dlg.Filter = "Schematics (*.schem;*.litematic;*.nbt)|*.schem;*.litematic;*.nbt|All files (*.*)|*.*";
+        dlg.Multiselect = true;
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+        try
+        {
+            if (!Directory.Exists(SchemDir)) Directory.CreateDirectory(SchemDir);
+            int n = 0;
+            foreach (string src in dlg.FileNames)
+            {
+                string dest = Path.Combine(SchemDir, Path.GetFileName(src));
+                File.Copy(src, dest, true); n++;
+            }
+            Log("Added " + n + " schematic(s) — use Build (top bar) to send the bot to build one.");
+            RefreshSchem();
+        }
+        catch (Exception e) { Log("Could not add schematic: " + e.Message); }
+    }
+
+    // ---- build dialog: blueprint -> where -> wood -> go ---------------------
+    // Drives the bot's own "build <name> <x> <y> <z> [anywood]" command. Coordinates are
+    // the CENTRE of the footprint (operator rule; the bot converts), Y is the base layer.
+    void ShowBuildDialog()
+    {
+        using (Form d = MakeBuildDialog()) d.ShowDialog(this);
+    }
+
+    Form MakeBuildDialog()
+    {
+        Form d = new Form();
+        d.Text = "Start a build";
+        d.AutoScaleMode = AutoScaleMode.None;
+        d.FormBorderStyle = FormBorderStyle.FixedDialog;
+        d.MaximizeBox = false; d.MinimizeBox = false; d.ShowInTaskbar = false;
+        d.StartPosition = FormStartPosition.CenterParent;
+        d.BackColor = Card; d.Font = FBody; d.Icon = Icon;
+        d.ClientSize = new Size(520, 480);
+        d.HandleCreated += delegate { try { int on = 1; DwmSetWindowAttribute(d.Handle, 20, ref on, 4); } catch { } };
+        int X = S6, W = d.ClientSize.Width - 2 * S6, y = S4;
+
+        Lbl(d, "Send the bot to build", FTitle, Txt).SetBounds(X, y, W, 26); y += 28;
+        Lbl(d, "It gathers every material itself, then builds in survival.", FSmall, Muted).SetBounds(X, y, W, 16); y += 30;
+
+        // 1 - blueprint
+        Lbl(d, "1   BLUEPRINT", FCap, Accent2).SetBounds(X, y, W, 14); y += 18;
+        Picker pk = MakePicker(d, false);
+        pk.Items.AddRange(SchemNames());
+        pk.Text = cbSchem.Items.Contains(cbSchem.Text) ? cbSchem.Text : (pk.Items.Count > 0 ? pk.Items[0] : "(none yet — add one)");
+        PlacePicker(pk, X, y, W - 110 - S2);
+        Button add = MakeBtn(d, "Add file…", BtnSec, Ghost, GhostHi, Txt, FBodyB, 8, delegate {
+            AddSchem();
+            pk.Items.Clear(); pk.Items.AddRange(SchemNames());
+            if (pk.Items.Count > 0 && !pk.Items.Contains(pk.Text)) pk.Text = pk.Items[pk.Items.Count - 1];
+        });
+        ((FlatBtn)add).Glyph = "\uE710";
+        add.SetBounds(X + W - 110, y + 1, 110, BtnSec);
+        y += InputH + S6;
+
+        // 2 - where
+        Lbl(d, "2   WHERE", FCap, Accent2).SetBounds(X, y, W, 14); y += 18;
+        Lbl(d, "Centre of the build.  Y = the level its bottom layer sits on.", FSmall, Muted).SetBounds(X, y, W, 16); y += 20;
+        int cw = (W - 2 * S2) / 3;
+        string[] axes = { "X", "Y", "Z" };
+        TextBox[] tc = new TextBox[3];
+        bool[] corner = { false };
+        Button bCorner = null;   // created below; typing/pasting fresh coords means "centre" again
+        for (int i = 0; i < 3; i++)
+        {
+            Label al = Lbl(d, axes[i], FSmallB, Faint);
+            al.SetBounds(X + i * (cw + S2), y, 20, 15);
+            tc[i] = MakeInput(d, "");
+            PlaceInput(tc[i], X + i * (cw + S2), y + 17, cw);
+        }
+        // pasting "x y z" (or "x, y, z" / an F3 line) into any box fills all three
+        for (int i = 0; i < 3; i++)
+            tc[i].TextChanged += delegate(object s, EventArgs e) {
+                MatchCollection ms = Regex.Matches(((TextBox)s).Text, @"-?\d{1,8}(?:\.\d+)?");
+                if (ms.Count != 3) return;
+                corner[0] = false; if (bCorner != null) StyleToggle(bCorner, false);
+                for (int k = 0; k < 3; k++) tc[k].Text = ((int)Math.Floor(double.Parse(ms[k].Value, System.Globalization.CultureInfo.InvariantCulture))).ToString();
+            };
+        // start from where the bot is - usually "build it right here"
+        Dictionary<string, object> here = Obj(lastState, "pos");
+        if (here != null)
+        {
+            tc[0].Text = ((int)Math.Floor(D(here, "x"))).ToString();
+            tc[1].Text = ((int)Math.Floor(D(here, "y"))).ToString();
+            tc[2].Text = ((int)Math.Floor(D(here, "z"))).ToString();
+        }
+        y += 17 + InputH + S2;
+        Button useBot = MakeBtn(d, "Where the bot stands", BtnChip, Ghost, GhostHi, Muted, FSmallB, BtnChip / 2, delegate {
+            Dictionary<string, object> pos = Obj(lastState, "pos");
+            if (pos == null) { Log("Bot position unknown — is the bot running?"); return; }
+            tc[0].Text = ((int)Math.Floor(D(pos, "x"))).ToString();
+            tc[1].Text = ((int)Math.Floor(D(pos, "y"))).ToString();
+            tc[2].Text = ((int)Math.Floor(D(pos, "z"))).ToString();
+            corner[0] = false; StyleToggle(bCorner, false);   // the bot's spot is a centre
+        });
+        useBot.SetBounds(X, y, 150, BtnChip);
+        Dictionary<string, object> job = Obj(lastState, "savedBuild");
+        Dictionary<string, object> jobAt = Obj(job, "at");
+        Button useJob = null;
+        if (jobAt != null)
+        {
+            // the saved job's origin is its CORNER; the dialog speaks centres, so leave it
+            // to the bot: the button just says where the current site is.
+            useJob = MakeBtn(d, "Current site (corner)", BtnChip, Ghost, GhostHi, Muted, FSmallB, BtnChip / 2, delegate {
+                tc[0].Text = S(jobAt, "x"); tc[1].Text = S(jobAt, "y"); tc[2].Text = S(jobAt, "z");
+            });
+            useJob.SetBounds(X + 150 + S2, y, 160, BtnChip);
+            tips.SetToolTip(useJob, "The current build's corner - tick \"these are the corner\" below if you use it.");
+        }
+        y += BtnChip + S3;
+        bCorner = MakeToggle(d, "These are the corner, not the centre");
+        bCorner.Font = FSmallB; bCorner.Height = BtnChip;
+        bCorner.SetBounds(X, y, 250, BtnChip);
+        StyleToggle(bCorner, false);
+        bCorner.Click += delegate { corner[0] = !corner[0]; StyleToggle(bCorner, corner[0]); };
+        if (useJob != null) useJob.Click += delegate { corner[0] = true; StyleToggle(bCorner, true); };
+        y += BtnChip + S6;
+
+        // 3 - wood
+        Lbl(d, "3   WOOD", FCap, Accent2).SetBounds(X, y, W, 14); y += 18;
+        bool[] anyWood = { false };
+        Button wExact = MakeToggle(d, "Blueprint's wood");
+        Button wAny = MakeToggle(d, "Any wood nearby");
+        wExact.SetBounds(X, y, 150, BtnSec); wAny.SetBounds(X + 150 + S2, y, 150, BtnSec);
+        EventHandler paintWood = delegate { StyleToggle(wExact, !anyWood[0]); StyleToggle(wAny, anyWood[0]); };
+        wExact.Click += delegate { anyWood[0] = false; paintWood(null, null); };
+        wAny.Click += delegate { anyWood[0] = true; paintWood(null, null); };
+        paintWood(null, null);
+        tips.SetToolTip(wAny, "Any local wood species stands in for the blueprint's (faster, looks different).");
+        y += BtnSec + S4;
+
+        // 4 - cost check: the blocks that cost the gathering hours (23 anvils were ~700 iron, 140 lightning rods 420 copper -
+        // found only once the bot began gathering), each kept, skipped or swapped for a cheap one before it starts
+        Lbl(d, "4   COST CHECK", FCap, Accent2).SetBounds(X, y, W, 14); y += 18;
+        Label costSum = Lbl(d, "See what the blueprint costs to gather; the dear blocks can be skipped or swapped.", FSmall, Muted);
+        costSum.SetBounds(X, y, W - 140 - S2, 32);
+        Button bCost = MakeBtn(d, "Check cost", BtnChip, Ghost, GhostHi, Muted, FSmallB, BtnChip / 2, null);
+        bCost.SetBounds(X + W - 140, y, 140, BtnChip);
+        y += 34;
+        Panel costRows = new Panel();
+        costRows.BackColor = Card; costRows.AutoScroll = true;
+        d.Controls.Add(costRows);
+        costRows.SetBounds(X, y, W, 112);
+        y += 112 + S3;
+        // one entry a flagged block: its name, the choice ("keep" / "skip" / "swap"), the swap's target
+        List<string> rowBlock = new List<string>(), rowChoice = new List<string>(), rowSwap = new List<string>();
+        string[] costFor = { null };   // the blueprint the choices belong to
+        bCost.Click += delegate {
+            string name = pk.Text.Trim();
+            if (!pk.Items.Contains(name)) { costSum.ForeColor = Red; costSum.Text = "Pick a blueprint first."; return; }
+            if (Regex.IsMatch(name, @"s")) { costSum.ForeColor = Red; costSum.Text = "The bot can't take names with spaces — rename the file (e.g. my_house)."; return; }
+            if (!botUp) { costSum.ForeColor = Red; costSum.Text = "The bot is offline — press Start first."; return; }
+            bCost.Enabled = false; costSum.ForeColor = Muted; costSum.Text = "Reading " + name + "… big blueprints take a while.";
+            RunBg(delegate {
+                string r = WebPostSlow(ApiBase + "/op/cmd", "buildcost " + name, 120000);
+                Dictionary<string, object> rep = null;
+                try { rep = new JavaScriptSerializer().DeserializeObject(r ?? "") as Dictionary<string, object>; } catch { }   // (its own: this is a pool thread)
+                try
+                {
+                    d.BeginInvoke((MethodInvoker)delegate {
+                        if (d.IsDisposed) return;
+                        bCost.Enabled = true;
+                        // (the old rows disposed, not just dropped: their tooltips and handles went with them)
+                        while (costRows.Controls.Count > 0) { Control old = costRows.Controls[0]; tips.SetToolTip(old, null); old.Dispose(); }
+                        rowBlock.Clear(); rowChoice.Clear(); rowSwap.Clear();
+                        if (rep == null) { costSum.ForeColor = Red; costSum.Text = r == null ? "The bot didn't answer." : Regex.Replace(r.Split('\n')[0], @"^HTTP 500: (error: )?", ""); costFor[0] = null; return; }
+                        costFor[0] = name;
+                        System.Collections.IEnumerable flagged = rep.ContainsKey("flagged") ? rep["flagged"] as System.Collections.IEnumerable : null;
+                        int i = 0;
+                        if (flagged != null)
+                            foreach (object o in flagged)
+                            {
+                                Dictionary<string, object> f = o as Dictionary<string, object>;
+                                if (f == null) continue;
+                                string block = S(f, "block"), sug = f.ContainsKey("suggest") && f["suggest"] != null ? "" + f["suggest"] : "";
+                                string swapTo = sug.StartsWith("swap:") ? sug.Substring(5) : "";
+                                int k = rowBlock.Count;
+                                rowBlock.Add(block); rowSwap.Add(swapTo);
+                                rowChoice.Add(sug == "skip" ? "skip" : swapTo != "" ? "swap" : "keep");   // the suggestion, preset
+                                Label l = Lbl(costRows, block.Replace('_', ' ') + "  ×" + S(f, "count") + "  —  " + S(f, "flag"), FSmall, Txt);
+                                int sb = SystemInformation.VerticalScrollBarWidth + 6;
+                                l.SetBounds(0, i * 28 + 4, W - 160 - sb, 18);
+                                tips.SetToolTip(l, block + ": " + S(f, "flag"));
+                                Button c = MakeBtn(costRows, "", BtnChip, Ghost, GhostHi, Txt, FSmallB, BtnChip / 2, null);
+                                c.SetBounds(W - 150 - sb, i * 28, 150, BtnChip);
+                                EventHandler paint = delegate {
+                                    c.Text = rowChoice[k] == "skip" ? "Skip" : rowChoice[k] == "swap" ? "Swap → " + rowSwap[k].Replace('_', ' ') : "Keep";
+                                    StyleToggle(c, rowChoice[k] != "keep");
+                                };
+                                c.Click += delegate {
+                                    rowChoice[k] = rowChoice[k] == "keep" ? "skip" : rowChoice[k] == "skip" && rowSwap[k] != "" ? "swap" : "keep";
+                                    paint(null, null);
+                                };
+                                paint(null, null);
+                                i++;
+                            }
+                        double hours = D(rep, "total") / 3600.0;
+                        costSum.ForeColor = i > 0 ? Amber : Muted;
+                        costSum.Text = "About " + hours.ToString("0.#") + " h of gathering for " + S(rep, "blocks") + " blocks. " +
+                            (i > 0 ? i + " dear block" + (i > 1 ? "s" : "") + " below — click to keep, skip or swap." : "Nothing out of proportion.");
+                    });
+                }
+                catch { }
+            });
+        };
+
+        // replace warning + result line
+        Label note = Lbl(d, "", FSmall, Amber);
+        note.SetBounds(X, y, W, 34);
+        if (job != null)
+        {
+            Dictionary<string, object> bp = Obj(lastState, "buildProgress");
+            bool finished = bp != null && D(bp, "total") > 0 && D(bp, "done") >= D(bp, "total");
+            note.Text = finished ? "The last build (" + S(job, "name") + ") is finished — this starts a new one."
+                : "This replaces the current build: " + S(job, "name") +
+                  (bp != null ? "  (" + S(bp, "done") + " / " + S(bp, "total") + " placed)" : "") + ".";
+        }
+
+        Button cancel = MakeBtn(d, "Cancel", BtnPrim, Ghost, GhostHi, Txt, FBodyB, 8, delegate { d.Close(); });
+        Button go = MakeBtn(d, "Start build", BtnPrim, Accent, AccentHi, Color.White, FBodyB, 10, null);
+        ((FlatBtn)go).Glyph = "\uE768";
+        y += 34 + S3;
+        int by = y;
+        d.ClientSize = new Size(d.ClientSize.Width, by + BtnPrim + S6);   // height follows the content
+        go.SetBounds(X + W - 140, by, 140, BtnPrim);
+        cancel.SetBounds(X + W - 140 - S2 - 96, by, 96, BtnPrim);
+        d.CancelButton = cancel;
+        // Once "build" is on the wire the bot WILL replace the job, so the dialog can't be
+        // cancelled mid-flight: it would look cancelled while the castle job is gone.
+        bool[] sending = { false };
+        d.FormClosing += delegate(object s, FormClosingEventArgs e) { if (sending[0] && e.CloseReason == CloseReason.UserClosing) e.Cancel = true; };
+        go.Click += delegate {
+            string name = pk.Text.Trim();
+            if (!pk.Items.Contains(name)) { note.ForeColor = Red; note.Text = "Pick a blueprint first (or add one)."; return; }
+            if (Regex.IsMatch(name, @"\s")) { note.ForeColor = Red; note.Text = "The bot can't take names with spaces — rename the file (e.g. my_house) and pick it again."; return; }
+            int[] v = new int[3];
+            for (int i = 0; i < 3; i++)
+                if (!int.TryParse(tc[i].Text.Trim(), out v[i])) { note.ForeColor = Red; note.Text = "Enter whole-number X, Y and Z (or use the bot's spot)."; tc[i].Focus(); return; }
+            if (!botUp) { note.ForeColor = Red; note.Text = "The bot is offline — press Start first."; return; }
+            string cmd = "build " + name + " " + v[0] + " " + v[1] + " " + v[2] + (corner[0] ? " corner" : "") + (anyWood[0] ? " anywood" : "");
+            // the cost check's choices - only for the blueprint they were made for
+            if (costFor[0] == name)
+            {
+                List<string> sk = new List<string>(), sw = new List<string>();
+                for (int i = 0; i < rowBlock.Count; i++)
+                {
+                    if (rowChoice[i] == "skip") sk.Add(rowBlock[i]);
+                    else if (rowChoice[i] == "swap" && rowSwap[i] != "") sw.Add(rowBlock[i] + ">" + rowSwap[i]);
+                }
+                if (sk.Count > 0) cmd += " skip=" + string.Join(",", sk.ToArray());
+                if (sw.Count > 0) cmd += " swap=" + string.Join(",", sw.ToArray());
+            }
+            sending[0] = true; go.Enabled = false; cancel.Enabled = false;
+            note.ForeColor = Muted; note.Text = "Sending… the bot reads the whole blueprint first, big ones take a while.";
+            RunBg(delegate {
+                string r = WebPostSlow(ApiBase + "/op/cmd", cmd, 120000);
+                bool ok = r != null && r.StartsWith("build job set");
+                string why = r == null ? "The bot didn't answer within 2 minutes — check the activity log before retrying."
+                                       : Regex.Replace(r.Split('\n')[0], @"^HTTP 500: (error: )?", "");
+                // the footer records the outcome no matter what happened to the dialog
+                Log(ok ? "Build started: " + name + " at " + v[0] + " " + v[1] + " " + v[2] + (corner[0] ? " (corner)." : " (centre).")
+                       : "Build not started: " + why);
+                try
+                {
+                    d.BeginInvoke((MethodInvoker)delegate {
+                        if (d.IsDisposed) return;
+                        sending[0] = false;
+                        if (ok) { d.Close(); return; }
+                        go.Enabled = true; cancel.Enabled = true;
+                        note.ForeColor = Red; note.Text = why;
+                    });
+                }
+                catch { }
+            });
+        };
+        return d;
+    }
+
+    void OpenSchemFolder()
+    {
+        try
+        {
+            if (!Directory.Exists(SchemDir)) Directory.CreateDirectory(SchemDir);
+            Process.Start(new ProcessStartInfo(SchemDir) { UseShellExecute = true });
+        }
+        catch (Exception e) { Log("Could not open folder: " + e.Message); }
+    }
+
+    // Node processes whose COMMAND LINE contains `needle`. Matching on MainWindowTitle
+    // (what this used to do) can never find the bot: it is launched with
+    // -WindowStyle Hidden, so its MainWindowTitle is "" and no title match exists.
+    List<int> NodePidsMatching(string needle)
+    {
+        List<int> pids = new List<int>();
+        try
+        {
+            using (ManagementObjectSearcher q = new ManagementObjectSearcher(
+                "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'node.exe'"))
+            {
+                foreach (ManagementObject o in q.Get())
+                {
+                    string cl = null;
+                    try { cl = o["CommandLine"] as string; } catch { }
+                    if (string.IsNullOrEmpty(cl)) continue;
+                    if (cl.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                    { try { pids.Add(Convert.ToInt32(o["ProcessId"])); } catch { } }
+                }
+            }
+        }
+        catch (Exception e) { Log("stop: could not enumerate processes (" + e.Message + ")"); }
+        return pids;
+    }
+
+    // True while the bot's control API still answers - the only honest test of "is it down".
+    static bool ControlPortAnswers()
+    {
+        int status;
+        string body = WebGet("http://127.0.0.1:3001/health", out status);
+        return body != null && status == 200;
+    }
+
+    // Free the GPU too. The model lives in OLLAMA's process, not in brain-llm.js, so
+    // killing the brain client leaves the weights parked in VRAM until Ollama's own
+    // keep-alive expires (measured: qwen3:14b held 11.9 GB for another 28 minutes
+    // after a Stop, on a 16 GB card). "Stop" should mean stopped, GPU included.
+    int UnloadOllamaModels()
+    {
+        int freed = 0;
+        try
+        {
+            int status;
+            string ps = WebGet("http://127.0.0.1:11434/api/ps", out status);
+            if (string.IsNullOrEmpty(ps)) return 0;
+            foreach (Match m in Regex.Matches(ps, @"""model""\s*:\s*""([^""]+)"""))
+            {
+                string name = m.Groups[1].Value;
+                try
+                {
+                    WebPost("http://127.0.0.1:11434/api/generate",
+                            "{\"model\":\"" + name + "\",\"keep_alive\":0}");
+                    freed++;
+                    Log("Unloaded " + name + " from VRAM.");
+                }
+                catch (Exception e) { Log("stop: could not unload " + name + " (" + e.Message + ")"); }
+            }
+        }
+        catch (Exception e) { Log("stop: ollama not reachable (" + e.Message + ")"); }
+        return freed;
+    }
+
+    void StopAll()
+    {
+        Log("Stopping bot + brain…");
+        // ORDER MATTERS: run.js is a SUPERVISOR - it restarts main.js (the body) within seconds.
+        // Killing the body first just gets it resurrected, which is why "stop" appeared
+        // to do nothing. Supervisor dies first, then the body, then the brain.
+        // (the body by its folder too: a bare "main.js" would match any other project's node process. "index.js" stood here
+        //  after the body became main.js - matching nothing, Stop left the body running and reported "Stop FAILED")
+        string[] order = { "run.js", BodyNeedle, "brain-llm.js" };
+        int killed = 0;
+        foreach (string needle in order)
+        {
+            foreach (int pid in NodePidsMatching(needle))
+            {
+                try
+                {
+                    Process p = Process.GetProcessById(pid);
+                    p.Kill();
+                    p.WaitForExit(4000);
+                    killed++;
+                }
+                catch (Exception e) { Log("stop: pid " + pid + " (" + needle + ") - " + e.Message); }
+            }
+            Thread.Sleep(300);
+        }
+        // Legacy: close any visible Animus BOT/BRAIN console window left over from a
+        // start made by an older build of this panel (they are headless children now).
+        string[] titles = { "Animus BOT", "Animus BRAIN" };
+        foreach (Process p in Process.GetProcesses())
+        { try { if (Array.IndexOf(titles, p.MainWindowTitle) >= 0) { p.Kill(); killed++; } } catch { } }
+        botProc = null; brainProc = null;
+
+        // Release the GPU as part of stopping, not 28 minutes later.
+        UnloadOllamaModels();
+
+        // VERIFY, never assert. The old code set "Stopped" unconditionally - it would
+        // log "Nothing was running." and then show Stopped while the bot was online.
+        Thread.Sleep(600);
+        bool stillUp = ControlPortAnswers();
+        List<int> survivors = new List<int>();
+        foreach (string needle in order) survivors.AddRange(NodePidsMatching(needle));
+
+        if (stillUp || survivors.Count > 0)
+        {
+            Log("STOP FAILED - killed " + killed + ", but " + survivors.Count +
+                " node process(es) remain" + (stillUp ? " and :3001 still answers" : "") + ".");
+            botUp = stillUp;
+            stateFails = stillUp ? 0 : 3;
+            SetStop("Stop FAILED", Danger);
+            return;
+        }
+
+        Log(killed > 0
+            ? ("Stopped. Killed " + killed + " process(es); :3001 is closed.")
+            : "Nothing was running (:3001 already closed).");
+        botUp = false;
+        stateFails = 3;   // an explicit stop is known-dead: no grace window
+        SetStop("Stopped", Ghost);
+    }
+
+    // ---- the panel and the body are ONE thing ------------------------------
+    // OPERATOR RULE (2026-08-27): closing the GUI stops the bot. This window used to be a
+    // DETACHED api client - close it and the body kept running on the live server with nobody
+    // watching (found at health 1, food 0, underground, spamming chat). That is the same class
+    // of defect as the stale "Animus BRAIN" window titles: the thing you closed did not track
+    // the world. Close now means stop, and it goes through the SAME StopAll the Stop button
+    // calls, so there is one definition of "stopped" and it cannot drift.
+    bool closeStopDone = false;
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (!closeStopDone && !shotMode)
+        {
+            closeStopDone = true;
+            // Pollers first, so nothing races the kill or repaints a dead bot as live.
+            try { statusTimer.Stop(); liveTimer.Stop(); povTimer.Stop(); } catch { }
+            // Hide the window so the close feels instant, but run StopAll SYNCHRONOUSLY: it
+            // has to finish before this process exits or the kill never lands.
+            try { Visible = false; } catch { }
+            try { StopAll(); } catch (Exception ex) { Debug.WriteLine(ex); }
+            WitnessCloseStop();
+        }
+        base.OnFormClosing(e);
+    }
+
+    // The GUI's status strip dies with the GUI, so a stop that FAILED on close would be
+    // silent - precisely the invisible failure the log exists to catch. Leave the verdict on
+    // disk, read from the WORLD (control port + surviving pids), never from StopAll's say-so.
+    void WitnessCloseStop()
+    {
+        try
+        {
+            List<int> left = new List<int>();
+            foreach (string needle in new string[] { "run.js", BodyNeedle, "brain-llm.js" })
+                left.AddRange(NodePidsMatching(needle));
+            bool up = ControlPortAnswers();
+            string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  gui closed -> "
+                + (up || left.Count > 0
+                    ? ("STOP FAILED: " + left.Count + " node process(es) left"
+                       + (up ? " and :3001 still answers" : "") + " - kill them by hand")
+                    : "bot stopped (:3001 closed)") + Environment.NewLine;
+            string dir = Path.Combine(Root, "logs");
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            File.AppendAllText(Path.Combine(dir, "gui-stop.log"), line);
+        }
+        catch { }
+    }
+
+    void SetStop(string text, Color bg)
+    {
+        if (btnStop.InvokeRequired) { btnStop.BeginInvoke((MethodInvoker)delegate { SetStop(text, bg); }); return; }
+        btnStop.Text = text;
+        // "Stop FAILED" keeps its alarm colour; plain Stop/Stopped hand the styling back
+        // to UpdateRunButtons so the emphasis always matches whether the bot is up.
+        if (text == "Stop" || text == "Stopped") { runShownInit = false; UpdateRunButtons(); }
+        else StyleBtn(btnStop, bg, Mix(bg, Color.White, 0.1), Color.White);
+    }
+
+    // ---- low-level helpers -------------------------------------------------
+    // HEADLESS BY DESIGN (2026-08-31). Start used to shell out to
+    //   powershell -NoExit -Command "... node run.js"
+    // with UseShellExecute=true, which is precisely a request for a visible console
+    // window - two of them, BOT and BRAIN, every single start. They existed for one
+    // real reason (the microsoft.com/link device code is printed to stdout on first
+    // login) and one accidental one (IsRunning() identified the processes by their
+    // console TITLE). Both are handled here instead: stdout/stderr are piped into the
+    // activity log, the device code is lifted out and pushed at the operator, and
+    // liveness comes from the command line via WMI, which is what StopAll already used.
+    Process SpawnNode(string tag, string script, Dictionary<string, string> env)
+    {
+        ProcessStartInfo psi = new ProcessStartInfo("node", script);
+        psi.WorkingDirectory = BotDir;
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        psi.StandardOutputEncoding = Encoding.UTF8;
+        psi.StandardErrorEncoding = Encoding.UTF8;
+        if (env != null)
+            foreach (KeyValuePair<string, string> kv in env) psi.EnvironmentVariables[kv.Key] = kv.Value;
+        Process p = new Process();
+        p.StartInfo = psi;
+        p.EnableRaisingEvents = true;
+        p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { ChildLine(tag, e.Data); };
+        p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { ChildLine(tag, e.Data); };
+        p.Start();
+        AdoptChild(p);
+        p.BeginOutputReadLine();
+        p.BeginErrorReadLine();
+        return p;
+    }
+
+    // One line of a child's console output. The bot's own /log endpoint carries the
+    // in-game narrative; this carries the things that happen BEFORE the control port
+    // is up (login, version mismatch, crash stacks) - the exact content the console
+    // windows used to show, now in the panel that is already open.
+    static readonly Regex DeviceCodeRx = new Regex(@"code\s+([A-Z0-9]{6,10})\b", RegexOptions.IgnoreCase);
+    void ChildLine(string tag, string line)
+    {
+        if (line == null) return;
+        string t = line.TrimEnd();
+        if (t.Length == 0) return;
+        if (t.Length > 400) t = t.Substring(0, 399) + "…";
+        AppendLog("[" + tag + "] " + t);
+        if (t.IndexOf("microsoft.com/link", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            Match m = DeviceCodeRx.Match(t);
+            string code = m.Success ? m.Groups[1].Value.ToUpperInvariant() : null;
+            BeginInvoke((MethodInvoker)delegate {
+                if (code != null)
+                {
+                    try { Clipboard.SetText(code); } catch { }
+                    Log("SIGN IN: open microsoft.com/link and enter " + code + " (copied to clipboard).");
+                    AppendLog("[login] code " + code + " copied to the clipboard — open https://microsoft.com/link");
+                }
+                else Log("SIGN IN required — see the [bot] line in the activity log.");
+                try { Process.Start(new ProcessStartInfo("https://www.microsoft.com/link") { UseShellExecute = true }); } catch { }
+            });
+        }
+    }
+
+    // Is a node process running THIS script? Command-line identity, not a window title:
+    // a headless child has no title, and a title could always be faked or go stale.
+    bool NodeAlive(string script) { return NodePidsMatching(script).Count > 0; }
+
+    // ---- the panel owns the body, at the OS level ----------------------------
+    // OnFormClosing's rule ("closing the panel stops the bot") only covers a GRACEFUL
+    // close. Kill the panel from Task Manager, or crash it, and the old build left the
+    // bot running on a live server with nobody watching - the exact failure that rule
+    // was written for. A Job Object with KILL_ON_JOB_CLOSE closes that hole in the OS
+    // rather than in our code: when this process ends, however it ends, its children end.
+    // (run.js's own main.js child inherits job membership, so the supervisor cannot
+    // outlive the panel either.)
+    const int JobObjectExtendedLimitInformation = 9;
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+    static IntPtr jobHandle = IntPtr.Zero;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateJobObject(IntPtr attrs, string name);
+    [DllImport("kernel32.dll")]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
+    [DllImport("kernel32.dll")]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS
+    { public ulong Read, Write, Other, ReadX, WriteX, OtherX; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION Basic;
+        public IO_COUNTERS Io;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+
+    static void AdoptChild(Process p)
+    {
+        try
+        {
+            if (jobHandle == IntPtr.Zero)
+            {
+                jobHandle = CreateJobObject(IntPtr.Zero, null);
+                if (jobHandle == IntPtr.Zero) return;
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                info.Basic.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                int len = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+                IntPtr mem = Marshal.AllocHGlobal(len);
+                try
+                {
+                    Marshal.StructureToPtr(info, mem, false);
+                    SetInformationJobObject(jobHandle, JobObjectExtendedLimitInformation, mem, (uint)len);
+                }
+                finally { Marshal.FreeHGlobal(mem); }
+            }
+            AssignProcessToJobObject(jobHandle, p.Handle);
+        }
+        catch { }   // best effort: a bot that starts unadopted still beats one that never starts
+    }
+
+    static bool PortOpen(int port)
+    {
+        try
+        {
+            using (TcpClient c = new TcpClient())
+            {
+                IAsyncResult r = c.BeginConnect("127.0.0.1", port, null, null);
+                bool ok = r.AsyncWaitHandle.WaitOne(300);
+                if (ok) { c.EndConnect(r); return true; }
+                return false;
+            }
+        }
+        catch { return false; }
+    }
+
+    static bool WaitPort(int port, int seconds)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+        while (DateTime.UtcNow < deadline) { if (PortOpen(port)) return true; Thread.Sleep(600); }
+        return false;
+    }
+
+    static bool OnPath(string exe)
+    {
+        try
+        {
+            ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/c where " + exe);
+            psi.UseShellExecute = false; psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+            Process p = Process.Start(psi); p.WaitForExit();
+            return p.ExitCode == 0;
+        }
+        catch { return false; }
+    }
+
+    // Also headless: `npm install` and `ollama pull` used to flash up their own console.
+    // Their output is the only progress the operator gets, so it goes to the activity log.
+    int RunSync(string file, string args, string workDir) // (the exit code; -1 when it could not be run at all)
+    {
+        try
+        {
+            ProcessStartInfo psi = new ProcessStartInfo(file, args);
+            psi.UseShellExecute = false; psi.CreateNoWindow = true; psi.WorkingDirectory = workDir;
+            psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+            Process p = new Process();
+            p.StartInfo = psi;
+            p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { ChildLine("setup", e.Data); };
+            p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { ChildLine("setup", e.Data); };
+            p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
+            p.WaitForExit();
+            return p.ExitCode;
+        }
+        catch { return -1; }
+    }
+
+    static string RunCapture(string file, string args)
+    {
+        try
+        {
+            ProcessStartInfo psi = new ProcessStartInfo(file, args);
+            psi.UseShellExecute = false; psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+            Process p = Process.Start(psi);
+            string outp = p.StandardOutput.ReadToEnd();
+            p.WaitForExit();
+            return outp;
+        }
+        catch { return null; }
+    }
+
+    static string Cfg(string key, string dflt)
+    {
+        try
+        {
+            string txt = File.ReadAllText(CfgPath);
+            Match m = Regex.Match(txt, "\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
+            if (m.Success) return m.Groups[1].Value;
+            m = Regex.Match(txt, "\"" + key + "\"\\s*:\\s*(\\d+)");
+            if (m.Success) return m.Groups[1].Value;
+        }
+        catch { }
+        return dflt;
+    }
+
+    // read a string array like "operators": ["A","B"] back into "A, B"
+    static string CfgArray(string key)
+    {
+        try
+        {
+            string txt = File.ReadAllText(CfgPath);
+            Match m = Regex.Match(txt, "\"" + key + "\"\\s*:\\s*\\[([^\\]]*)\\]");
+            if (m.Success)
+            {
+                List<string> outp = new List<string>();
+                foreach (Match v in Regex.Matches(m.Groups[1].Value, "\"([^\"]*)\"")) outp.Add(v.Groups[1].Value);
+                return string.Join(", ", outp.ToArray());
+            }
+        }
+        catch { }
+        return "";
+    }
+}
