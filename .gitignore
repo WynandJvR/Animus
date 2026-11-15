@@ -25,6 +25,7 @@ brain-decisions*.jsonl
 
 # real connection config (holds the live server address) - copy config.example.json
 bot2/config.json
+bot2/config.json.tmp
 # hand/tool-made snapshots of the above (bak-<label>-<hhmmss>) - same live coords, same exclusion
 bot2/*.bak-*
 
@@ -41,6 +42,8 @@ state-backup-*/
 state-archive-*/
 bot2/memory.json
 bot2/memory.*.json
+# the memory write's own tmp copies and a kept unreadable file (memory.json.tmp / .exit.tmp / .corrupt-<time>) - same coords
+bot2/memory.json.*
 bot2/paused.flag
 bot2/site-*.json
 bot2/.mc262-data/
@@ -49,6 +52,8 @@ bot2/.mc262-data/
 tools/session-scripts/test-events.log
 # poll.sh's marker and window (log lines - live coords)
 tools/session-scripts/poll.mark
+tools/session-scripts/disagree.mark
+tools/session-scripts/loop.mark
 tools/session-scripts/poll.win
 
 # Deploy tooling output (rollback snapshots of bot2 code and the last-deploy stamp) - local only, never source
@@ -59,3 +64,6 @@ tools/session-scripts/.deploying
 
 # design walk cache (finished-blueprint walk graph - live coords)
 bot2/design-*.json
+
+# 26.3 port: pinned upstream inputs fetched by tools/mc263/build-data.js
+bot2/.mc263-data/

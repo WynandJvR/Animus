@@ -38,20 +38,33 @@ function make (bot, director) {
   //  command after it answered "busy" - the operator locked out. At the deadline: every running action told to stop, the
   //  body still, the lock let go; audit 2026-09-28)
   const OP_DEADLINE_MS = { collect: 60000, tower: 90000, dig: 30000 }
+  // (an operator's pause/stop given WHILE one of these runs holds after it: the command's end put the director back as it
+  //  found it - running - and the stop was undone the moment the command it interrupted wound down. resumeAfter is what
+  //  the director goes back to at the command's end: as it was found, unless the operator has said stop or resume since)
+  let resumeAfter = false
+  let stopAsked = false // (a pause/stop since the running command began, not taken back by a resume)
   async function exclusive (label, fn) {
     if (running) return `busy with ${running}`
     running = label
-    const wasPaused = director.isPaused()
+    resumeAfter = !director.isPaused()
+    stopAsked = false
     director.setPaused(true)
     await director.waitIdle()
+    // (a stop given while the director was still winding down - up to 30s - is a stop of this command too: it had not
+    //  begun, and it began anyway, the scope below opened after the stop's abort; audit)
+    if (stopAsked) { running = null; return `${label}: stopped before it began` }
     const ms = OP_DEADLINE_MS[label] || 180000
     let timer = null
     const dl = new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), ms) })
+    // (the command's own scope, as a director task has - control.js: a stop, a death or the deadline cancels everything
+    //  the command STILL begins, not only the walk under way; unscoped, each next step took a fresh token and "stop" in
+    //  the middle of a bed/fish/tower/furnaces run ended one step of it. Begun after the pause above - that is an abort too)
+    const scope = require('./control').begin()
     try {
-      const r = await Promise.race([fn(), dl])
+      const r = await Promise.race([scope.run(fn), dl])
       if (r && r.timedOut) { require('./control').abort(); move.stopMoving(bot); return `${label} timed out after ${Math.round(ms / 1000)}s - stopped` }
       return r
-    } finally { clearTimeout(timer); running = null; if (!wasPaused) director.setPaused(false) }
+    } finally { clearTimeout(timer); running = null; if (resumeAfter) director.setPaused(false) }
   }
 
   async function handle (line, { source = 'operator' } = {}) {
@@ -94,15 +107,26 @@ function make (bot, director) {
       // (and what is WORN and in the off-hand: the pack alone read "golden boots only" of a body in iron, 2026-10-06)
       case 'inventory': { const w = inv.wornArmor(bot); const off = bot.inventory.slots[45]; return (Object.entries(inv.counts(bot)).map(([k, v]) => `${k} x${v}`).join(', ') || 'empty') + ` | worn: ${['head', 'torso', 'legs', 'feet'].map(k => w[k] ? w[k].name : '-').join(', ')} (${inv.armorPoints(bot)} pts) | off-hand: ${off ? off.name : '-'}` }
       case 'decide': { const d = director.decide(); return `${d.name}: ${d.why}` }
-      case 'pause': director.setPaused(true); move.stopMoving(bot); setFlag(true); return 'paused'
-      case 'resume': director.setPaused(false); setFlag(false); return 'resumed'
-      case 'stop': director.setPaused(true); move.stopMoving(bot); setFlag(true); return 'stopped (paused) - "resume" to continue'
-      case 'task': { director.setPaused(false); return director.forceTask(a[0]) ? `next task: ${a[0]}` : 'unknown task: ' + Object.keys(director.TASKS).join(', ') }
+      case 'pause': resumeAfter = false; stopAsked = true; director.setPaused(true); move.stopMoving(bot); setFlag(true); return 'paused'
+      // (while an operator command runs the director stays held for it - two drivers on one body otherwise; exclusive
+      //  lets it go at the command's end)
+      case 'resume': setFlag(false); stopAsked = false; if (running) { resumeAfter = true; return `resumed - once ${running} ends` } director.setPaused(false); return 'resumed'
+      case 'stop': resumeAfter = false; stopAsked = true; director.setPaused(true); move.stopMoving(bot); setFlag(true); return 'stopped (paused) - "resume" to continue'
+      // (a name that is no task changes nothing: it resumed a stopped bot on a typo; and not under a running operator
+      //  command - two drivers on one body)
+      case 'task': {
+        if (!director.TASKS[a[0]]) return 'unknown task: ' + Object.keys(director.TASKS).join(', ')
+        if (running) return `busy with ${running}`
+        director.setPaused(false)
+        return director.forceTask(a[0]) ? `next task: ${a[0]}` : 'unknown task: ' + Object.keys(director.TASKS).join(', ')
+      }
       case 'ensure': case 'obtain': return exclusive('ensure', async () => { const ok = await craft.ensure(bot, a[0], num(1, 1)); return `ensure ${a[0]}: ${ok ? 'ok' : 'failed'} (holding ${inv.count(bot, a[0])})` })
-      case 'goto': return exclusive('goto', async () => { const r = await move.travel(bot, { x: num(0), y: num(1), z: num(2) }, { range: 2, underground: true }); return `goto: ${r.ok ? 'arrived' : r.why}` })
+      // (numbers or nothing: a word where a coordinate goes was `undefined` all the way into the walk - and into memory.json
+      //  as the home, or the build's origin, for sethome and build below)
+      case 'goto': { if (![num(0), num(1), num(2)].every(Number.isFinite)) return 'usage: goto <x> <y> <z>'; return exclusive('goto', async () => { const r = await move.travel(bot, { x: num(0), y: num(1), z: num(2) }, { range: 2, underground: true }); return `goto: ${r.ok ? 'arrived' : r.why}` }) }
       // walk x z [range] - the operator's hands-off walk: no block broken, none placed (out of someone else's base)
       // walk3 x y z [range] - the same to a block (a goal by x/z alone wanders the tunnels under it)
-      case 'walk': case 'walk3': return exclusive('walk', async () => { const r = await move.goTo(bot, cmd === 'walk3' ? new goals.GoalNear(num(0), num(1), num(2), num(3, 2)) : new goals.GoalNearXZ(num(0), num(1), num(2, 3)), { timeoutMs: 120000, stuckMs: 15000, dig: false, place: false, label: 'walk (no dig)' }); return `walk: ${r.ok ? 'arrived' : r.why} at ${move.fmt(bot.entity.position)}` })
+      case 'walk': case 'walk3': if (![num(0), num(1)].concat(cmd === 'walk3' ? [num(2)] : []).every(Number.isFinite)) return 'usage: walk <x> <z> [range] | walk3 <x> <y> <z> [range]'; return exclusive('walk', async () => { const r = await move.goTo(bot, cmd === 'walk3' ? new goals.GoalNear(num(0), num(1), num(2), num(3, 2)) : new goals.GoalNearXZ(num(0), num(1), num(2, 3)), { timeoutMs: 120000, stuckMs: 15000, dig: false, place: false, label: 'walk (no dig)' }); return `walk: ${r.ok ? 'arrived' : r.why} at ${move.fmt(bot.entity.position)}` })
       case 'home': return exclusive('home', async () => { const r = await base.goHome(bot); return `home: ${r.ok ? 'arrived' : r.why}` })
       case 'movebase': { // movebase save <name> <schematic> <x> <y> <z> [corner] [anywood] | movebase restore <name> | movebase list
         // A SECOND BASE FOR A FAR BUILD: every per-home record (the home-abandon list in director.js, the bed's spawn) and the
@@ -133,7 +157,7 @@ function make (bot, director) {
           // (only for a FAR build: one near the old home would settle beside it again - audit)
           const h = mem.get().home
           if (h && Math.hypot(origin.x - h.x, origin.z - h.z) < 256) return `the new build is ${Math.round(Math.hypot(origin.x - h.x, origin.z - h.z))} from home - movebase is for a build 256+ away; use build`
-          director.setPaused(true); move.stopMoving(bot)
+          resumeAfter = false; director.setPaused(true); move.stopMoving(bot) // (resumeAfter: a command still running does not un-pause it at its end)
           const rec = await snap()
           mem.update(mm => { mm.bases = Object.assign({}, mm.bases, { [nm]: rec }); for (const k of F) mm[k] = EMPTY[k] !== undefined ? clone(EMPTY[k]) : null })
           // (a job that will not set leaves the old base as it was - never homeless with the castle's job; audit)
@@ -146,7 +170,7 @@ function make (bot, director) {
           const rec = (mem.get().bases || {})[nm]; if (!rec) return `no saved base "${nm}"`
           const curName = 'auto-' + ((mem.get().build && mem.get().build.name) || 'base')
           if (mem.get().home && curName === nm) return `the base left would be saved as "${curName}" - the name being restored; rename it first`
-          director.setPaused(true); move.stopMoving(bot)
+          resumeAfter = false; director.setPaused(true); move.stopMoving(bot) // (resumeAfter: a command still running does not un-pause it at its end)
           // (the base we leave is saved first, never dropped: its chests and their contents - audit)
           const cur = mem.get().home ? await snap() : null
           const before = { bases: clone(mem.get().bases) }; for (const k of F) before[k] = clone(mem.get()[k])
@@ -171,6 +195,7 @@ function make (bot, director) {
       case 'withdraw': return exclusive('withdraw', async () => { const n = Math.max(1, Number(a[1]) || 64); const got = await base.withdraw(bot, a[0], n).catch(e => 'threw ' + e.message); return `withdraw ${a[0]}: took ${got}` }) // withdraw <item> [n] - out of the chests into the pack
       case 'sethome': {
         const p = a.length >= 3 ? { x: num(0), y: num(1), z: num(2) } : world.feetPos(bot)
+        if (!p || ![p.x, p.y, p.z].every(Number.isFinite)) return 'usage: sethome [x y z]'
         base.setHome(p); return `home set ${move.fmt(p)}`
       }
       case 'dig': { // dig x y z [own] - the operator's hand: dig one block from where the body stands (a body wedged under a
@@ -214,6 +239,7 @@ function make (bot, director) {
         const name = a[0]
         if (!name || a.length < 4) return 'usage: build <schematic> <x> <y> <z> [corner] [anywood] [skip=block,block] [swap=block>block,block>block]   (coords are the CENTRE unless "corner"; wood is the blueprint species unless "anywood"; skip/swap: the cost check\'s choices)'
         let origin = { x: num(1), y: num(2), z: num(3) }
+        if (![origin.x, origin.y, origin.z].every(Number.isFinite)) return 'bad coordinates - build <schematic> <x> <y> <z>'
         const corner = a.includes('corner')
         // the operator's choices from the cost check (block names, no spaces): skip=anvil,bell swap=lightning_rod>oak_fence
         const prefs = { skip: [], swap: {} }

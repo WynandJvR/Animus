@@ -22,9 +22,46 @@ const DEFAULTS = {
 
 let mem = null
 
+// ONLY A FILE THAT IS NOT THERE IS A FRESH START. Every failure used to be one: a file cut short by a crash or a power
+// loss (the write is a tmp file renamed over it, never synced), a read refused while another program held it - memory began
+// again from nothing, and the first save a second later wrote that nothing over the file: home, the chests, the build, the
+// graves, and the records of whose blocks are whose (the anti-grief guard's). Now: the file; failing that, the newest of
+// the write's own tmp copies that reads whole; failing that, the bad file is kept beside it (memory.json.corrupt-<time>)
+// before anything is written over it, and said.
 function load () {
   if (mem) return mem
-  try { mem = Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(FILE, 'utf8'))) } catch { mem = JSON.parse(JSON.stringify(DEFAULTS)) }
+  const read = f => Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(f, 'utf8')))
+  const say = m => { try { require('./log').log('memory', m) } catch {} }
+  // (a read REFUSED - another program holding the file open, Windows - is asked again, a second in all: it is not a bad file)
+  let e = null
+  for (let i = 0; i < 5; i++) {
+    try { mem = read(FILE); return mem } catch (err) { e = err }
+    if (e.code === 'ENOENT' || e instanceof SyntaxError) break
+    try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250) } catch {}
+  }
+  // (no file: a fresh start, as ever - a deleted memory.json is the operator's way to one, and no tmp copy brings it back)
+  if (e.code === 'ENOENT') { mem = JSON.parse(JSON.stringify(DEFAULTS)); return mem }
+  // (REFUSED to the end - the file is there and may be whole, only not ours to read just now: no empty memory is begun on
+  //  it - its first save would go over the good file the moment the hold lifts. Out, said; the supervisor starts us again
+  //  and the read is asked again then; audit)
+  if (!(e instanceof SyntaxError)) {
+    say(`memory.json could not be read (${e.code || ''} ${e.message}) - not starting on an empty memory; exiting for the supervisor to try again`)
+    try { console.error(`[memory] memory.json could not be read (${e.message}) - exiting`) } catch {}
+    process.exit(1)
+  }
+  // (a copy as new as the file itself, to the minute - one left behind by a rename that failed weeks ago is another time's memory)
+  const since = (() => { try { return fs.statSync(FILE).mtimeMs - 60000 } catch { return Infinity } })()
+  const spare = [FILE + '.tmp', FILE + '.exit.tmp']
+    .map(f => { try { return { f, t: fs.statSync(f).mtimeMs, m: read(f) } } catch { return null } })
+    .filter(s => s && s.t >= since).sort((a, b) => b.t - a.t)[0]
+  if (spare) {
+    mem = spare.m
+    say(`memory.json would not read (${e.message}) - memory taken from ${path.basename(spare.f)} (written ${new Date(spare.t).toISOString()})`)
+  } else {
+    mem = JSON.parse(JSON.stringify(DEFAULTS))
+    say(`memory.json would not read (${e.message}) and no spare copy reads either - starting with an empty memory`)
+  }
+  try { const keep = `${FILE}.corrupt-${Date.now()}`; fs.copyFileSync(FILE, keep); say(`the unreadable memory.json kept as ${path.basename(keep)}`) } catch {}
   return mem
 }
 

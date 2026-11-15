@@ -101,21 +101,60 @@ async function getSeeds (bot, n, ctx = {}) {
   return inv.count(bot, 'wheat_seeds') > 0
 }
 
+// (lastUse: what the last use really was - the item in the hand at the click, how far the eye stood, or why none was made:
+//  measurement only, said with a cell that stayed bare - establish)
+let lastUse = ''
 async function useOn (bot, pos, itemName) {
+  lastUse = ''
   const item = inv.items(bot).find(i => i.name === itemName || i.name.endsWith(itemName))
-  if (!item) return false
+  if (!item) { lastUse = `no ${itemName} in the pack`; return false }
   const b = bot.blockAt(new Vec3(pos.x, pos.y, pos.z))
-  if (!b) return false
+  if (!b) { lastUse = 'block not loaded'; return false }
   if (!act.reach(bot, pos, 4)) {
     const r = await move.goTo(bot, new goals.GoalNear(pos.x, pos.y + 1, pos.z, 2), { timeoutMs: 20000, label: 'farm cell', dig: false })
-    if (!r.ok) return false
+    if (!r.ok) { lastUse = `walk to it failed (${r.why || '?'})`; return false }
   }
+  // (THE WIRE round the use, both ways - measurement only: what went out about the hand and the click, and what the server
+  //  sent back about the pack. A place the server cancels comes back with the whole pack resent (window_items); a hand it
+  //  holds differently shows in its own slot packets. The body's and the world's chatter is left out)
+  const sent = []; const got = []; const cl = bot._client
+  const NOISE = /^(position|position_look|look|flying|tick_end|keep_alive|rel_entity_move|entity_move_look|entity_look|entity_head_rotation|entity_velocity|entity_teleport|sync_entity_position|entity_metadata|entity_update_attributes|update_time|map_chunk|unload_chunk|update_light|spawn_entity|entity_destroy|entity_status|entity_equipment|sound_effect|entity_sound_effect|world_particles|bundle_delimiter|chunk_batch_start|chunk_batch_finished|update_view_position|player_info|playerlist_header|ping|world_event|animation|set_passengers|block_change|multi_block_change|block_action|entity_effect|remove_entity_effect|damage_event|hurt_animation|collect|experience|update_health|set_ticking_state|step_tick|player_chat|system_chat|profileless_chat|block_entity_data|tile_entity_data)$/
+  const brief = (name, d) => { try { if (name === 'held_item_slot') return `${name}:${d.slotId != null ? d.slotId : d.slot}`; if (name === 'block_place') return `${name}:hand${d.hand},face${d.direction},seq${d.sequence}`; if (name === 'window_click') return `${name}:slot${d.slot},mode${d.mode}`; if (name === 'set_slot') return `${name}:win${d.windowId},slot${d.slot}`; if (name === 'window_items') return `${name}:win${d.windowId}` } catch {} return name }
+  const onIn = (d, meta) => { try { if (meta && !NOISE.test(meta.name) && got.length < 24) got.push(brief(meta.name, d)) } catch {} }
+  const w0 = cl.write
+  const w1 = function (name, d) { try { if (!NOISE.test(name) && sent.length < 24) sent.push(brief(name, d)) } catch {} return w0.apply(this, arguments) }
+  cl.on('packet', onIn); cl.write = w1
+  // (a shield worn takes the hoe's click - inv.shieldTakesClick: shift-clicked, as act.useOn's; the ledge crouch held off
+  //  for the click so the sneak is ours from the press to the let-go)
+  const secondary = inv.shieldTakesClick(bot, item.name); const letGo = secondary ? reflex.holdNoSneak() : null; let sneaked = false
+  // (WHO LETS GO OF THE KEY between the press and the click - measurement only: the first caller that takes sneak up, or
+  //  clears every key, while this use holds it; said with the use's report)
+  let upBy = ''; const set0 = bot.setControlState; const clr0 = bot.clearControlStates
+  const who = () => { try { return String(new Error().stack).split('\n').slice(3, 6).map(l => l.trim().replace(/^at /, '').replace(/\(?[A-Za-z]:[^)]*[\\/]([^\\/)]+)\)?$/, '$1')).join(' < ') } catch { return '?' } }
+  const set1 = function (k, v) { if (k === 'sneak' && !v && !upBy && bot.getControlState('sneak')) upBy = who(); return set0.apply(this, arguments) }
+  const clr1 = function () { if (!upBy && bot.getControlState('sneak')) upBy = 'clearControlStates: ' + who(); return clr0.apply(this, arguments) }
+  if (secondary) { bot.setControlState = set1; bot.clearControlStates = clr1 }
+  const unwrap = () => { if (bot.setControlState === set1) bot.setControlState = set0; if (bot.clearControlStates === clr1) bot.clearControlStates = clr0 }
   try {
     await bot.equip(item, 'hand')
+    if (secondary) bot.setControlState('sneak', true)
     await bot.lookAt(new Vec3(pos.x + 0.5, pos.y + 1, pos.z + 0.5), true)
-    await bot.activateBlock(b, new Vec3(0, 1, 0))
-  } catch { return false }
-  await move.sleep(250)
+    if (secondary) await act.sneakDown(bot) // (down at the click, not just pressed before it - act.sneakDown)
+    sneaked = !!bot.getControlState('sneak')
+    unwrap() // (the let-go after the click is this use's own)
+    const held = bot.heldItem ? bot.heldItem.name : 'nothing'
+    // (what the server answered: every block update at the cell or over it in the next moments, and the tool's wear -
+    //  a use the server took wears the hoe and sends the cell back changed; one it refused sends the old block or nothing)
+    const wear0 = bot.heldItem ? bot.heldItem.durabilityUsed : null; const ups = []
+    const onUp = (o, n) => { try { const q = n && n.position; if (q && q.x === pos.x && q.z === pos.z && (q.y === pos.y || q.y === pos.y + 1)) ups.push(`${o ? o.name : '?'}>${n.name}@y${q.y}`) } catch {} }
+    bot.on('blockUpdate', onUp)
+    try {
+      await bot.activateBlock(b, new Vec3(0, 1, 0))
+      await move.sleep(250)
+    } finally { bot.removeListener('blockUpdate', onUp) }
+    const wear1 = bot.heldItem ? bot.heldItem.durabilityUsed : null
+    lastUse = `${item.name} used: ${held} in hand at the click, ${bot.entity.position.offset(0, 1.62, 0).distanceTo(new Vec3(pos.x + 0.5, pos.y + 1, pos.z + 0.5)).toFixed(1)}b off, sneaking ${sneaked}, the server sent ${ups.length ? ups.join(' ') : 'no block update'}, wear ${wear0}>${wear1}${upBy ? '; the key was let go before the click by ' + upBy : ''}; out ${sent.join(' ') || '-'}; in ${got.join(' ') || '-'}`
+  } catch (e) { lastUse = `${item.name} use threw: ${e.message}`; return false } finally { unwrap(); if (secondary) { bot.setControlState('sneak', false); letGo() } cl.removeListener('packet', onIn); if (cl.write === w1) cl.write = w0 }
   return true
 }
 
@@ -177,16 +216,17 @@ async function establish (bot, ctx = {}) {
   if (!inv.bestTool(bot, 'hoe', 1)) { if (!await craft().ensure(bot, 'wooden_hoe', inv.count(bot, 'wooden_hoe') + 1, ctx)) return false }
   // start small: 8 seeds get the farm going and every harvest returns more seeds than it used
   const wantSeeds = Math.min(64, Math.max(8, unplantedCount(bot)))
-  if (inv.count(bot, 'wheat_seeds') < wantSeeds) await require('./base').withdraw(bot, 'wheat_seeds', wantSeeds - inv.count(bot, 'wheat_seeds')).catch(() => 0)
+  if (inv.count(bot, 'wheat_seeds') < wantSeeds) await require('./base').withdraw(bot, 'wheat_seeds', wantSeeds - inv.count(bot, 'wheat_seeds'), { needRoom: true }).catch(() => 0) // (the seeds are the farm's need: a slot made for them - base.withdraw needRoom)
   if (inv.count(bot, 'wheat_seeds') < 8) await getSeeds(bot, 8, ctx)
-  let planted = 0; let newly = 0
+  let planted = 0; let newly = 0; const bare = {}; const bareAt = {}
   for (const c of f.cells) {
     if (ctx.shouldStop && ctx.shouldStop()) break
     await reflex.waitClear()
+    let hoeSaid = ''
     const b = world.at(bot, c.x, c.y, c.z); const up = world.at(bot, c.x, c.y + 1, c.z)
-    if (!b || !up) continue
+    if (!b || !up) { bare['not loaded'] = (bare['not loaded'] || 0) + 1; if (!bareAt['not loaded']) bareAt['not loaded'] = move.fmt(c); continue }
     if (up.name === 'wheat') { planted++; continue }
-    if (world.isWaterBlock(up)) continue // water over the cell washes seeds straight off
+    if (world.isWaterBlock(up)) { bare['water over it'] = (bare['water over it'] || 0) + 1; if (!bareAt['water over it']) bareAt['water over it'] = move.fmt(c); continue } // water over the cell washes seeds straight off
     // a hoe tills only under open AIR: leaf litter, grass or a flower on the cell has an empty hitbox (so it reads as
     // "airish") but blocks the tilling - 16 of 20 cells under leaf litter stayed grass for an hour (2026-09-23)
     if (/^(grass_block|dirt)$/.test(b.name) && up.name !== 'air' && world.isAirish(up)) {
@@ -196,17 +236,21 @@ async function establish (bot, ctx = {}) {
       // a wooden hoe tills ~60 cells: a big plot wears one out part way
       if (!inv.items(bot).some(i => /_hoe$/.test(i.name))) await craft().ensure(bot, 'wooden_hoe', 1, ctx).catch(() => false)
       await useOn(bot, c, '_hoe')
+      hoeSaid = lastUse
     }
     const b2 = world.at(bot, c.x, c.y, c.z)
     if (b2 && b2.name === 'farmland' && inv.has(bot, 'wheat_seeds')) {
       await useOn(bot, c, 'wheat_seeds')
       const now = world.at(bot, c.x, c.y + 1, c.z)
-      if (now && now.name === 'wheat') { planted++; newly++ } // counted only if the crop is really there
+      if (now && now.name === 'wheat') { planted++; newly++; continue } // counted only if the crop is really there
     }
+    // (why a cell stayed bare, counted: "35/52 planted (0 just now)" four passes running, 17 seeds and a hoe in the pack,
+    //  said nothing of what stood in the other 17 cells, 2026-11-14)
+    { const b3 = world.at(bot, c.x, c.y, c.z); const u3 = world.at(bot, c.x, c.y + 1, c.z); const r = `${b3 ? b3.name : '?'} under ${u3 ? u3.name : '?'}${b3 && b3.name === 'farmland' && !inv.has(bot, 'wheat_seeds') ? ', no seeds' : ''}${hoeSaid && b3 && b3.name !== 'farmland' ? ` [${hoeSaid}]` : ''}`; bare[r] = (bare[r] || 0) + 1; if (!bareAt[r]) bareAt[r] = move.fmt(c) }
   }
   f.plantedAt = f.plantedAt || Date.now()
   mem.set('farm', f)
-  log('farm', `${planted}/${f.cells.length} cells planted (${newly} just now)`)
+  log('farm', `${planted}/${f.cells.length} cells planted (${newly} just now)${Object.keys(bare).length ? ' - bare: ' + Object.entries(bare).map(([r, n]) => `${n} ${r} (e.g. ${bareAt[r]})`).join(', ') : ''}`)
   return newly > 0
 }
 
@@ -463,7 +507,9 @@ async function harvest (bot, ctx = {}) {
       continue
     }
     for (const c of inReach) {
-      if (await act.dig(bot, { x: c.x, y: c.y + 1, z: c.z }, { timeoutMs: 4000, force: true, noWalk: true })) got++
+      // (a plant that would not come out is left for the next round, as one that could not be walked to: asked again, it was
+      //  the same refusal up to 200 times over, a second and a half each)
+      if (await act.dig(bot, { x: c.x, y: c.y + 1, z: c.z }, { timeoutMs: 4000, force: true, noWalk: true })) got++; else { skip.add(c); continue }
       const soil = world.at(bot, c.x, c.y, c.z)
       if (soil && soil.name === 'farmland' && inv.has(bot, 'wheat_seeds')) {
         try { await bot.equip(inv.items(bot).find(i => i.name === 'wheat_seeds'), 'hand'); await bot.activateBlock(soil, new Vec3(0, 1, 0)) } catch {}

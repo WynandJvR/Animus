@@ -54,6 +54,21 @@ function isOpenTrapdoor (b) {
   if (!b || !/_trapdoor$/.test(b.name)) return false
   try { const p = b.getProperties(); return !!(p && (p.open === true || p.open === 'true')) } catch { return false }
 }
+// AN OPEN TRAPDOOR OVER A LADDER IS A LADDER - vanilla since 1.9: open, a ladder right under it, both facing the same way.
+// The shaft's hatch, left open while the build goes on (build's hatches), is climbed through as the ladder itself. ONE
+// reading: the physics' (prismarine-physics climbableTrapdoor, enabled for 26.x by patch-mc262.js), the planner's
+// climbables (move.js) and the walk model's climb (rooms.js)
+// (the woods the physics knows - its trapdoorIds: a bamboo, pale oak or copper hatch it does not climb, so neither does any
+//  walker here; audit)
+const CLIMB_TRAPDOOR_RE = /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|crimson|warped)_trapdoor$/
+function climbableTrapdoor (b, below) {
+  if (!b || !CLIMB_TRAPDOOR_RE.test(b.name) || !isOpenTrapdoor(b) || !below || below.name !== 'ladder') return false
+  try { return String(b.getProperties().facing) === String(below.getProperties().facing) } catch { return false }
+}
+// THE BODY IS ON A CLIMBABLE - the physics' own reading (prismarine-physics isOnLadder, the feet's cell): a ladder, a vine,
+// scaffolding, or a hatch climbableTrapdoor reads as one. Held there, not falling: vanilla resets the fall distance on one
+const CLIMB_BLOCK_RE = /^(ladder|vine|scaffolding)$/
+function climbableAt (bot, x, y, z) { const b = at(bot, x, y, z); if (!b) return false; return CLIMB_BLOCK_RE.test(b.name) || climbableTrapdoor(b, at(bot, x, y - 1, z)) }
 // THE PLATE'S EDGE - ONE model for every walker: the planner's steps (move.js) and the way-out search (build.js wayOut).
 // An open trapdoor's plate stands on the edge opposite its facing (vanilla's open boxes); an OPEN door's is swung to its
 // hinge's side (right: clockwise of its facing, left: counter-clockwise). [dx, dz] of that edge, or null. A closed door is
@@ -111,6 +126,16 @@ function floorTop (b) {
 }
 // the eye's height standing at feet cell p (on whatever floor is under it)
 function eyeAt (bot, p) { return p.y - 1 + floorTop(at(bot, p.x, p.y - 1, p.z)) + 1.62 }
+// EVERY HEIGHT THE EYE CAN BE AT standing in feet cell p: one on a level floor; on a floor of two heights - a stair: its low
+// step and its high one - both, low first. A walk that ends "in the cell" ends on either: the stand for a trapdoor five up
+// was a bottom stair, in reach from its high step (4.04) and not from its low one (4.41) - the body came to rest on the low
+// one after a 237-cell walk, 76s, and the cell and three round it rested, 2026-11-14 21:41. A reach that must hold reads all
+function eyesAt (bot, p) {
+  const b = at(bot, p.x, p.y - 1, p.z); const hi = floorTop(b); let lo = hi
+  const sh = b && b.shapes; if (sh && sh.length > 1) lo = Math.min(...sh.map(q => q[4]))
+  const y0 = p.y - 1 + 1.62
+  return lo < hi - 0.01 ? [y0 + lo, y0 + hi] : [y0 + hi]
+}
 // Can a player stand with feet at (x,y,z)? Solid, non-hazard floor; two clear cells.
 // (the floor as THE PLANNER that walks the legs has it - mineflayer-pathfinder's physical floor: never a block over a block
 //  high (its "fences": a fence, a wall, a fence gate - never a floor to it at all), and never a door (walked through,
@@ -177,6 +202,12 @@ function tod (bot) { return bot.time && typeof bot.time.timeOfDay === 'number' ?
 //   dusk  12000..12900  head home, bed down
 //   night 12900..23200  mobs spawn
 function phase (bot) { const t = tod(bot); if (t >= 12900 && t < 23200) return 'night'; if (t >= 12000 && t < 12900) return 'dusk'; return 'day' }
+// DIM: night, or dawn before the sun burns the night's mobs - ONE number for "dawn's over". The director's camp rule said
+// "dug in till full light" to 1500 and the bunker came out at 1000: between them, with one hostile about, dug in and climbed
+// out three times in 30 seconds, two blocks deeper each time, 2026-11-15 16:25 (the first-day-tick dig-out and its death
+// are why dawn waits at all - shelter's morning)
+const DAWN_LIGHT = 1500
+function dim (bot) { if (phase(bot) !== 'day') return true; const t = tod(bot); return t >= 23000 || t < DAWN_LIGHT }
 function isNight (bot) { return phase(bot) === 'night' }
 function isDay (bot) { return phase(bot) === 'day' }
 function ticksUntilNight (bot) { const t = tod(bot); if (isNight(bot)) return 0; return t < 12900 ? 12900 - t : 24000 - t + 12900 }
@@ -223,8 +254,10 @@ function groundY (bot, x, z, fromY) {
 }
 
 // Sky above the head? (open to the sky - no solid block for 20 up)
-function openSky (bot, pos) {
-  for (let y = pos.y + 2; y < pos.y + 22; y++) { const b = at(bot, pos.x, y, pos.z); if (b && b.boundingBox === 'block') return false }
+// (throughTrees: a tree - leaves or a branch's log, groundY's own reading - is no roof: "underground" for a grave; the default
+//  counts them, as every caller always had)
+function openSky (bot, pos, { throughTrees = false } = {}) {
+  for (let y = pos.y + 2; y < pos.y + 22; y++) { const b = at(bot, pos.x, y, pos.z); if (b && b.boundingBox === 'block' && !(throughTrees && (LEAF_RE.test(b.name) || LOG_RE.test(b.name)))) return false }
   return true
 }
 
@@ -389,9 +422,9 @@ function hasAirNeighbour (bot, p) {
   return false
 }
 
-module.exports = { standCell, isOpenTrapdoor, plateEdge, LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
-  data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, floorTop, eyeAt, feetPos, eyeBlock,
-  headInWater, feetInWater, inLava, tod, phase, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
+module.exports = { standCell, isOpenTrapdoor, climbableTrapdoor, climbableAt, plateEdge, LANTERN_RE, FURNITURE_RE, walkTicks, HOME_MARGIN, SAFE_DROP, dropAt,
+  data, v, at, name, isWaterBlock, isLiquidWater, holdsWater, isLavaBlock, isSolid, isAirish, standable, floorTop, eyeAt, eyesAt, feetPos, eyeBlock,
+  headInWater, feetInWater, inLava, tod, phase, dim, DAWN_LIGHT, isNight, isDay, ticksUntilNight, canSleepNow, lavaNear, holdsBackLava, waterNear,
   groundY, openSky, dist2, dist3, blockIds, findBlocks, scanBlocks, stateIds, sectionMay, sightReach, hasAirNeighbour, skyLitFace,
   bodyPassable, CLIMBABLE_RE, WATER_RE, LAVA_RE, LOG_RE, LEAF_RE, NATURAL_RE, FALLING_RE, DANGER_FLOOR_RE, HOT_RE, CONTACT_HURT_RE, hotBlock, burnsAt
 }

@@ -126,10 +126,12 @@ function visibleClay (bot, maxDistance = 128, point, { sky = true } = {}) {
   const minY = sky ? -Infinity : Math.floor(from.y) - 4
   return world.findBlocks(bot, K.re, { maxDistance, count: 48, point: point ? new Vec3(point.x, point.y, point.z) : undefined, filter: b => sought(bot, b.position, { sky, minY }) })
 }
-function findDeposit (bot) {
-  const seen = visibleClay(bot)[0]
+// (`tried`: this trip's deposits left 'stuck' - the next one, never the same block again: see gatherInner)
+function findDeposit (bot, tried = null) {
+  const away = p => !tried || !tried.some(t => world.dist2(t, p) < 24)
+  const seen = visibleClay(bot).find(b => away(b.position))
   if (seen) return seen.position
-  const known = gatherLib().knownResource(K.name, bot.entity.position, { maxFromHome: SEARCH_RADIUS })
+  const known = gatherLib().knownResource(K.name, bot.entity.position, { maxFromHome: SEARCH_RADIUS, filter: tried ? away : null })
   return known && !nearSpent(known) ? known : null
 }
 
@@ -231,7 +233,23 @@ async function settle (bot, p) {
   const here = () => dropsNear(bot, re).filter(e => world.dist3(e.position, { x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 }) < 5)
   // (a moment for the drop to exist at all: the server spawns it with the block's break)
   while (Date.now() - t0 < 600 && !here().length) await move.sleep(100)
-  while (Date.now() - t0 < 5000 && here().some(e => rising(bot, e))) await move.sleep(150)
+  await whileRising(bot, here, 5000)
+}
+// WAIT WHILE A BALL UNDER WATER IS STILL GOING UP - read by its height a second apart (an item's moves come about once a
+// second; a look sooner reads it still), never by the water over it alone: on this server a ball lies on the bed of the
+// cell it was dug from (y61.00, still, water over it, the whole 30s pickup - 2026-11-15 07:09-07:11; the dive's own note,
+// 2026-09-28), and "water over it" waited 5s on every block dug and 6s on every pickup, for balls that never came up.
+// None higher than at the last look: what is down there stays down - bedBalls/dipForBed take it
+async function whileRising (bot, here, maxMs, stop = () => false) {
+  const t0 = Date.now(); let prev = null
+  while (!stop() && Date.now() - t0 < maxMs) {
+    const ds = here().filter(e => rising(bot, e))
+    if (!ds.length) return
+    const now = new Map(ds.map(e => [e.id, e.position.y]))
+    if (prev && ds.every(e => prev.has(e.id) && now.get(e.id) <= prev.get(e.id) + 0.01)) return
+    prev = now
+    await idle(bot, 1100)
+  }
 }
 
 // Collect what floated up. From breathing stands and surface cells only - a ball is swum after once it bobs at the
@@ -242,7 +260,7 @@ async function settle (bot, p) {
 async function pickUp (bot, stop, sess) {
   const re = K.dropRe
   const t0 = Date.now()
-  while (!stop() && Date.now() - t0 < 6000 && dropsNear(bot, re).some(e => rising(bot, e))) await idle(bot, 250)
+  await whileRising(bot, () => dropsNear(bot, re), 6000, stop)
   const tries = new Map()
   let swimSaid = false
   let seen = new Map() // id -> where it was at the last look
@@ -252,6 +270,8 @@ async function pickUp (bot, stop, sess) {
     const me = bot.entity.position
     const ds = dropsNear(bot, re).filter(e => (tries.get(e.id) || 0) < 2 && !rising(bot, e)).sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))
     if (!ds.length) {
+      // (the bed's balls, under water and still - one bounded breath for them, then the surface again: dipForBed)
+      if (await dipForBed(bot, stop)) continue
       // (why the pickup ends with balls left: all "rising" - under water still, or the client's copy of where they are gone
       //  stale - or tried twice. 12 of 12 lost at 13:59 and no swim ever tried, 2026-09-28: said once, with where they are)
       const left = dropsNear(bot, re)
@@ -448,25 +468,8 @@ async function dive (bot, plan, sess, stop) {
     // air, over it water", 2026-09-28). Walked over one at a time, each step only while the air left covers it and the
     // way up, never with a mob within 6 (a drowned); inside the dive, so the air reflex knows it is meant; audit
     if (!broke() && !stop()) {
-      const STEP_MS = 1200
-      for (let n = 0; n < 12; n++) {
-        if (broke() || stop() || reflex.hostiles(6).some(h => h.e.name !== 'bat')) break
-        if (under() + STEP_MS + riseMs + 500 > DIVE_MS) break
-        const me = bot.entity.position
-        const d = dropsNear(bot, K.dropRe, 3).filter(e => Math.abs(e.position.y - me.y) < 1.5).sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
-        if (!d) break
-        const t0 = Date.now()
-        while (d.isValid && Date.now() - t0 < STEP_MS && !broke()) {
-          const p = bot.entity.position
-          await bot.look(Math.atan2(-(d.position.x - p.x), -(d.position.z - p.z)), 0, true)
-          bot.setControlState('jump', false)
-          bot.setControlState('forward', Math.hypot(d.position.x - p.x, d.position.z - p.z) > 0.3)
-          await move.sleep(50)
-        }
-        bot.setControlState('forward', false)
-        if (d.isValid) break // (not taken in its step: the rest are no nearer)
-        res.gathered = (res.gathered || 0) + 1
-      }
+      const n = await takeOffBed(bot, { list: () => dropsNear(bot, K.dropRe, 3).filter(e => Math.abs(e.position.y - bot.entity.position.y) < 1.5), under, broke, stop, riseMs })
+      if (n) res.gathered = n
     }
     // UP: straight up - the column is open to the sky. The reflex's hard limit bounds this: past it the dive breaks
     // and the air reflex has the body.
@@ -490,6 +493,111 @@ async function dive (bot, plan, sess, stop) {
   res.balls = balls(bot) - before
   log(K.name, `dive at ${where} (${col.depth} deep): dug ${res.dug} ${K.name} in ${(res.underMs / 1000).toFixed(1)}s under (${res.end}) -> +${res.balls} ${K.unit}${res.dug ? ` (${(res.balls / res.dug).toFixed(1)} a block)` : ''}${res.gathered ? `, ${res.gathered} taken off the bed` : ''}${afloat ? `, ${afloat} afloat out of reach` : ''}`)
   return res
+}
+
+// TAKE THE BALLS OFF THE BED, one at a time - the dive's and the dip's one walk: each walked over with jump let go (the
+// body sinks onto it), each step only while the air left covers it and the way up (`riseMs`), never with a mob within 6
+// (a drowned). Only inside a declared dive (reflex.startDive), so the air reflex knows the head under is meant; audit.
+// `list()`: the balls it may go for, read afresh each step. `onTick`: the caller's own reading each tick. Returns the count.
+async function takeOffBed (bot, { list, under, broke, stop, riseMs, stepMs = 1200, max = 12, onTick = null }) {
+  let n = 0
+  for (let k = 0; k < max; k++) {
+    if (broke() || stop() || reflex.hostiles(6).some(h => h.e.name !== 'bat')) break
+    if (under() + stepMs + riseMs + 500 > DIVE_MS) break
+    const me = bot.entity.position
+    const d = list().sort((a, b) => a.position.distanceTo(me) - b.position.distanceTo(me))[0]
+    if (!d) break
+    const t0 = Date.now()
+    while (d.isValid && Date.now() - t0 < stepMs && !broke()) {
+      if (onTick) onTick()
+      const p = bot.entity.position
+      await bot.look(Math.atan2(-(d.position.x - p.x), -(d.position.z - p.z)), 0, true)
+      bot.setControlState('jump', false)
+      bot.setControlState('forward', Math.hypot(d.position.x - p.x, d.position.z - p.z) > 0.3)
+      await move.sleep(50)
+    }
+    bot.setControlState('forward', false)
+    // (probe 63: a dip from a bank stand took 0 in 0.0s under, 4 times running, 2026-11-15 10:29 - where the body got to)
+    if (d.isValid) { const p = bot.entity.position; log(K.name, `(probe) the ball at ${d.position.x.toFixed(1)},${d.position.y.toFixed(1)},${d.position.z.toFixed(1)} not taken in ${stepMs}ms: the body at ${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}, ${Math.hypot(d.position.x - p.x, d.position.z - p.z).toFixed(2)} out and ${(p.y - d.position.y).toFixed(2)} over, inWater ${!!bot.entity.isInWater}, onGround ${!!bot.entity.onGround}, under ${under()}ms`); break } // (not taken in its step: the rest are no nearer)
+    n++
+  }
+  return n
+}
+
+// THE BED'S BALLS FROM A WADING OR BANK STAND: on this server a ball does not float up - it lies on the bed of the cell it
+// was dug from. The wading dig left them a block or two under the feet, read as "rising" and waited on: 32 of 56 lost at
+// -2217,61,-466, "8 read as under water (nearest at y61.00, its cell water, over it water; moved 0.000 b/t)", 2026-11-15
+// 07:11 - 1.7 balls a block of the 4. Taken as the dive takes them: one bounded breath, down into the hole, each ball
+// walked over (takeOffBed), then up and back onto the stand it left from.
+// The balls it goes for: under water and still (whileRising has waited out any coming up), at most DIP_DEPTH under the
+// feet and 4 out, each in a cell open to the sky (the way up is straight up), outside the zones.
+const DIP_DEPTH = 2 // deeper is the dive's: its column check, its breath plan
+function bedBalls (bot, me = bot.entity.position) {
+  return dropsNear(bot, K.dropRe, 6).filter(e => {
+    const p = e.position; const c = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }
+    return rising(bot, e) && p.y >= me.y - DIP_DEPTH - 0.1 && p.y <= me.y + 0.5 && Math.hypot(p.x - me.x, p.z - me.z) <= 4 && underSky(bot, c) && outOfZones(c) && openWayTo(bot, me, c)
+  })
+}
+// (and the body's way to it open over the head too: a ball 4 out past an undercut bank lip has its own column open while
+//  the walk to it passes under the lip, and "straight up" there is a roof. Each column on the line: the body passes at
+//  its lowest open cell from the ball's height up to the stand's feet (over the wading floor, down into the hole), and
+//  nothing solid over that up to the sky; a column solid all the way to the stand's feet is a wall. The stand's own
+//  column and the ball's are read elsewhere; audit L45-1)
+function openWayTo (bot, me, c) {
+  const dx = c.x + 0.5 - me.x; const dz = c.z + 0.5 - me.z; const steps = Math.ceil(Math.hypot(dx, dz) * 2)
+  const own = { x: Math.floor(me.x), z: Math.floor(me.z) }; const top = Math.floor(me.y)
+  for (let i = 1; i < steps; i++) {
+    const x = Math.floor(me.x + dx * i / steps); const z = Math.floor(me.z + dz * i / steps)
+    if ((x === own.x && z === own.z) || (x === c.x && z === c.z)) continue
+    let y = c.y
+    while (y <= top && world.isSolid(world.at(bot, x, y, z))) y++
+    if (y > top || !world.openSky(bot, { x, y: y - 1, z })) return false
+  }
+  return true
+}
+async function dipForBed (bot, stop) {
+  if (!bedBalls(bot).length) return 0
+  // (the body fit to go under, as for a dive: day, hp and food, no hostile near - and the reflex not holding the body)
+  const unfit = bodyUnfit(bot) || (reflex.active() ? `${reflex.active()} reflex` : null) || (world.headInWater(bot) ? 'head under already' : null)
+  if (unfit) { log(K.name, `${bedBalls(bot).length} ball(s) on the bed under me - not going down for them: ${unfit}`); return 0 }
+  // (a full breath first, head out on the stand - a dip right after the last does not start on what is left of it)
+  { const t0 = Date.now(); while (!stop() && reflex.airLeftMs() < AIR_FULL_MS && Date.now() - t0 < 6000) await idle(bot, 200) }
+  if (stop() || reflex.airLeftMs() < AIR_FULL_MS) return 0
+  const back = world.feetPos(bot) // (the stand it came down from: the way up ends on it)
+  const from = bot.entity.position.clone() // (the depth bound from the stand, not from wherever the sinking body is)
+  const before = balls(bot)
+  const riseMs = 500 + DIP_DEPTH * 350 + 1500 // (straight up, and the climb out onto the stand)
+  let wentUnder = 0
+  const mark = () => { if (!wentUnder && world.headInWater(bot)) wentUnder = Date.now() }
+  const under = () => wentUnder ? Date.now() - wentUnder : 0
+  const broke = () => reflex.diveBroken() || (reflex.active() ? `${reflex.active()} reflex` : null)
+  let taken = 0; let outOn = false; let broken = null; let underMs = 0
+  reflex.startDive(reflex.DIVE_HARD_MS)
+  try {
+    taken = await takeOffBed(bot, { list: () => bedBalls(bot, from), under, broke, stop, riseMs, stepMs: 1500, onTick: mark })
+    // UP AND BACK: jump held (a swimmer rises; against the hole's side it climbs out), toward the stand it left
+    if (!broke()) {
+      const t0 = Date.now()
+      while (!broke() && Date.now() - t0 < 4000) {
+        mark()
+        const p = bot.entity.position; const f = world.feetPos(bot)
+        if (!world.headInWater(bot) && f.x === back.x && f.z === back.z && f.y >= back.y) { outOn = true; break }
+        const dx = back.x + 0.5 - p.x; const dz = back.z + 0.5 - p.z
+        await bot.look(Math.atan2(-dx, -dz), 0, true)
+        bot.setControlState('forward', Math.hypot(dx, dz) > 0.2)
+        bot.setControlState('jump', true)
+        await move.sleep(50)
+      }
+    }
+  } finally {
+    underMs = under()
+    if (!broke()) bot.clearControlStates()
+    broken = reflex.endDive() || (reflex.active() ? `${reflex.active()} reflex` : null)
+  }
+  if (!outOn) await breathe(bot)
+  const got = balls(bot) - before
+  log(K.name, `dipped for the bed's balls under ${move.fmt(back)}: ${taken} taken (+${got} ${K.unit}) in ${(underMs / 1000).toFixed(1)}s under - ${broken ? `broken: ${broken}` : outOn ? 'back on the stand' : 'up, off the stand'}${bedBalls(bot).length ? `; ${bedBalls(bot).length} still down there` : ''}`)
+  return taken
 }
 
 // Dig the deposit round `center` until `target` balls are held, the deposit gives out, or it is time to go home.
@@ -534,14 +642,15 @@ async function digDepositInner (bot, center, target, stop, ashore, sess) {
   const misses = new Map() // block -> failed tries (a walk the reflex interrupted is no verdict: two strikes)
   const strike = p => { const k = key(p); misses.set(k, (misses.get(k) || 0) + 1); if (misses.get(k) >= 2) bad.add(k) }
   const start = balls(bot); let digs = 0; let dives = 0; let stopped = false; let unfit = null
+  let endAt = 'target' // (probe: which way out of the loop - a trip of +0 with one block in sight said nothing of why, 2026-11-15 10:01)
   log(K.name, `${visibleClay(bot, 20, center, { sky: false }).length} diggable ${K.name} block(s) in sight round ${move.fmt(center)}`)
   while (balls(bot) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
-    if (stop()) { stopped = true; break }
-    if (inv.freeSlots(bot) <= 1) { await base().tossJunk(bot); if (inv.freeSlots(bot) <= 1) { stopped = true; break } }
+    if (stop()) { stopped = true; endAt = 'stop'; break }
+    if (inv.freeSlots(bot) <= 1) { await base().tossJunk(bot); if (inv.freeSlots(bot) <= 1) { stopped = true; endAt = 'pack full'; break } }
     await breathe(bot)
     const cands = visibleClay(bot, 20, center, { sky: false }).filter(b => !bad.has(key(b.position)))
-    if (!cands.length) break
+    if (!cands.length) { endAt = 'none left unbarred'; break }
     // the nearest one that has somewhere to stand, head in air (the bank, or wading)
     let pick = null; let stand = null
     const near = cands.sort((a, c) => a.position.distanceTo(bot.entity.position) - c.position.distanceTo(bot.entity.position)).slice(0, 10)
@@ -554,6 +663,10 @@ async function digDepositInner (bot, center, target, stop, ashore, sess) {
       // everything diggable within reach from this spot (a disc is two or three stands' worth), never our own column
       const feet = world.feetPos(bot)
       const reachable = visibleClay(bot, 6, undefined, { sky: false }).filter(b => digsFrom(feet, b.position) && !wayBack(bot, feet, ashore, b.position))
+      // (planned from the stand's middle, dug from the body's eye: drifted off the middle in the shallows, every block of a
+      //  deposit was "out of reach (no walk)" to act.dig - +0 balls with 1-3 reachable, 2026-11-15 10:22. The body to the
+      //  middle of its stand first, as a player steps in to reach)
+      if (reachable.some(b => !act.reach(bot, b.position, REACH))) await act.centre(bot, 0.12, { water: true }).catch(() => {})
       let here = 0
       for (const b of reachable) {
         if (stop() || balls(bot) >= target || inv.freeSlots(bot) <= 1) break
@@ -561,16 +674,20 @@ async function digDepositInner (bot, center, target, stop, ashore, sess) {
         if (!diggable(bot, b.position)) continue // the one before it changed the water round it
         if (await act.dig(bot, b.position, { noWalk: true, timeoutMs: 8000 })) { here++; digs++; await settle(bot, b.position) }
       }
-      if (!here) strike(pick.position)
-      else await pickUp(bot, stop, sess)
+      if (!here) {
+        // (probe: a stand reached and nothing dug from it - standFor's stand and this reach disagree somewhere; 2026-11-15 10:13)
+        const pp = pick.position; const k0 = key(pp)
+        if (!misses.has(k0)) { const eye = bot.entity.position.offset(0, 1.62, 0); log(K.name, `(probe) at ${move.fmt(feet)} for the stand ${move.fmt(stand)}, nothing dug of ${move.fmt(pp)}: digsFrom ${digsFrom(feet, pp)}, wayBack ${wayBack(bot, feet, ashore, pp)}, diggable ${diggable(bot, pp)}, ${reachable.length} reachable here; the eye ${eye.distanceTo({ x: pp.x + 0.5, y: pp.y + 0.5, z: pp.z + 0.5 }).toFixed(2)} off, act: ${act.lastDigWhy() || '-'}`) }
+        strike(pp)
+      } else await pickUp(bot, stop, sess)
       continue
     }
     // nothing a breathing stand reaches: dive for it
-    if (sess.badDives >= 2) { unfit = 'two dives in a row did not surface cleanly'; break }
+    if (sess.badDives >= 2) { unfit = 'two dives in a row did not surface cleanly'; endAt = 'bad dives'; break }
     unfit = bodyUnfit(bot)
-    if (unfit) break
+    if (unfit) { endAt = 'unfit'; break }
     const plan = diveSpot(bot, cands.map(b => b.position), sess)
-    if (!plan) { for (const b of cands) bad.add(key(b.position)); continue }
+    if (!plan) { for (const b of cands) bad.add(key(b.position)); endAt = 'no dive spot'; continue }
     const r = await dive(bot, plan, sess, stop)
     dives++; digs += r.dug
     if (r.unfit) { unfit = r.end; break }
@@ -583,6 +700,7 @@ async function digDepositInner (bot, center, target, stop, ashore, sess) {
   const unreached = left.filter(b => bad.has(key(b.position))).length
   // (four balls a block of clay, one sand: what the current took is the difference)
   if (digs) log(K.name, `dug ${digs} ${K.name} at ${move.fmt(center)}${dives ? ` (${dives} dive(s))` : ''} -> ${got} ${K.unit} (${(got / digs).toFixed(1)} a block; ${Math.max(0, digs * K.per - got)} lost to the water, ${afloat} of them seen afloat out of reach) - holding ${balls(bot)}; ${left.length} left in sight, ${unreached} out of reach`)
+  if (!digs) log(K.name, `(probe) no ${K.name} dug at ${move.fmt(center)}: out by '${endAt}'${stop() ? ' (stop holds)' : ''} - ${left.length} in sight, ${bad.size} barred (${unreached} of them), ${[...misses.values()].filter(v => v >= 2).length} at two misses, ${dives} dive(s)${unfit ? ', unfit: ' + unfit : ''}`)
   if (stopped || stop()) return 'stopped'
   if (balls(bot) >= target) return 'done'
   if (unfit) { log(K.name, `not diving now: ${unfit} - the deep ${K.name} at ${move.fmt(center)} waits`); return 'unfit' }
@@ -689,10 +807,14 @@ async function gatherInner (bot, n, ctx) {
   // 2026-09-26); a beach or a desert gives a block every half second. Only when no dry sand is found out to the
   // search radius do the dives start.
   if (K.name === 'sand') { await drySand(bot, target, stop); if (balls(bot) >= target || stop() || !dryExhausted()) { log(K.name, `sand trip: +${balls(bot) - start} sand (${balls(bot)} held)`); return balls(bot) > start } }
+  // (A DEPOSIT 'stuck' IS THAT DEPOSIT, NOT THE TRIP: one block no stand dug ended the whole trip, 113b out with ~8 deposits
+  //  known, "+0 balls" twice in a morning, 2026-11-15 10:01 and 10:13 - tried for this trip, and on to the next; two of them
+  //  stuck in a row for nothing is the trip's own "not today" - the cause is then ours, not a deposit's; audit)
+  const tried = []; let stuckRun = 0
   for (let round = 0; round < 8 && balls(bot) < target; round++) {
     if (stop()) break
     await reflex.waitClear()
-    const dep = findDeposit(bot)
+    const dep = findDeposit(bot, tried)
     if (!dep) { if (!await scout(bot, stop) && exhausted()) break; continue }
     if (world.dist2(bot.entity.position, dep) > 12) {
       log(K.name, `${K.name} at ${move.fmt(dep)} (${Math.round(world.dist2(dep, home() || bot.entity.position))}b from home) - going to dig ${target - balls(bot)} ${K.unit}`)
@@ -700,9 +822,16 @@ async function gatherInner (bot, n, ctx) {
       if (!r.ok && world.dist2(bot.entity.position, dep) > 16) { if (r.why !== 'stopped') markSpent(dep); continue }
     }
     gatherLib().noteResource(K.name, dep)
+    const b0 = balls(bot)
     const why = await digDeposit(bot, dep, target, stop)
     if (why === 'spent') { log(K.name, `the ${K.name} at ${move.fmt(dep)} is dug out, or none left that a stand or a dive reaches`); markSpent(dep) }
-    else if (why === 'unfit' || why === 'stuck') break // (not spent: another hour, or another day, reaches it)
+    else if (why === 'unfit') break // (not spent: another hour, or another day, reaches it)
+    else if (why === 'stuck') {
+      tried.push({ x: dep.x, y: dep.y, z: dep.z })
+      stuckRun = balls(bot) > b0 ? 0 : stuckRun + 1
+      log(K.name, `the ${K.name} at ${move.fmt(dep)} is stuck for now (+${balls(bot) - b0} here)${stuckRun >= 2 ? ' - two stuck in a row, not today' : ' - on to the next one'}`)
+      if (stuckRun >= 2) break
+    } else stuckRun = 0
   }
   const got = balls(bot) - start
   log(K.name, `${K.name} trip: +${got} ${K.unit} (${balls(bot)} held)${stop() && got < n ? ' - heading home before dark' : ''}`)

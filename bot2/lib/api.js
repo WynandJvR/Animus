@@ -10,8 +10,27 @@ const { log, tail } = require('./log')
 
 function send (res, code, body) {
   const s = typeof body === 'string' ? body : JSON.stringify(body)
-  res.writeHead(code, { 'Content-Type': typeof body === 'string' ? 'text/plain; charset=utf-8' : 'application/json', 'Access-Control-Allow-Origin': '*' })
+  res.writeHead(code, { 'Content-Type': typeof body === 'string' ? 'text/plain; charset=utf-8' : 'application/json' })
   res.end(s)
+}
+
+// WHO MAY CALL: the panel, the brain, the supervisor and the scripts - programs on this machine, none of them a browser.
+// The API has no password, so a web page must never reach it: with `Access-Control-Allow-Origin: *` on every answer, any
+// site open in the operator's browser could read /state and /config (the server address, the account name, the operators,
+// where the base is) and POST /op/cmd - a text/plain POST needs no preflight - to drive the body. So: no CORS header, a
+// request a browser marks as coming from a page (Origin, or Sec-Fetch-Site other than "none") is refused, and the Host
+// must be this machine's own name - a hostile domain re-pointed at 127.0.0.1 (DNS rebinding) arrives with ITS name there.
+// (curl, Node's fetch and the panel's WebClient send neither header; bound to every interface the Host cannot be known)
+function refusal (req, boundHost) {
+  const h = req.headers || {}
+  if (h.origin) return 'cross-origin request refused'
+  const site = String(h['sec-fetch-site'] || '').toLowerCase()
+  if (site && site !== 'none') return 'cross-origin request refused'
+  const bound = String(boundHost || '').toLowerCase()
+  if (bound === '0.0.0.0' || bound === '::' || bound === '') return null
+  const host = String(h.host || '').toLowerCase().replace(/:\d+$/, '')
+  if (host && !['127.0.0.1', 'localhost', '[::1]', bound, `[${bound}]`].includes(host)) return 'unknown Host refused'
+  return null
 }
 
 function start ({ bot, port, host, director, commands, brainSettings, pov, chat }) {
@@ -107,7 +126,8 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
       // what the build is and what it waits on - the brain answered "how's the build" with "starting on the wood" while the
       // real want was 1100 cobblestone (2026-09-27): the numbers it may quote, straight from the builder and the director
       buildProgress: st ? {
-        name: st.name, blocksPlaced: st.done, blocksTotal: st.total, done: st.done, total: st.total, // (done/total: the panel's Build dialog reads them) percent: Math.round(1000 * st.done / Math.max(1, st.total)) / 10,
+        // (done/total: the panel's Build dialog reads them)
+        name: st.name, blocksPlaced: st.done, blocksTotal: st.total, done: st.done, total: st.total, percent: Math.round(1000 * st.done / Math.max(1, st.total)) / 10,
         topStillNeeded: Object.fromEntries(Object.entries(st.need || {}).sort((x, y) => y[1] - x[1]).slice(0, 8).map(([k, v]) => [k.replace(/_/g, ' '), v])),
         materials: director.focus ? director.focus() : null,
         // handwork that stopped because its click did nothing (forage deadWork) - 234 cells waited seven hours on a silent
@@ -156,6 +176,8 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
 
   const server = http.createServer((req, res) => {
     const url = req.url || ''
+    const no = refusal(req, host)
+    if (no) { req.resume(); return send(res, 403, no) }
     if (req.method === 'OPTIONS') return send(res, 204, '')
     if (req.method === 'GET' && url === '/health') return send(res, 200, { ok: true, spawned: !!bot.entity, connected: !!bot.entity, runtime: 'bot2' })
     if (req.method === 'GET' && (url === '/state' || url.startsWith('/state?'))) { try { const o = state(url); if (o.connected !== false) o.statusLine = statusLine(o); return send(res, 200, o) } catch (e) { return send(res, 500, 'error: ' + e.message) } }
@@ -173,6 +195,18 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
           out.push({ x, y, z, name: b.name, props })
         }
         return send(res, 200, out)
+      } catch (e) { return send(res, 500, 'error: ' + e.message) }
+    }
+    // the planner's step cost at a cell, hook by hook (the site legs' options): a walk the planner refuses and the walk model
+    // takes - "the walks and the model disagree" - is read live, never guessed. Read-only
+    if (req.method === 'GET' && url.startsWith('/stepcost?')) {
+      try {
+        const q = new URLSearchParams(url.slice(10)); const x = Math.floor(+q.get('x')); const y = Math.floor(+q.get('y')); const z = Math.floor(+q.get('z'))
+        if (![x, y, z].every(Number.isFinite)) return send(res, 400, 'x, y, z wanted')
+        const m = require('./move').movementsFor(bot, { dig: false, place: false, allowZones: ['build', 'base'], placeCost: 12, sprint: false, edgeCost: 6 })
+        const b = world.at(bot, x, y, z); if (!b) return send(res, 404, 'not loaded')
+        const hooks = m.exclusionAreasStep.map((f, i) => { let v; try { v = f(b) } catch (e) { v = 'err ' + e.message } return { i, v, src: String(f).replace(/\s+/g, ' ').slice(0, 90) } }).filter(h => h.v !== 0)
+        return send(res, 200, { cell: { x, y, z, name: b.name }, total: m.exclusionStep(b), hooks })
       } catch (e) { return send(res, 500, 'error: ' + e.message) }
     }
     if (req.method === 'GET' && url === '/chat') return send(res, 200, chat ? chat.tail().join('\n') : '')
@@ -228,4 +262,4 @@ function start ({ bot, port, host, director, commands, brainSettings, pov, chat 
   return server
 }
 
-module.exports = { start }
+module.exports = { start, refusal }

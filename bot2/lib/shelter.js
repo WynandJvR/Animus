@@ -238,9 +238,7 @@ function enclosedHere (bot) {
 // climbed out unarmed.
 function morning (bot) {
   if (world.phase(bot) !== 'day') return false
-  const t = world.tod(bot)
-  const early = t >= 23000 || t < 1000
-  if (!early) return true
+  if (!world.dim(bot)) return true // (world.dim: the director's "till full light" and this way out are one dawn)
   return require('./reflex').hostiles(20).length === 0
 }
 async function waitForDay (bot, shouldStop) {
@@ -362,7 +360,26 @@ async function bunker (bot, { shouldStop } = {}) {
     bot.setControlState('forward', false)
     await move.sleep(500)
   }
-  if (Math.floor(bot.entity.position.y) > spot.y - 3) log('shelter', `didn't drop into the pit (at y${Math.floor(bot.entity.position.y)})`)
+  // NOT IN THE PIT: the night is not spent as if it were. Carried on, "the pit" below was the surface cell the body stood
+  // in - capped two over the ground and walled round in the open, walls nobody took down in the morning (only the cap and
+  // the pit's own column are), and the real three-deep hole left open beside them. Walled in where it stands instead -
+  // encloseHere takes its own walls down at dawn.
+  // BESIDE THE PIT, THE PIT GOES BACK FIRST (bottom up): its mouth is one of the wall's own nine cells, and over an open
+  // hole it has nothing to be placed against - the wall-in failed there every time, at night (audit). Still in the pit's
+  // own column - on its rim - the walls go round that column and the hole stays under the body, as a pit would.
+  if (Math.floor(bot.entity.position.y) > spot.y - 3) {
+    const at = world.feetPos(bot)
+    const beside = at.x !== spot.x || at.z !== spot.z
+    log('shelter', `didn't drop into the pit (at y${Math.floor(bot.entity.position.y)}) - ${beside ? 'filling it in and ' : ''}walling in where I stand`)
+    if (beside) {
+      for (const dy of [3, 2, 1]) {
+        const p = { x: spot.x, y: spot.y - dy, z: spot.z }
+        const f = inv.shelterBlock(bot); const c = world.at(bot, p.x, p.y, p.z)
+        if (f && c && world.isAirish(c)) await act.place(bot, p, f.name).catch(() => {})
+      }
+    }
+    return encloseHere(bot, { shouldStop })
+  }
   // in the pit; walls are the natural sides. Cap the top.
   const filler = inv.shelterBlock(bot)
   const pit = world.feetPos(bot)

@@ -62,6 +62,54 @@ function clickable (w, r, laid) { return SIDES.some(([dx, dz]) => { const q = { 
 const REACH = 4.2
 function eyeReaches (stand, c) { const ey = stand.y + 1.62; return (c.x - stand.x) ** 2 + (c.y + 0.5 - ey) ** 2 + (c.z - stand.z) ** 2 <= REACH * REACH }
 
+// THE TOWER'S FOOT IN COLUMN n UNDER A TOP AT y - ONE rule for a tower of ours the body climbs (the ring's access, the lift):
+// down the column's own cells, each open now, none of the build's, none of the finished build's walking space (a block of the
+// tower goes in each), to the first stand of the walk (opts.stand); null at the first cell that is none of those, or past
+// opts.towerMax blocks - the pillar's own bound (build.js TOWER_MAX); no(reason): the plan line's count of why not
+function towerFoot (w, n, y, opts, no = () => {}) {
+  const max = opts.towerMax || 7
+  for (let yy = y; yy > y - max; yy--) {
+    const b = w.at(n.x, yy, n.z)
+    if (!b || !w.isAirish(b)) { no('a block in its column'); return null }
+    if (w.jobHas(n.x, yy, n.z)) { no('a build cell in its column'); return null }
+    if (w.protected && w.protected(n.x, yy, n.z)) { no('the walking space in its column'); return null }
+    if (opts.stand(n.x, yy, n.z)) return yy
+  }
+  no('no stand of my walk under it'); return null
+}
+// THE LIFT - up to a floor the walk does not reach: a tower of our filler from a stand of the walk, in a column beside a stand
+// of that floor, its top level with the stand's floor; the body towers up and steps across, and the floor is in its walk from
+// there - every stand plan, pillar foot and ring there reads it as any floor. After the station-height pillar the stand plans
+// of a roof's cells refused 157 pillar feet for "off my walk" alone, every other rule passed: feet on upper floors and built
+// courses a level step from a tower nobody raised (2026-11-15). The tower's rules are towerFoot's; the stand stepped onto
+// keeps the ring's edge rule (no side over a drop past SAFE_DROP but the tower's own); the room rules asked of every block
+// (opts.refused). PURE.
+//   targets: stands { x, y, z } (feet cells) off the walk, best first -> null or { target, from, tower: [{x,y,z}] bottom first }
+async function planLift (w, targets, opts = {}) {
+  const tick = opts.tick || (async () => {})
+  const st = opts.stats || {}; st.tried = 0; st.why = st.why || {}
+  const no = r => { st.why[r] = (st.why[r] || 0) + 1 }
+  for (const s of targets) {
+    await tick()
+    for (const [dx, dz] of SIDES) {
+      const n = { x: s.x + dx, z: s.z + dz }; st.tried++
+      // (the body's two cells over the top open now and none of the build's, the jump's one over them open: a level step
+      //  across, the walk model's own)
+      let room = true; let roomWhy = null
+      for (const dy of [0, 1, 2]) { const b = w.at(n.x, s.y + dy, n.z); if (!b || !w.isAirish(b)) { room = false; roomWhy = roomWhy || 'a block' } else if (dy < 2 && w.jobHas(n.x, s.y + dy, n.z)) { room = false; roomWhy = roomWhy || 'a build cell, still air' } }
+      if (!room) { no(`no room over its top (${roomWhy})`); continue }
+      if (!edgeOkFor(w, { x: s.x, z: s.z }, s.y - 1, new Set([`${n.x},${s.y - 1},${n.z}`]))) { no('the stand has an edge over a drop'); continue }
+      const fy = towerFoot(w, n, s.y - 1, opts, no)
+      if (fy == null) continue
+      const tower = []; for (let yy = fy; yy <= s.y - 1; yy++) tower.push({ x: n.x, y: yy, z: n.z })
+      let bad = null
+      if (opts.refused) for (const t of tower) { bad = await opts.refused(t); await tick(); if (bad) break }
+      if (bad) { no('refused'); continue }
+      return { target: { x: s.x, y: s.y, z: s.z }, from: { x: n.x, y: fy, z: n.z }, tower }
+    }
+  }
+  return null
+}
 // THE RING, AT THE HEIGHT WHERE ITS EDGES HOLD: two under the layer first (the layer and the two over it in reach); where a
 // tall room's floor lies more than SAFE_DROP under that top - every candidate's open side a hurting drop - one lower, then
 // two (the reach taller, the cells served those its eye still reaches). The castle's upper rooms: "40 cells without a stand,
@@ -113,9 +161,8 @@ async function planRingAt (w, cells, opts, y, st) {
     // the tower: a stand on the floor beside a candidate, its column free up to the top's head room, none of it the build's
     for (const r of cand.values()) {
       for (const n of nbr(r)) {
-        let fy = null
-        for (let yy = y; yy >= y - 6; yy--) if (opts.stand(n.x, yy, n.z)) { fy = yy; break }
-        if (fy == null || fy > y) continue
+        const fy = towerFoot(w, n, y, opts)
+        if (fy == null) continue
         let free = true
         for (let yy = fy; yy <= y + 2 && free; yy++) { const b = w.at(n.x, yy, n.z); if (!b || !w.isAirish(b) || w.jobHas(n.x, yy, n.z) || (yy <= y && w.protected && w.protected(n.x, yy, n.z))) free = false }
         if (!free) continue
@@ -157,4 +204,4 @@ async function planRingAt (w, cells, opts, y, st) {
   return { y, blocks, access, serves }
 }
 
-module.exports = { planRing, blockOk, edgeOkFor, edgeClosure, walkwayHolds, eyeReaches }
+module.exports = { planRing, planLift, towerFoot, blockOk, edgeOkFor, edgeClosure, walkwayHolds, eyeReaches }

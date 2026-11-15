@@ -91,7 +91,7 @@ function install (bot) {
     const c = said ? classify(said) : { kind: null, by: null }
     let hurt = null
     try { hurt = require('./reflex').lastHurt() } catch {}
-    const d = { x: p.x, y: p.y, z: p.z, t: now, items, valuable, cause: placeCause(place, c.kind), place, by: c.by, msg: said, lastHurtBy: hurt && hurt.by, task: null, sky: (() => { try { return world.openSky(bot, p) } catch { return null } })(), trail: trail.map(q => `${q.x},${q.y},${q.z}${q.g ? '' : '^'}`).join(' ') }
+    const d = { x: p.x, y: p.y, z: p.z, t: now, items, valuable, cause: placeCause(place, c.kind), place, by: c.by, msg: said, lastHurtBy: hurt && hurt.by, task: null, sky: (() => { try { return world.openSky(bot, p, { throughTrees: true }) } catch { return null } })(), trail: trail.map(q => `${q.x},${q.y},${q.z}${q.g ? '' : '^'}`).join(' ') }
     try { const ti = require('./director').info(); d.task = ti && ti.name } catch {}
     lastDeathT = now
     // killed on the way back for a grave: that grave is a trap, however far along the way it happened (a grave at
@@ -131,6 +131,8 @@ function bestGrave (bot) {
   const trapped = d => deaths.some(o => o !== d && world.dist3(o, d) < 24 && (o.t > d.t || Math.abs(o.t - d.t) < 60 * 60000))
   // a drowning underground (a flooded tunnel) is not a place to swim back into
   const home = mem.get().home
+  // (underground = no sky over the spot, recorded at the death - leaves aside: the farm's water under a spruce read as a
+  //  flooded tunnel, and the 758-item grave of a pillager death there, iron helmet and leggings, was never looked for, 2026-11-15)
   // (underground = no sky over the spot, recorded at the death; "10 below home" stood in for it and on a mountain-top
   //  home an open lake 54 below counted as a flooded tunnel - a 365-item grave never looked for, 2026-09-24)
   const floodedTunnel = d => (d.place || (d.cause === 'water' ? 'water' : null)) === 'water' && (d.sky != null ? !d.sky : (home && d.y < home.y - 10))

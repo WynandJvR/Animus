@@ -31,7 +31,8 @@ function edgeOf (dx, dz) { return dx === 1 ? 'east' : dx === -1 ? 'west' : dz ==
 function walkModel (w, isC = () => false, { opens = false, avoid = null } = {}) {
   const passable = b => (w.bodyPassable ? w.bodyPassable(b) : w.isAirish(b)) || w.isOpenTrapdoor(b) || (/_door$|_fence_gate$/.test(b.name) && !/^iron_door$/.test(b.name))
   const air = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && passable(b) }
-  const climb = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && CLIMB_RE.test(b.name) }
+  // (or an open trapdoor over a ladder, facing as it does - the planner climbs it too: world.climbableTrapdoor)
+  const climb = (x, y, z) => { if (isC(x, y, z)) return false; const b = w.at(x, y, z); return !!b && (CLIMB_RE.test(b.name) || (!isC(x, y - 1, z) && require('./world').climbableTrapdoor(b, w.at(x, y - 1, z)))) }
   // (never ON or IN a fire - a campfire, magma: the planner's blocksToAvoid; the castle's 150 campfires read as floor here and
   //  a route over one was no route to the walker; audit 2026-10-03)
   const topAt = (x, y, z) => isC(x, y, z) ? y + 1 : w.floorTop ? w.floorTop(x, y, z) : y + 1 // (a floor's real top, absolute)

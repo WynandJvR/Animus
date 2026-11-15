@@ -26,6 +26,7 @@ const { log } = require('./log')
 const craft = () => require('./craft')
 const base = () => require('./base')
 const food = () => require('./food')
+const boat = () => require('./boat')
 
 const HALF = 2 // the paddock: centre +-2 (5x5); the ring one further out
 const SITE_MIN = 12
@@ -187,6 +188,38 @@ function inLove (id, now = Date.now()) { const t = fedAt.get(id); return t != nu
 function noteFed (id, now = Date.now()) { fedAt.set(id, now); for (const [k, t] of fedAt) if (now - t >= LOVE_MS) fedAt.delete(k) }
 function breedable (bot, list) { return (list || []).filter(e => !food().isBaby(bot, e) && !inLove(e.id)) }
 
+// A FLOCK THE PEN MAY LEAD FROM - ONE rule for the trigger (wildKnown) and the lead (stock): never inside the build, never
+// someone else's (foreign.js; anti-grief), and on the open ground by the sighting's own reading (food.surfaceSpot), never by
+// its height against home's. The lead kept the old "above home's ground less 12" while the trigger had none: every flock
+// round the hilltop home grazes at y71-101 under its y119 - "0 sheep in the pen - leading more in" chosen and "no sheep in
+// sight or remembered near home" refused, seven times in an hour, while the wool trips walked 240 blocks to the same
+// flocks to shear them bare, red_carpet waiting on wool, 2026-11-15 17:46-18:40 (food.js dropped the height rule at 07:21)
+function inBuild (p) { const z = move.inZone(p, 0); return !!z && z.label === 'build' }
+// THE LEAD'S WAY HOME ON LAND: the lead walks the straight line to the gate in 6-block legs, sheep at its heels - no boat
+// (it would lose them). A crossing on that line - boat.OPEN_WATER of water in a run, the walker's own "a crossing, not a
+// puddle" - is a lake to swim with a flock trailing off past 14 blocks, where a drowned killed the wading bot at 18:14 (the
+// wool trip crosses to these flocks by boat, 17:25 and 18:43, 2026-11-15; audit F86-1). Read on the loaded columns (an
+// unloaded one is no water seen); a flock found across one is marked on its sightings (lake), so the trigger and the lead
+// both pass it by from then on
+// (read from the LOWER end: scanLine reads each column's ground down 64 from its start's height + 12 - from the hilltop pen
+//  at y120 a lake at y62 is out of reach, unseen; from the low end the hill's columns read as ground at once)
+function lakeOnLine (bot, from, to) {
+  let run = 0
+  const ya = from.y != null ? from.y : to.y; const yb = to.y != null ? to.y : from.y
+  const [lo, hi] = ya <= yb ? [{ x: from.x, y: ya, z: from.z }, to] : [{ x: to.x, y: yb, z: to.z }, from]
+  for (const k of boat().scanLine(bot, lo, hi, Infinity)) { if (k !== 'w') { run = 0; continue } if (++run >= boat().OPEN_WATER) return true }
+  return false
+}
+// (THE LEGS' OWN READ: the line's two reads - from home before the walk, from the flock on arrival - each see only their
+//  loaded half; a lake in the middle of a 250b line is ~120b from both, unseen by either ('?' is no water). Before each leg,
+//  from where the lead stands now, the next two legs and a crossing's length: never a leg into one; audit F86-2)
+function lakeAhead (bot, out) {
+  let run = 0
+  for (const k of boat().scanLine(bot, bot.entity.position, out, 12 + boat().OPEN_WATER)) { if (k !== 'w') { run = 0; continue } if (++run >= boat().OPEN_WATER) return true }
+  return false
+}
+function markLake (at) { mem.update(m => { for (const q of ((m.mobs || {}).sheep || [])) if (world.dist2(q, at) < 32) q.lake = true }) }
+function leadSpot (q) { return !q.lake && !inBuild(q) && food().surfaceSpot(q) && !move.inForeign(q) }
 // Sheep out in the open: in sight, or a flock remembered near home.
 function wildKnown (bot, reach = LURE_REACH) {
   if (food().animals(bot, /^sheep$/, 48).length) return true
@@ -195,7 +228,7 @@ function wildKnown (bot, reach = LURE_REACH) {
   //  refused, "did not succeed" every pass; audit rule)
   const p = pen()
   if (mem.get().leadFailDay === require('./day').dayNo(bot)) return false
-  return ((mem.get().mobs || {}).sheep || []).some(q => world.dist2(q, home) < reach && (!p || world.ticksUntilNight(bot) >= leadTicks(world.dist2(q, centreOf(p)))))
+  return ((mem.get().mobs || {}).sheep || []).some(q => world.dist2(q, home) < reach && leadSpot(q) && (!p || world.ticksUntilNight(bot) >= leadTicks(world.dist2(q, centreOf(p)))))
 }
 
 // ---- what the pen wants now ----------------------------------------------------------------------
@@ -359,19 +392,25 @@ async function stockInner (bot, { shouldStop } = {}, ctx = {}) {
   const stop = () => !!(shouldStop && shouldStop())
   // (never a sheep inside the build: fallen into a hole in the hub's floor, one was walked to and "lost on the way" ~40
   //  times, and the walks to it stuck four minutes at a 21-block drop, 2026-10-04 - the builder takes it, build.placeCell)
-  const inBuild = p => { const z = move.inZone(p, 0); return !!z && z.label === 'build' }
   // (and never one down a cave or a hole: no lead out of there - the walk "to sheep" went into the cave under home after
   //  one at y41, the bot fell into its lake and was stuck at y34 for 8 minutes, twice, 2026-10-04. A sheep under the open
   //  sky, at the home's own ground level or near it)
-  const home0 = mem.get().home
-  const onTop = p => { let surf = true; try { surf = require('./reflex').onSurface({ position: p }) } catch {} return surf && (!home0 || p.y > home0.y - 12) } // (the column's top ground, leaves and logs no ground - a forest flock is on top; audit)
+  // (in sight: on the column's top ground, its chunk loaded - reflex.onSurface, the cave under home's sheep below it; never
+  //  the height against home's, as leadSpot)
+  const onTop = p => { let surf = true; try { surf = require('./reflex').onSurface({ position: p }) } catch {} return surf } // (the column's top ground, leaves and logs no ground - a forest flock is on top; audit)
   // (never someone else's: a sheep standing in another player's place is their flock - foreign.js; anti-grief)
   const leadable = p => !inBuild(p) && onTop(p) && !move.inForeign(p)
   let wild = food().animals(bot, /^sheep$/, 48).filter(e => leadable(e.position))
   if (!wild.length) {
     const home = mem.get().home || bot.entity.position
-    const known = ((mem.get().mobs || {}).sheep || []).filter(q => world.dist2(q, home) < LURE_REACH && !inBuild(q) && (!home0 || q.y == null || q.y > home0.y - 12)).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0]
-    if (!known) { log('pen', 'no sheep in sight or remembered near home to lead in'); return false }
+    const cands = ((mem.get().mobs || {}).sheep || []).filter(q => world.dist2(q, home) < LURE_REACH && leadSpot(q)).sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))
+    let known = null; let lakes = 0
+    for (const q of cands) {
+      if (q.lake) continue // (marked a moment ago with a sighting within 32 of it: the same flock's spot)
+      if (lakeOnLine(bot, outerStep(p), q)) { markLake(q); lakes++; log('pen', `the flock at ${q.x},${q.z} is across open water from the pen - no lead from there (marked)`); await new Promise(r => setImmediate(r)); continue }
+      known = q; break
+    }
+    if (!known) { log('pen', lakes ? 'no sheep in sight, and every flock remembered near home is across open water from the pen' : 'no sheep in sight or remembered near home to lead in'); return false }
     const far = world.dist2(known, centreOf(p))
     if (world.ticksUntilNight(bot) < leadTicks(far)) { log('pen', `the nearest flock is ${Math.round(far)} blocks from the pen - not enough daylight left to lead it home today`); return false }
     ctx.far = true
@@ -385,6 +424,9 @@ async function stockInner (bot, { shouldStop } = {}, ctx = {}) {
     }
   }
   if (stop()) return false
+  // (the way home from here, its columns loaded now: across open water, no lead - knowledge, not a failed lead: no
+  //  leadFailDay, the next flock may still be walked today)
+  if (lakeOnLine(bot, bot.entity.position, outerStep(p))) { markLake(bot.entity.position); ctx.far = false; log('pen', `the sheep at ${Math.floor(bot.entity.position.x)},${Math.floor(bot.entity.position.z)} are across open water from the pen - no lead from here (marked)`); return false }
   // to within tempting range of the nearest, wheat in hand
   const first = wild[0]
   if (first.position.distanceTo(bot.entity.position) > 6) await move.goTo(bot, new goals.GoalNear(first.position.x, first.position.y, first.position.z, 5), { timeoutMs: 30000, stuckMs: 8000, dig: false, place: false, label: 'to sheep' })
@@ -399,9 +441,11 @@ async function stockInner (bot, { shouldStop } = {}, ctx = {}) {
   const out = outerStep(p)
   const deadline = Date.now() + Math.max(4 * 60000, world.dist2(bot.entity.position, out) * 1500) // (the lead's own length: a flock 250 out)
   let legs = 0
+  const leadFrom = bot.entity.position.clone() // (the flock's ground: a lake met on the way is marked against it, not the spot the lead stopped)
   while (world.dist2(bot.entity.position, out) > 1.5 && Date.now() < deadline && !stop()) {
     await reflex.waitClear()
     if (!followers.size) break
+    if (lakeAhead(bot, out)) { markLake(leadFrom); ctx.far = false; log('pen', `open water ahead on the lead at ${Math.floor(bot.entity.position.x)},${Math.floor(bot.entity.position.z)} - stopping short of it (marked)`); return false }
     // (a leg: 6 blocks along the line to the gate, planned by goTo as any walk is - a synchronous path search here held the
     //  event loop up to 500ms a leg, the reflexes with it, out in the open; audit - body first)
     const me = bot.entity.position; const dx = out.x + 0.5 - me.x; const dz = out.z + 0.5 - me.z; const d = Math.hypot(dx, dz)

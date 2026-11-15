@@ -68,19 +68,32 @@ function noteMob (e) {
   const l = ((mem.get().mobs || {})[e.name]) || []
   const near = l.find(q => world.dist2(q, p) < 32)
   if (near && Date.now() - (near.t || 0) < SIGHT_REFRESH) return
+  // (ON TOP OR DOWN A HOLE, read while it is in sight - its chunk loaded: reflex.onSurface, the column's top ground. The
+  //  remembered spot is judged by it later, never by its height against home's: see surfaceSpot)
+  let sky = null; try { sky = !!reflex.onSurface(e) } catch {}
   mem.update(m => {
     m.mobs = m.mobs || {}
     const k = m.mobs[e.name] || (m.mobs[e.name] = [])
     const q = k.find(q => world.dist2(q, p) < 32)
-    if (q) Object.assign(q, { x: p.x, y: p.y, z: p.z, t: Date.now() })
+    if (q) Object.assign(q, { x: p.x, y: p.y, z: p.z, t: Date.now(), sky })
     else {
-      k.push({ x: p.x, y: p.y, z: p.z, t: Date.now() }); k.sort((a, b) => (a.t || 0) - (b.t || 0))
+      k.push({ x: p.x, y: p.y, z: p.z, t: Date.now(), sky }); k.sort((a, b) => (a.t || 0) - (b.t || 0))
       // (full: the spot farthest from home goes - a long trip's sightings are no use to a search held round home, and the
       //  newest-16 rule let them push out the near ones; homeless, the oldest; audit 2026-10-03)
       if (k.length > 16) { const h = m.home; const i = h ? k.reduce((bi, q, j) => world.dist2(q, h) > world.dist2(k[bi], h) ? j : bi, 0) : 0; k.splice(i, 1) }
     }
   })
 }
+// A REMEMBERED SPOT ON THE OPEN GROUND, not down a cave: the sighting's own reading (noteMob's `sky`). The height rule it
+// replaces - above home's ground less 12 - kept the cave under home out (2026-10-04) and with it every flock in the
+// lowlands round a mountain home: the two in the wool trip's reach, 236b and 269b out at y70-71 under home's y119, were
+// never walked to; the trip explored 48-80b round home, "no sheep for wool nearby", 212 white wool short, 2026-11-15 07:21.
+// A spot seen before the reading was kept (sky unknown) counts: the trip is its check - walked to as a place on the map
+// (anyY: the ground there, never its recorded height through the rock), only sheep on the open ground there taken, and
+// its next sighting writes the reading for good; audit
+function surfaceSpot (p) { return p.sky !== false }
+// (the same reading for a sheep in sight: on the column's top ground - a forest's leaves and logs are no ground)
+function onTop (e) { try { return reflex.onSurface(e) } catch { return true } }
 function install (bot) {
   bot.on('entitySpawn', e => { try { if (e && e.name && FOOD_ANIMALS.test(e.name) && !isBaby(bot, e)) noteMob(e) } catch {} })
 }
@@ -155,7 +168,7 @@ async function huntFor (bot, itemName, n, ctx = {}) {
       const anchor = mem.get().home || bot.entity.position
       const kinds = Object.keys(mem.get().mobs || {}).filter(k => re.test(k))
       const reach = bot.food <= 10 ? 260 : 160 // real hunger justifies a longer walk
-      const known = kinds.flatMap(k => mem.get().mobs[k]).filter(p => world.dist2(p, anchor) < reach)
+      const known = kinds.flatMap(k => mem.get().mobs[k]).filter(p => world.dist2(p, anchor) < reach && world.dist2(p, bot.entity.position) > 40) // (a walk away - the walk below asks it: a near herd spot picked first and never walked hid the farther ones; the wool trip's F46-1)
         .sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0]
       // walking off after a herd or exploring: fit, armed, daylight left - or not at all. Fit = above the reflex's own hurt
       // line, not a fixed 12: health only comes back on a full belly, and at hp 10 / food 13 the food that would heal it was
@@ -238,8 +251,11 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
     if (Date.now() - t0 > 10 * 60000) return false
     await reflex.waitClear()
     const shears = inv.items(bot).find(i => i.name === 'shears')
-    const list = animals(bot, /^sheep$/, 48)
-    for (const e of list) noteMob(e)
+    // (only sheep on the open ground: one down a cave or a hole is no walk - the walk "to sheep" into the cave under home,
+    //  2026-10-04; reflex.onSurface, the reading the remembered spots keep - noted all the same, with it)
+    const seen = animals(bot, /^sheep$/, 48)
+    for (const e of seen) noteMob(e)
+    const list = seen.filter(onTop)
     const woolly = e => { const w = sheepWool(bot, e); return !shornTried.has(e.id) && !(w && w.sheared) }
     const ofColour = e => { const w = sheepWool(bot, e); return !!w && WOOL_COLOURS[w.colour] === colour }
     // (a shorn sheep killed gives no wool: without shears only the woolly ones count - one was picked as readily as any)
@@ -261,16 +277,16 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
       const anchor = mem.get().home || bot.entity.position
       // (a wool trip goes as far as a day trip's flocks, WOOL_TRIP_REACH: the 200 of the lure left the nearest flock, 230b out,
       //  off the list; the trip's own fit (day, hp) and the day's stop hold the walk)
-      const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < WOOL_TRIP_REACH && !shornSeen.some(q => world.dist2(p, q) < 16) && !walked.some(q => world.dist2(p, q) < 16) && (!mem.get().home || p.y == null || p.y > mem.get().home.y - 12) && world.walkTicks(bot.entity.position, p) + world.walkTicks(p, anchor) + world.HOME_MARGIN < world.ticksUntilNight(bot)) /* (and a walk that fits the daylight left: there and home again; audit) */.sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
+      const known = (mem.get().mobs || {}).sheep ? mem.get().mobs.sheep.filter(p => world.dist2(p, anchor) < WOOL_TRIP_REACH && world.dist2(p, bot.entity.position) > 40 /* (a walk away - the walk below asks it: a near spot picked first and never walked hid every flock past it; audit F46-1) */ && !shornSeen.some(q => world.dist2(p, q) < 16) && !walked.some(q => world.dist2(p, q) < 16) && surfaceSpot(p) && world.walkTicks(bot.entity.position, p) + world.walkTicks(p, anchor) + world.HOME_MARGIN < world.ticksUntilNight(bot)) /* (and a walk that fits the daylight left: there and home again; audit) */.sort((a, b) => world.dist2(a, bot.entity.position) - world.dist2(b, bot.entity.position))[0] : null
       const fit = bot.health >= 12 && world.phase(bot) === 'day'
       if (!fit) { log('food', `no sheep in sight and not fit to go looking (hp ${Math.round(bot.health)})`); return false }
-      const woollyFar = e => { const w = sheepWool(bot, e); return !(w && w.sheared) && !list.includes(e) }
+      const woollyFar = e => { const w = sheepWool(bot, e); return !(w && w.sheared) && !seen.includes(e) && onTop(e) }
       const far = animals(bot, /^sheep$/, VIEW).find(woollyFar)
       if (far) await toInSight(bot, far, ctx)
       // (EVERY remembered flock in reach, each once, nearest first - and never one fallen below home's ground: the nearest two were
       //  in the cave under home, walked to first, and the trip explored from the cave and gave up with the woolly flocks 250b out
       //  seen a minute before never walked to - wool off for 3 days, 2026-10-04; the pen's rule, audit)
-      else if (known && world.dist2(known, bot.entity.position) > 40) { wentTo = known; walked.push(known); shornHere = false; await move.travel(bot, known, { range: 10, shouldStop: ctx.shouldStop, label: 'to sheep' }) }
+      else if (known && world.dist2(known, bot.entity.position) > 40) { wentTo = known; walked.push(known); shornHere = false; await move.travel(bot, known, { range: 10, anyY: true, shouldStop: ctx.shouldStop, label: 'to sheep' }) }
       else await gather().explore(bot, () => false, { shouldStop: () => (ctx.shouldStop && ctx.shouldStop()) || animals(bot, /^sheep$/, VIEW).some(woollyFar), label: 'animals', legs: 2 })
       continue
     }
@@ -293,7 +309,7 @@ async function woolFor (bot, n, ctx = {}, colour = 'white') {
     // no shears (or every sheep here is shorn and we still have none to spare): a kill gives one
     if (shears) {
       // (every sheep near is shorn: a woolly one in view further off is walked to before giving up)
-      const woollyFar = animals(bot, /^sheep$/, VIEW).find(e => !list.includes(e) && woolly(e))
+      const woollyFar = animals(bot, /^sheep$/, VIEW).find(e => !seen.includes(e) && woolly(e) && onTop(e))
       if (woollyFar && ++shornWalks <= 4) { await toInSight(bot, woollyFar, ctx); continue }
       log('food', 'every sheep in sight is shorn'); return woolCount() > target - n
     }
@@ -428,6 +444,18 @@ async function stockFood (bot, { targetPoints = 40, ctx = {} } = {}) {
       await base().goHome(bot, { shouldStop: ctx.shouldStop }).catch(() => null)
     }
   }
+  // A SLOT FOR IT FIRST: food in the bank and no room in the pack for it - a player puts a stack back in the chest and takes
+  // the bread. The withdraw alone refused ("the pack is full - no bread taken"): at hp 4, hunger 12, the pack full of the
+  // castle's planks and nine loaves in the chest beside it, the food task failed in 3ms and the day went to "resting until
+  // crops ripen" - every day, 12 hours and more, till the operator stopped it (2026-10-07 22:15 on). base.makeRoom: the
+  // haul into the chests, then the build window's blocks (they come back with the next withdraw) - the kit stays.
+  if (inv.freeSlots(bot) === 0 && base().distHome(bot) < 48) {
+    const names = ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'bread', 'cooked_chicken', 'baked_potato', 'cooked_salmon', 'cooked_cod', 'golden_carrot', 'apple', 'carrot', 'wheat'].concat(RAW_BANK)
+    if (names.some(n => base().bankCount(n) > 0)) {
+      const ok = await base().makeRoom(bot, 2).catch(() => false)
+      log('food', `the pack was full with food in the chests - ${ok ? 'made room for it' : 'could not make room'} (${inv.freeSlots(bot)} slots free)`)
+    }
+  }
   // 1) cooked food from the chests
   for (const n of ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'bread', 'cooked_chicken', 'baked_potato', 'cooked_salmon', 'cooked_cod', 'golden_carrot', 'apple', 'carrot']) {
     if (inv.foodPoints(bot) >= targetPoints) return true
@@ -494,4 +522,4 @@ async function cookAll (bot, ctx = {}) {
   }
 }
 
-module.exports = { WOOL_REACH, install, noteMob, huntFor, woolFor, sheepWool, isBaby, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }
+module.exports = { WOOL_REACH, install, noteMob, surfaceSpot, huntFor, woolFor, sheepWool, isBaby, stockFood, cookAll, animals, killAnimal, huntable, fishFor, harvestCrops, FOOD_ANIMALS }

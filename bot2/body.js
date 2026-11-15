@@ -46,6 +46,7 @@ let hzAt = 0
 let hz = 0
 let lastPositionAt = 0       // last clientbound position sync THIS connection (0 = none yet)
 let lastTeleportId = 0
+let rearming = false // rearm() is running the library's position handler: its teleport accept stays off the wire
 let connected = false
 let deadSince = 0            // when the current silence began (0 = ticking)
 let lastRearmAt = 0
@@ -119,6 +120,10 @@ function install (bot) {
   try {
     const rawWrite = bot._client.write.bind(bot._client)
     bot._client.write = (name, params) => {
+      // (the re-arm's accept never goes out: the server took this id's accept long ago, and a second accept of the same id
+      //  is its "invalid_player_movement" kick - seen on a 26.3 server with a bare client, 2026-11-14. The re-arm is for the
+      //  library's switch alone)
+      if (name === 'teleport_confirm' && rearming) { traceAdd({ t: Date.now(), d: '>', n: 'ack-kept', id: params && params.teleportId }); return }
       if (name === 'teleport_confirm' && params) traceAdd({ t: Date.now(), d: '>', n: 'ack', id: params.teleportId })
       if ((name === 'position' || name === 'position_look') && params) {
         traceAdd({ t: Date.now(), d: '>', n: name === 'position' ? 'pos' : 'posl', x: params.x, y: params.y, z: params.z, g: params.flags && typeof params.flags === 'object' ? params.flags.onGround : params.onGround })
@@ -199,6 +204,7 @@ function install (bot) {
         lastCorrectionNoteAt = now
         const f = v => v.x.toFixed(1) + ',' + v.y.toFixed(1) + ',' + v.z.toFixed(1)
         note('SERVER CORRECTION: the client had me at ' + f(e) + ', the server put me at ' + f(to) + ' (' + d.toFixed(1) + 'b; ' + corrections.length + ' in 10s) - the server refuses that movement: client/server world or state disagree there')
+        { let pr = ''; try { pr = require('./offset-shapes.js').probe(bot, e, to) } catch {} if (pr) note(pr) } // (batch 66's 0.25-or-0.125 question; evidence only)
       }
     } catch {}
   })
@@ -235,8 +241,9 @@ function snapshot (bot, now) {
 
 // THE ONE RE-ARM. Mounted -> dismount (the server then teleports us and the library re-arms
 // itself). Otherwise run the library's own position handler with our current coordinates: it
-// confirms the (stale) teleport id, sends one position_look the server already agrees with, and
-// flips shouldUsePhysics. Returns what it did, for the log; the verdict is read from the ticks.
+// flips shouldUsePhysics (and before 26.3 sends one position_look the server already agrees with);
+// its accept of the stale teleport id is kept off the wire (`rearming`, in the write wrapper).
+// Returns what it did, for the log; the verdict is read from the ticks.
 function rearm (bot) {
   lastRearmAt = Date.now()
   rearms++
@@ -257,12 +264,15 @@ function rearm (bot) {
   try {
     const conv = require('mineflayer/lib/conversions')
     const p = bot.entity.position
-    bot._client.emit('position', {
-      teleportId: lastTeleportId,
-      x: p.x, y: p.y, z: p.z, dx: 0, dy: 0, dz: 0,
-      yaw: conv.toNotchianYaw(bot.entity.yaw), pitch: conv.toNotchianPitch(bot.entity.pitch),
-      flags: { x: false, y: false, z: false, yaw: false, pitch: false }
-    })
+    rearming = true
+    try {
+      bot._client.emit('position', {
+        teleportId: lastTeleportId,
+        x: p.x, y: p.y, z: p.z, dx: 0, dy: 0, dz: 0,
+        yaw: conv.toNotchianYaw(bot.entity.yaw), pitch: conv.toNotchianPitch(bot.entity.pitch),
+        flags: { x: false, y: false, z: false, yaw: false, pitch: false }
+      })
+    } finally { rearming = false }
     return 'position-sync at ' + p.floored()
   } catch (e) { return 'position-sync threw: ' + e.message }
 }

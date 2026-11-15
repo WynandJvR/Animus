@@ -40,6 +40,7 @@ let litterSeeded = false // (the pillars from before the ledger: looked for once
 function seedLitter () { if (!litterSeeded && orchard.orchard()) { litterSeeded = true; litter.seed(bot) } }
 const LITTER_BATCH = 8
 let steerSaid = null // (the wait-without-raw line, once per item)
+let steerProbeSaid = null // (the steer probe's line, once per waited item and pick)
 const strayMiss = mem.persistedMap('strayMiss') // (a stray build block that would not come up: key -> { n, day })
 let siteTidyAsked = 0 // (when the site's scaffold was last counted for the day's teardown)
 let idleTidyAsked = 0 // (and for an idle hour's: the same 5-minute bound on the site diff)
@@ -139,6 +140,11 @@ function tripFitsDay (raw) {
   const src = (/^(cobblestone|cobbled_deepslate|raw_iron|coal|granite|diorite|andesite|tuff)$/.test(raw) && m && (m.cursor || m.entrance)) || gather.knownResource(raw, me, /_log$/.test(raw) ? { maxFromHome: 5000 } : forage.handles(raw) ? { maxFromHome: 1200 } : undefined) ||
     (/_leaves$/.test(raw) ? gather.knownResource(raw.replace(/^(flowering_)?azalea_leaves$/, 'oak_leaves').replace(/_leaves$/, '_log'), me, { filter: p => !move.inZone(p, 2) }) : null) || // (leaves grow on the trees remembered - the trip's own lead; audit)
     (forage.exhausted(raw) ? forage.landLead(raw) : null) // (a plant searched out round home goes to its own land: the day's fit is that walk; audit)
+  // (searched out round home and no land to go to: no trip fetches it - read as an unknown source's 96-block search, the round
+  //  said "11 allium first, while the day is young" and the gather refused it the same second, 2026-11-15 13:22)
+  //  (plants only - gatherRaw's own refusal: a species log searched out round home still reads as a search, the chop's
+  //  too-far outcome is what starts its expedition; audit F72-1)
+  if (!src && forage.exhausted(raw) && (forage.spec(raw) || {}).kind === 'plant') return false
   const walk = src ? world.walkTicks(me, src) + world.walkTicks(src, home) : world.walkTicks(me, home) + 2 * world.walkTicks({ x: 0, y: 0, z: 0 }, { x: 96, y: 0, z: 0 })
   const roundHome = !!src && world.dist2(src, home) <= 32 && world.dist2(me, home) <= 32
   // (a species log known past half a day's walk is an expedition's - the chop's too-far starts it; the day's fit is not the
@@ -302,6 +308,10 @@ async function deepInHut () {
 // A hostile at our level for the hideout's reckoning: a walker within 6 up or down, a SHOOTER within 12 - from the slope over
 // the farm a witch 7+ above threw down on a bot it no longer counted "about", the harvest went out to it, 2026-10-07 05:46
 function levelWithUs (h) { return Math.abs(h.e.position.y - bot.entity.position.y) < (reflex.RANGED.has(h.e.name) ? 12 : 6) }
+// boxed into a pit it cannot walk out of - walls two high on all four sides - and unable to see us (decide's rule 0 has the
+// history). ONE rule for going into the hideout and for coming out of it: the wait inside counted the pitted mobs decide
+// leaves out, so a zombie at the door that then left still cost the full four minutes while pillagers sat in their hole
+function pitted (e) { const f = e.position.floored(); return [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => [0, 1].every(dy => { const b = world.at(bot, f.x + dx, f.y + dy, f.z + dz); return !!b && world.isSolid(b) })) && !reflex.canSee(e) }
 // A bow that answers shooters: ready, and arrows for a fight - three arrows are no answer to a witch's 26 hp (~6 a hit)
 function bowArmed () { return reflex.bowReady() && inv.count(bot, 'arrow') >= 8 }
 // Items in the pack beyond the kit we keep on us.
@@ -521,7 +531,50 @@ function stringShort () { try { const need = (build.cachedStatus(bot).need || {}
 function spiderNightRested () { const d = mem.get().sleptDay; return d != null && day.dayNo(bot) - d < 2 }
 function othersOnline () { try { return Object.values(bot.players).some(p => p && p.username && p.username !== bot.username) } catch { return true } }
 function spiderNightFit () { return spiderNightRested() && !othersOnline() && bot.health >= 18 && !!inv.bestWeapon(bot) && (inv.armorPoints(bot) >= 8 || !!inv.offhandShield(bot)) && inv.foodPoints(bot) >= 10 && !!hut.doorApronStep() && hut.shellComplete(bot) }
+// THE HIDEOUT'S CALL (step 0 of decide, and the running task's watch - one rule): its why (null: none) and the reads decide
+// goes on with
+// (asked mid-task too: decided only between tasks, a farm visit kept walking back out between flees with a pillager patrol
+//  round the farm 36b from the door - flee, hold, release, the walk to the next cell, shot again - and died there, the
+//  hideout taking the respawned bot in at once, 2026-11-15)
+function hideoutRead (home, dHome) {
+  const aroundAll = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && levelWithUs(h) && onSurface(h.e))
+  const around = aroundAll.filter(h => !pitted(h.e))
+  const dim = world.dim(bot)
+  // (by day too when shooters stand round home and the body can't take their arrows: a pillager patrol and two skeletons shot
+  //  the bot four times in two minutes, each respawn walking back out to the grave, the farm, the tool chest, 2026-09-25)
+  // (the exchange's arithmetic - reflex.outgunned - not "no shield and under 8 armour": four pillagers read as no reason to
+  //  hide for an iron helmet, chestplate and shield, and the bot fought them by turns at the site, 2026-10-07 13:33. A bow
+  //  ready is its own answer: shot from range, never walked into - the reflex's shoot row)
+  const outgunned = reflex.outgunned(around) && !bowArmed()
+  // (from dusk: the bed takes the dusk, and a night slept from dusk never came - the first evening went to bed at 19:58)
+  // (the bed's own reach - 200 at dusk, 32 at night: it stands in for the bed wherever the bed would be chosen; held to 24 of home,
+  //  the second evening went to bed from 41b out, 2026-10-04)
+  const spiderNightOn = world.phase(bot) !== 'day' && !!home && dHome < (world.phase(bot) === 'dusk' ? 200 : 32) && stringShort() && spiderNightFit() && !held('spiderNight')
+  const spidersOnly = around.length > 0 && around.every(h => SPIDER_RE.test(h.e.name)) // (the spider night's own game: no hideout from it)
+  if (around.length && home && dHome < reflex.HIDEOUT_REACH && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !(spiderNightOn && spidersOnly) && !held('hideout')) {
+    return { aroundAll, around, dim, spiderNightOn, why: `${around.length} hostile${around.length > 1 ? 's' : ''} around home (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - waiting inside` }
+  }
+  return { aroundAll, around, dim, spiderNightOn, why: null }
+}
+// IN THE MINE WHEN THE HIDEOUT'S CALL COMES: underground in our own mine the rock is the cover - the mine's own work goes on
+// and anything else waits there (mineHold), never the walk out to the safehouse through what called it: the evening's walk
+// home from the y66 level went up the stairs into two pillagers on the hillside by the entrance, the hideout's call
+// taking over the same walk, and the unarmoured bot died at y81 in the stairway, 2026-11-15 09:17
+const MINE_WORK = new Set(['ironTrip', 'nightMine', 'mineHold'])
+function inMineUnder () { try { return mining.inOwnMine(bot) && !onSurface(bot.entity) } catch { return false } }
+let mineCovered = null // (this round's step 0 in the mine: its why)
 function decide () {
+  mineCovered = null
+  const d = decideInner()
+  // (starving with nothing in the pack: the food rule goes through - hunger past its line is the surer death; audit)
+  const starving = d.name === 'food' && bot.food <= 4 && !inv.foodItems(bot).length
+  if (mineCovered && !MINE_WORK.has(d.name) && !starving) return { name: 'mineHold', why: `${mineCovered.replace(/ - waiting inside$/, '')} - in the mine, waiting under the rock (it was: ${d.name})` }
+  // (let through on purpose against the call: never cut by it - the hideout's watch skips it; out of the hole, step 0 is the
+  //  hideout's again. Cut, it came back each round and was cut again a second later; audit F57-1)
+  if (mineCovered && starving) return Object.assign({}, d, { starving: true })
+  return d
+}
+function decideInner () {
   const night = world.phase(bot) === 'night'
   const dusk = world.phase(bot) === 'dusk'
   const home = mem.get().home
@@ -556,24 +609,10 @@ function decide () {
   // (and not one boxed into a pit it cannot walk out of - walls two high on all four sides - that cannot see us: four
   //  pillagers fell into the hole the bot died in, 11 blocks from the door, and the hideout waited on them 40 minutes and on,
   //  2026-10-04. One that sees us is the reflex's at once, as ever)
-  const pitted = e => { const f = e.position.floored(); return [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dz]) => [0, 1].every(dy => { const b = world.at(bot, f.x + dx, f.y + dy, f.z + dz); return !!b && world.isSolid(b) })) && !reflex.canSee(e) }
-  const aroundAll = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && levelWithUs(h) && onSurface(h.e))
-  const around = aroundAll.filter(h => !pitted(h.e))
-  const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
-  // (by day too when shooters stand round home and the body can't take their arrows: a pillager patrol and two skeletons shot
-  //  the bot four times in two minutes, each respawn walking back out to the grave, the farm, the tool chest, 2026-09-25)
-  // (the exchange's arithmetic - reflex.outgunned - not "no shield and under 8 armour": four pillagers read as no reason to
-  //  hide for an iron helmet, chestplate and shield, and the bot fought them by turns at the site, 2026-10-07 13:33. A bow
-  //  ready is its own answer: shot from range, never walked into - the reflex's shoot row)
-  const outgunned = reflex.outgunned(around) && !bowArmed()
-  // (from dusk: the bed takes the dusk, and a night slept from dusk never came - the first evening went to bed at 19:58)
-  // (the bed's own reach - 200 at dusk, 32 at night: it stands in for the bed wherever the bed would be chosen; held to 24 of home,
-  //  the second evening went to bed from 41b out, 2026-10-04)
-  const spiderNightOn = world.phase(bot) !== 'day' && !!home && dHome < (world.phase(bot) === 'dusk' ? 200 : 32) && stringShort() && spiderNightFit() && !held('spiderNight')
-  const spidersOnly = around.length > 0 && around.every(h => SPIDER_RE.test(h.e.name)) // (the spider night's own game: no hideout from it)
-  if (around.length && home && dHome < reflex.HIDEOUT_REACH && hut.shellComplete(bot) && (dim || outgunned || bot.health <= reflex.hurtLine()) && !(spiderNightOn && spidersOnly) && !held('hideout')) {
-    return { name: 'hideout', why: `${around.length} hostile${around.length > 1 ? 's' : ''} around home (${around.slice(0, 3).map(h => h.e.name).join(', ')}) - waiting inside` }
-  }
+  // (pitted: with levelWithUs, at the file's top - the hideout's own wait asks it too)
+  const { aroundAll, around, dim, spiderNightOn, why: hideoutWhy } = hideoutRead(home, dHome)
+  if (hideoutWhy && !inMineUnder()) return { name: 'hideout', why: hideoutWhy }
+  if (hideoutWhy) mineCovered = hideoutWhy // (the round goes on: mine work keeps the rock over it, the rest is mineHold - decide)
   // evening: be home before dusk, not at it - a 100-block walk begun at dusk arrives in the dark (a zombie
   // met the bot at its own door at hp 10)
   // (never on an expedition out: the nights are camped - walked home each evening, it never got past a day's walk out;
@@ -610,7 +649,10 @@ function decide () {
     // (only when a mine rule below can take the night - the existing mine near enough, or none so the dusk rule starts one;
     //  else the bed as before: skipped with no mine rule able to fire, the bot dug a bunker beside its own bed; audit)
     const mm0 = mem.get().mine
-    const mineCan = !held('nightMine') && (mm0 ? !!(mm0.entrance && world.dist2(mm0.entrance, home) < 48 && world.dist2(bot.entity.position, mm0.entrance) < (dusk ? 64 : 32) && (dusk || !move.insideHut(world.feetPos(bot)))) : dusk) // (the rules below exactly: night needs the night walk and the open air, a new mine dusk; audit)
+    // (home asked for first, as the rules either side do: a mine dug before a home was set - the tools' cobblestone, the
+    //  from-nothing start - read home's x off nothing here, and every decide() of that dusk and night threw: no bed, no
+    //  bunker, no hut picked, the loop logging its error every 3s till morning)
+    const mineCan = !held('nightMine') && (mm0 ? !!(mm0.entrance && home && world.dist2(mm0.entrance, home) < 48 && world.dist2(bot.entity.position, mm0.entrance) < (dusk ? 64 : 32) && (dusk || !move.insideHut(world.feetPos(bot)))) : dusk) // (the rules below exactly: night needs the night walk and the open air, a new mine dusk; audit)
     // (dusk finds the bot at the site, 40-60 blocks out: "within 32 of home" never held, and the rule never fired; at night,
     //  from home only - the dark walk; audit 2026-10-03)
     const mineTheNight = (dusk ? dHome < 96 : dHome < 16) && home && mineCan && build.getJob() && build.needsWork(bot) && nightFed() && inv.bestTool(bot, 'pickaxe', 8) && stoneShort() && !held('nightMine') // (a night mine just failed is no reason to refuse the bed; audit)
@@ -750,9 +792,14 @@ function decide () {
     if (ft && ft.day == null) { ft = Object.assign({}, ft, { day: day.dayNo(bot) }); mem.set('farTrip', ft) } // (one saved before the day was kept; audit)
     if (ft && day.dayNo(bot) > ft.day + 1) { mem.set('farTrip', null); ft = null } // (put off at dusk, run the next day - a day later it is stale)
     // (only when the food is all it waits on: the gear first - the iron and tools rules answer that, no packing, no retries)
-    const fit = ft && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !expedition() && expeditionReadyBarFood()
-    if (fit && packFood < FOOD_OUT && !held('food') && !held('farTrip')) return { name: 'food', why: `${ft.raw}: the far trip waits on food - packing ${FOOD_OUT} pts (${packFood} now)` }
-    if (fit && !held('farTrip')) return { name: 'farTrip', why: `${ft.raw} - the far trip, first thing in the day` } }
+    // (a plant's land - kind 'land' - is a day trip, there and back by dusk: no expedition kit, no camp food; its own walk
+    //  is judged at the start by forage's landTrip. Never the day it was booked: refused for the daylight, it would be booked
+    //  and refused again every round)
+    // (a land past a day's walk there and back - forage.landLead's overnight - is an expedition's: the kit and the camp food)
+    const land = !!ft && ft.kind === 'land' && !overnightLand(ft)
+    const fit = ft && world.phase(bot) === 'day' && world.ticksUntilNight(bot) > 2400 && !expedition() && (land ? day.dayNo(bot) > ft.day && bot.health >= 16 && !!inv.bestWeapon(bot) && (bot.food >= 14 || packFood >= 6) : expeditionReadyBarFood())
+    if (fit && !land && packFood < foodOut(ft) && !held('food') && !held('farTrip')) return { name: 'food', why: `${ft.raw}: the far trip waits on food - packing ${foodOut(ft)} pts (${packFood} now)` }
+    if (fit && !held('farTrip')) return { name: 'farTrip', why: `${ft.raw} - ${overnightLand(ft) ? 'the expedition, setting out by day (nights camped)' : 'the far trip, first thing in the day'}` } }
   // 6. food: cook what we carry; harvest a ripe farm
   if (inv.rawFoodCount(bot) >= 3 && dHome < 64 && !held('cook')) return { name: 'cook', why: `${inv.rawFoodCount(bot)} raw food to cook` }
   // saplings on hand and room for them in the orchard (empty spots, or fewer trees than the build still needs)
@@ -1016,6 +1063,24 @@ const TASKS = {
   async bunker () {
     return shelter.bunker(bot, { shouldStop: () => taskCancelled() })
   },
+  // (in the mine with the hideout's call on: stay under the rock till the call is gone or the body is out of the mine - the
+  //  reflexes keep what walks in; decide's own reading every few seconds, nothing walked)
+  async mineHold () {
+    log('dir', `holding in the mine at ${move.fmt(world.feetPos(bot))} (hp ${Math.round(bot.health)}, hunger ${bot.food})`)
+    // (and while a shooter in the tunnel sees us: the walk out past one is the stairway death itself - the reflexes own it; audit)
+    const shooterSees = () => reflex.hostiles(16).some(h => reflex.RANGED.has(h.e.name) && reflex.canSee(h.e))
+    for (;;) {
+      if (taskCancelled()) return true
+      await reflex.waitClear()
+      const home = mem.get().home
+      if (!inMineUnder()) break
+      if (!hideoutRead(home, home ? world.dist2(bot.entity.position, home) : Infinity).why && !shooterSees()) break
+      if (bot.food <= 4 && !inv.foodItems(bot).length) break // (starving: the next round's food rule goes through - decide)
+      await move.sleep(3000)
+    }
+    log('dir', 'the mine hold is over')
+    return true
+  },
   async spiderNight () {
     const home = mem.get().home; const ap = hut.doorApronStep(); if (!home || !ap) return false
     const t0 = Date.now(); let kills = 0; const s0 = inv.count(bot, 'string')
@@ -1084,7 +1149,7 @@ const TASKS = {
       // out only to shoot what can be shot: daylight, a shooter on the surface at our height, and above the hurt line - the
       // door was opened for 'dim' at night with mobs round it, and the log said "going out to shoot" (audit #21)
       if (bowArmed()) { // (out to shoot only with arrows for the fight - bowArmed)
-        const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
+        const dim = world.dim(bot)
         const shooters = reflex.hostiles(20).filter(h => reflex.RANGED.has(h.e.name) && levelWithUs(h) && onSurface(h.e))
         if (!dim && shooters.length && bot.health > reflex.hurtLine()) { log('dir', `took the bow and ${inv.count(bot, 'arrow')} arrows - going out to shoot ${shooters.length} shooter(s)`); await hut.unsealDoor(bot).catch(() => false); return true }
         log('dir', `took the bow and ${inv.count(bot, 'arrow')} arrows - staying in (${dim ? 'dim' : !shooters.length ? 'no shooter on the surface' : 'hp ' + Math.round(bot.health)})`)
@@ -1104,8 +1169,8 @@ const TASKS = {
     }
     log('dir', `waiting inside while mobs are about (hp ${Math.round(bot.health)})`)
     while (!taskCancelled() && Date.now() - t0 < 4 * 60000) {
-      const left = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && levelWithUs(h) && onSurface(h.e))
-      const dim = world.phase(bot) !== 'day' || world.tod(bot) >= 23000 || world.tod(bot) < 1500
+      const left = reflex.hostiles(20).filter(h => h.e.name !== 'bat' && levelWithUs(h) && onSurface(h.e) && !pitted(h.e)) // (decide's own list: `around`)
+      const dim = world.dim(bot)
       const outgunned = reflex.outgunned(left) && !bowArmed() // (decide's own rule)
       if (!left.length || (!dim && !outgunned && bot.health > reflex.hurtLine())) break // (the hurt line, as entry and heal use: R11)
       // a bed right here: sleeping skips the rest of the night (the server refuses while monsters are
@@ -1169,7 +1234,7 @@ const TASKS = {
     return ok
   },
   async food () {
-    return food.stockFood(bot, { targetPoints: mem.get().farTrip ? FOOD_OUT : 48, ctx: { shouldStop: dayStop } }) // (the far trip's own line: decide's farTrip rule)
+    return food.stockFood(bot, { targetPoints: mem.get().farTrip && (mem.get().farTrip.kind !== 'land' || overnightLand(mem.get().farTrip)) ? foodOut(mem.get().farTrip) : 48, ctx: { shouldStop: dayStop } }) // (the far trip's own line: decide's farTrip rule - foodOut, one number for both)
   },
   async cook () { await food.cookAll(bot, { shouldStop: dayStop }); return inv.rawFoodCount(bot) < 3 },
   async farm () { const ok = await farm.establish(bot, { shouldStop: dayStop }); baseZone(); return ok },
@@ -1274,7 +1339,11 @@ const TASKS = {
   },
   // (kept until it sets out or the day ends: cleared before the start, one refusal for food dropped it, and the packing
   //  that answers the refusal had nothing left to pack for; a new day drops it - the castle round asks again)
-  async farTrip () { const ft = mem.get().farTrip; if (!ft) return false; const ok = await startExpedition(ft.raw, ft.land); if (ok) mem.set('farTrip', null); return ok },
+  // (a plant's land: one go at dawn, whatever it brings - forage marks the land tried, the castle round books it again)
+  // (BUT A GO THE HIDEOUT CUT is no go: cleared at the start, a skeleton about home 9s into the dawn walk ended the trip and
+  //  the booking with it - the castle's allium day lost, 2026-11-15 11:57. Kept when the task itself was cancelled, it is
+  //  picked again once the call is over, and landTrip judges the daylight left then)
+  async farTrip () { const ft = mem.get().farTrip; if (!ft) return false; if (ft.kind === 'land' && !overnightLand(ft)) { const ok = await gatherFor(ft.raw, Math.max(1, ft.n || 1)); if (ok || !taskCancelled()) mem.set('farTrip', null); else log('dir', `${ft.raw}: the far trip cut short - kept for when the call is over`); return ok } const ok = await startExpedition(ft.raw, ft.land, ft.n); if (ok) mem.set('farTrip', null); return ok },
   async siteTidy () { return (await build.siteScaffoldTeardown(bot, { shouldStop: dayStop })) > 0 },
   async tidy () { return (await litter.tidy(bot, { from: mem.get().home, radius: 96, shouldStop: dayStop })) > 0 },
   async levelYard () { return (await hut.levelYard(bot, { shouldStop: dayStop })) > 0 },
@@ -1456,7 +1525,39 @@ const TASKS = {
       if (inv.count(bot, 'cobblestone') < COBBLE_OUT) await base.withdraw(bot, 'cobblestone', COBBLE_OUT - inv.count(bot, 'cobblestone')).catch(() => 0)
       e.packed = true; mem.set('expedition', e)
     }
-    if (inv.foodPoints(bot) < FOOD_BACK) { endExpedition(`food down to ${inv.foodPoints(bot)} pts`); return true }
+    { const h = mem.get().home; const floor = FOOD_BACK + (h ? walkFood(world.walkTicks(bot.entity.position, h), e) : 0)
+      if (inv.foodPoints(bot) < floor) { endExpedition(`food down to ${inv.foodPoints(bot)} pts - the walk home wants ${floor}`); return true } }
+    // A PLANT'S EXPEDITION: to its land (the walk stops for the night - the night rules camp, the next day walks on), the land
+    // looked round as a day trip's is (forage.landSearch), and an empty land is followed by the next one nearest where the
+    // bot stands, as long as the nights allow (MAX_NIGHTS, the dawn rule's)
+    if (e.plant) {
+      const L = e.to; if (!L) { endExpedition('no land to go to'); return true }
+      const me = bot.entity.position
+      if (world.dist2(me, L) > 16) {
+        const r = await move.travel(bot, { x: L.x, y: Math.floor(me.y), z: L.z }, { range: 16, shouldStop: stop, label: 'to the ' + L.biome, anyY: true })
+        if (!r.ok) {
+          if (stop()) return true
+          e.dry++; mem.set('expedition', e)
+          if (e.dry >= 3) endExpedition(`the ${L.biome} at ${L.x},${L.z} would not be reached (${r.why || 'no way'})`)
+          return false
+        }
+      }
+      const got0 = inv.count(bot, e.raw)
+      await forage.landSearch(bot, e.raw, Math.max(1, e.n || 1), L, { shouldStop: stop })
+      const got = inv.count(bot, e.raw) - got0
+      if (got > 0) { endExpedition(`+${got} ${e.raw} in the ${L.biome}`); return true }
+      // (THE NEXT LAND CHOSEN EVEN WHEN THE NIGHT STOPPED THE LOOK: it walks nowhere - the next day's travel does - and a land
+      //  whose second empty look ended at dusk was kept as the target, the next dawn's first look its third, 2026-11-15 14:02.
+      //  Only for a land the look gave up - its second empty one: a look cut short by a call two seconds in is no look)
+      if (stop() && !(((mem.get().plantLandTried || {})[e.raw]) || []).some(t => world.dist2(t, L) < 64 && (t.n || 1) >= 2)) return true
+      // (NEVER BACK TO A LAND THIS TRIP SEARCHED: one empty look leaves a land "once more another day" (n 1), and the next land
+      //  from the old meadow was the 776b one just searched, 211b back - the walk there and back for one more look, 2026-11-15
+      //  13:41. The trip's own list; another day's trip may look again)
+      e.searched = (e.searched || []).concat([{ x: L.x, z: L.z }])
+      const next = forage.landLead(e.raw, bot.entity.position, e.searched)
+      if (next) { e.to = { x: next.x, z: next.z, biome: next.biome }; e.dry = 0; mem.set('expedition', e); log('dir', `expedition for ${e.raw}: none in the ${L.biome} - on to the ${next.biome} ${Math.round(next.d)}b on`); return true }
+      endExpedition(`no more land of ${e.raw} known`); return true
+    }
     const before = inv.count(bot, e.raw)
     const room = tripRoom()
     if (room < 64) { endExpedition('the pack is full'); return true }
@@ -1523,6 +1624,12 @@ function furnaceTarget (tot) { return Math.max(1, Math.min(Math.ceil(tot.smeltTo
 // What one trip can carry home of a material, beyond a couple of slots for what the trip turns up on the way (ores in
 // the tunnel walls, a sapling): a player goes back when the pack is full, not after two stacks. Fixed caps (160 cobble,
 // 64 logs, 32 fuel logs) made a 33,000-cobble job 200 walks to the mine.
+const TRIP_MARGIN = 4 // (slots a trip's emptying leaves over its own haul: what comes with it - saplings, sticks, seeds, a stray drop)
+// (and a trip to the MINE brings the rock it cuts to get there: cobblestone, stone, coal, the granites and tuff, gravel, dirt - a
+//  kind a slot and the stone by stacks. A raw_iron trip left with its room 5 - one stack of iron and the margin - and was
+//  "pack full - taking the haul home" three minutes in, no iron yet, a 54b walk each way, 2026-11-15 09:34)
+const MINE_MARGIN = 10
+function tripMined (raw) { return raw === 'cobblestone' || raw === 'fuel' || !!(craft.GATHER[raw] && craft.GATHER[raw].ore) }
 function tripRoom () { return Math.max(1, inv.freeSlots(bot) - 2) * 64 }
 // Trees the build still needs: its logs and its fuel as charcoal (8/7 logs a unit), over the logs a tree gives (what the
 // orchard's own harvests have given, 5 - the wild oaks round Notre-Dame - until it has any). Updated whenever the
@@ -1571,7 +1678,26 @@ async function withdrawOf (name, want) { return mats.withdrawPool(bot, name, wan
 // The window's blocks out of the chest while two slots stay free (the pickups on the way): a stack of every kind first -
 // the one-offs (a button, a flower) often anchor the band's lowest cells, and four stacks of stone taken first left no
 // room for them (audit 2026-09-27) - then the big kinds topped up to four stacks
-async function withdrawWindow (needs, lowY = {}) {
+// THE WINDOW'S ORDER - the band's waited and anchor kinds first, then the most cells ready, then layer, then count: what the
+// withdraw takes first, and what a trip's emptying puts in the chest last (gatherForInner, read backwards; audit 38)
+function windowOrder (needs, lowY = {}, ready = null) {
+  const firsts = [...new Set([mem.get().buildWaiting, ...(typeof build.missingAnchors === 'function' ? build.missingAnchors() : [])].filter(nm => nm && needs[nm] != null))]
+  const rank = nm => { const i = firsts.indexOf(nm); return i < 0 ? Infinity : i }
+  const y = it => lowY[it] != null ? lowY[it] : Infinity
+  const rdy = nm => (ready && ready[nm]) || 0
+  const order = Object.entries(needs).sort((a, b) => (rank(a[0]) - rank(b[0])) || (rdy(b[0]) - rdy(a[0])) || (y(a[0]) - y(b[0])) || (b[1] - a[1]))
+  return { firsts, y, order }
+}
+async function withdrawWindow (needs, lowY = {}, ready = null) {
+  // (THE CHESTS FIRST: the window's blocks the bank holds come only from chests within the withdraw's own walk
+  //  (base.WITHDRAW_WALK) - from further out it took nothing, silently. A pumpkin trip for nothing ended 97b out, the pack
+  //  emptied into the chests for it, and the round went on from there: the step ran without the 113 dark_oak_stairs the
+  //  band waited on, 3 placed in 104s ("band anchored by dark_oak_stairs (not in hand)"), 2026-11-15 05:56-05:58. Home
+  //  first when the bank holds what the window wants and no chest is in that walk - every caller, one number; audit F36-1)
+  if (!dayStop() && (mem.get().chests || []).length && !base.chestWithinWalk(bot) && Object.entries(needs).some(([nm, n]) => n - countOf(nm) > 0 && base.bankCount(nm) > 0)) {
+    log('dir', `window withdraw: the chests are past the withdraw's walk (${Math.round(base.distHome(bot))}b from home) with the window's blocks in them - home first`)
+    await base.goHome(bot, { shouldStop: dayStop }).catch(() => null)
+  }
   // (the item the band waits on first: taken in the window's own order, the pack filled with trapdoors, signs, stairs and
   //  a grindstone before it came to stone_bricks - the band "waited on stone_bricks" for an hour with 875 in the chest,
   //  2026-09-30)
@@ -1579,10 +1705,15 @@ async function withdrawWindow (needs, lowY = {}) {
   //  grindstone for the upper floors come last, never the next layer's stone; audit)
   // (EVERY item the band's anchors miss goes first, the one named first of them: one named a round, the band anchored by two
   //  - a birch fence gate and dark oak stairs - got one each round and the stairs never fitted, 2026-10-03)
-  const firsts = [...new Set([mem.get().buildWaiting, ...(typeof build.missingAnchors === 'function' ? build.missingAnchors() : [])].filter(nm => nm && needs[nm] != null))]
-  const rank = nm => { const i = firsts.indexOf(nm); return i < 0 ? Infinity : i }
-  const y = it => lowY[it] != null ? lowY[it] : Infinity
-  const order = Object.entries(needs).sort((a, b) => (rank(a[0]) - rank(b[0])) || (y(a[0]) - y(b[0])) || (b[1] - a[1]))
+  const { firsts, y, order } = windowOrder(needs, lowY, ready)
+  // (WHAT CAN GO IN NOW BEFORE WHAT CANNOT - ready, build.nextNeeds' count of the window's cells that can take their block
+  //  as the walls stand (the band's own floor a thousand each): in layer order alone the pack's 14 free kinds went to one-offs
+  //  for cells that rest or have no stand - 5 oak leaves, 2 lightning rods, 6 trapdoors, 6 signs, 4 doors, a grindstone - and
+  //  never came to spruce planks (125 cells ready at y131, 340 in the chest), stone or stone bricks: a step of 39 tries placed
+  //  23 and ended "62 structural in hand (min y140)", "none in the pack at the click" for the planks, 2026-11-14 20:05. The
+  //  band's waited kinds still lead; then the most cells ready first (1 and over); then the kinds with cells awake but no
+  //  face yet - the next layers' own, the most first (under 1); a kind whose every cell rests comes last, in layer order)
+  const rdy = nm => (ready && ready[nm]) || 0
   // ROOM FOR THE BAND'S OWN FIRST: a pack full of the window's upper-layer blocks (chests, grindstones, lightning rods,
   // doors - 31 kinds) took nothing, the "two slots free" rule returned at once, and the y125 band waited on dark oak stairs
   // with 182 in the chest, round after round (2026-10-03). Window blocks whose lowest layer is above the band's missing ones
@@ -1602,7 +1733,30 @@ async function withdrawWindow (needs, lowY = {}) {
   // (ONE PLAN A ROUND: what roomForBand put back for the band is not this round's to take again - the same signs and doors went
   //  into the chest and out of it in the same second, twice, 2026-10-07 12:29/12:31. The band's kinds lead the list, and the
   //  withdraw keeps their slots across the chests - base.withdrawPlan)
+  // ROOM FOR WHAT CAN GO IN: the window's kinds in the pack that no cell can take now (ready under 1 - every cell resting
+  // first, then those with no face yet, the highest layer's first) go back to the chest until the kinds that can go in and
+  // are not in the pack yet have their slots - held from round to
+  // round as "the window's own" they were the reason nothing else was taken: 2 slots free, the withdraw returned at once.
+  // Never the band's waited kinds, the kit's keep or the scaffold's stock; what goes back is not taken again this round
+  if (ready) {
+    const keep = nm => Math.max(base.keepCount(bot, { name: nm }), build.FILLER_ITEMS.test(nm) ? build.SCAFFOLD_WANT : 0)
+    const incoming = order.filter(([nm]) => rdy(nm) >= 1 && countOf(nm) === 0 && base.bankCount(nm) > 0).length
+    const room = Math.min(incoming, 12) + BAND_KEEP_FREE
+    if (incoming && inv.freeSlots(bot) < room) {
+      const idle = [...new Set(inv.items(bot).map(i => i.name))].filter(nm => needs[nm] != null && rdy(nm) < 1 && !firsts.includes(nm) && keep(nm) !== Infinity && inv.count(bot, nm) > keep(nm)).sort((a, b) => (rdy(a) - rdy(b)) || (y(b) - y(a)))
+      const back = new Map(); let free = inv.freeSlots(bot)
+      for (const nm of idle) { if (free >= room) break; const k = keep(nm); const slots = inv.items(bot).filter(i => i.name === nm).length - Math.ceil(k / 64); if (slots <= 0) continue; back.set(nm, k); free += slots }
+      if (back.size) {
+        await base.depositAll(bot, { keep: (b, i) => back.has(i.name) ? back.get(i.name) : Infinity }).catch(() => false)
+        for (const nm of back.keys()) putBack.add(nm)
+        log('dir', `room for what can go in now: ${[...back.keys()].join(', ')} back to the chest (no cell takes them as the walls stand) - ${inv.freeSlots(bot)} slots free for ${incoming} kinds`)
+      }
+    }
+  }
   const plan = order.filter(([name]) => !putBack.has(name))
+  // (measurement only: what the window asks for, in its order, against the pack and the bank - the first round after a
+  //  restart took a handful of one-offs and none of the band's own blocks, twice, 2026-11-14 21:37 and 21:44)
+  log('dir', `window withdraw: ${plan.length} kinds wanted, ${inv.freeSlots(bot)} slots free - ${plan.slice(0, 8).map(([nm, n]) => `${nm} x${n} (pack ${countOf(nm)}, bank ${base.bankCount(nm)}, ready ${Math.round(rdy(nm) * 100) / 100})`).join(', ')}`)
   // (each pass in ONE round of chest openings - base.withdrawMany, the exact items in the band's order; then, kind by kind, only
   //  what a stand-in must cover - a birch stair for a jungle stair: withdrawOf's pool)
   for (const cap of [64, 64 * 4]) {
@@ -1654,9 +1808,33 @@ function windowNeeds () { return typeof build.nextNeeds === 'function' ? build.n
 //  band rose to y129 had no dark oak planks in it; audit 2026-10-07)
 let winKeepMemo = { at: 0, v: {}, sig: '' }
 function bandSig () { try { return `${mem.get().buildWaiting || ''}|${(build.missingAnchors() || []).join(',')}` } catch { return '' } } // (not the placed count: nextNeeds is a pass over the box, and decide() asks this every loop - body first)
-function windowKeep () { const sig = bandSig(); if (Date.now() - winKeepMemo.at > 30000 || sig !== winKeepMemo.sig) { let v = {}; try { v = build.getJob() ? windowNeeds() : {} } catch {} winKeepMemo = { at: Date.now(), v, sig } } return winKeepMemo.v }
+function windowKeep () { const sig = bandSig(); if (Date.now() - winKeepMemo.at > 30000 || sig !== winKeepMemo.sig) { let v = {}; try { v = build.getJob() ? windowNeeds() : {} } catch {} winKeepMemo = { at: siteKnown() ? Date.now() : 0, v, sig } } return winKeepMemo.v } // (a reading off an unloaded site is no memo: asked again next call)
+// (THE SITE READ ONCE SINCE THIS START: a job and its chunks loaded - build.siteLoaded. Before it - the first seconds after a
+//  restart - every cell reads not done, the window is the base layer's, and the keep built on it is no keep at all. Only
+//  until then: away on a trip the site is unloaded too, and a keep of every build item there would take the planner's
+//  cobblestone towers off it (move.scaffoldOk reads the same claim) - out there the window as it was last read stands)
+let siteSeenJob = null
+function siteKnown () { try { const j = build.getJob(); if (!j) return true; if (siteSeenJob === j) return true; if (build.siteLoaded(bot)) { siteSeenJob = j; return true } return false } catch { return true } }
 // (THE ONE KEEP, registered with base: every deposit keeps the window's blocks, and the band's waited and anchor items whole)
-function bandKeep (i) { const w = mem.get().buildWaiting; let anchors = []; try { anchors = build.missingAnchors() || [] } catch {} if (i.name === w || anchors.includes(i.name)) return Infinity; return windowKeep()[i.name] || 0 }
+// (and BY WHAT THE PLACING TAKES for it - build.acceptsFor, pickItem's stand-ins: the window draws a need out of the chests
+//  through that pool, and a keep read by the exact name put it straight back - three aged lightning rods for the castle's
+//  lightning_rod cells taken and deposited every round, 2026-11-15 02:25 (the hold's half of it: detachedItems, batch 22))
+const altMemo = { job: null, m: new Map() }
+const altOf = n => { const j = build.getJob(); if (altMemo.job !== j) { altMemo.job = j; altMemo.m = new Map() } if (!altMemo.m.has(n)) { let re = null; try { re = build.acceptsFor(n) } catch {} altMemo.m.set(n, re) } return altMemo.m.get(n) }
+const takenFor = (want, name) => want === name || (!!want && !!altOf(want) && altOf(want).test(name))
+function bandKeep (i) {
+  // (THE CLAIM UNKNOWN IS NO CLAIM OF NONE: right after a reconnect the site is not loaded, the window reads the base layer,
+  //  and the first deposit ("home with 460 items to store", 8s after the deploy's restart) put back the 64 dark_oak_stairs
+  //  the band stood on - the step after it ran "band anchored by dark_oak_stairs (not in hand)" until the next round,
+  //  2026-11-15 06:30-06:33: a round lost after every restart. Every item the job places is kept whole until the window can be
+  //  read - the true haul still goes in; audit 42)
+  if (!siteKnown()) { try { return build.jobUses(bot, i.name) ? Infinity : 0 } catch { return 0 } }
+  const w = mem.get().buildWaiting; let anchors = []; try { anchors = build.missingAnchors() || [] } catch {}
+  if (takenFor(w, i.name) || anchors.some(a => takenFor(a, i.name))) return Infinity
+  const wk = windowKeep(); if (wk[i.name]) return wk[i.name]
+  for (const [n, k] of Object.entries(wk)) if (k && n !== i.name && takenFor(n, i.name)) return k
+  return 0
+}
 function depositKeep (b, i) { return base.depositKeepOf(b, i) }
 function depositHaulSize () { let n = 0; const seen = new Set(); for (const it of inv.items(bot)) { if (seen.has(it.name)) continue; seen.add(it.name); const k = depositKeep(bot, it); if (k !== Infinity) n += Math.max(0, inv.count(bot, it.name) - k) } return n }
 // the nearest natural wood growing around here (what the castle's wood cells will be made of)
@@ -1805,7 +1983,7 @@ async function castleWorkInner () {
   // slot, the filler's withdraw failed "inventory full", and the cells over a drop at the site went unplaced for want
   // of a block to stand on (2026-09-27) - and each withdraw into a full pack was still a walk to a chest
   await build.ensureScaffold(bot, build.SCAFFOLD_WANT, { shouldStop: dayStop })
-  { const lowY = {}; await withdrawWindow(build.nextNeeds(bot, WINDOW_LAYERS, lowY), lowY) } // (one pass: the needs and each one's lowest layer)
+  { const lowY = {}; const rdy = {}; await withdrawWindow(build.nextNeeds(bot, WINDOW_LAYERS, lowY, rdy), lowY, rdy) } // (one pass: the needs, each one's lowest layer, and what can go in now)
   // what does the next stretch of building need?
   const lowest = j.cells.filter(c => build.cellDone(bot, c) !== true)
   const minY = Math.min(...lowest.map(c => c.y))
@@ -1874,15 +2052,33 @@ async function castleWorkInner () {
       const ok0 = await gatherFor(raw0, Math.max(win0.raw[raw0], Math.min(whole, tripRoom())))
       if (inv.freeSlots(bot) < 8 || ok0) await base.depositHaul(bot, { shouldStop: dayStop })
       if (ok0) return true
+    } else if (raw0 && (!mem.get().farTrip || mem.get().farTrip.longLead) && !expedition() && forage.exhausted(raw0)) { // (the band's wait outranks a plan-ahead booking; audit 69(b))
+      // (A PLANT'S LAND FIRST THING TOMORROW: searched out round home, a plant's country (forage.landLead) is a day's walk
+      //  there and back - it fits the day only from its first minute or so, and the morning's harvest and farm took that:
+      //  the meadow 600b off for the allium that holds the castle's way to 394 cells was never once in reach of a round,
+      //  2026-11-15 10:54. Booked as the far trip, it goes before the day's chores, as the far log trips do)
+      const L = forage.landLead(raw0)
+      if (L) { mem.set('farTrip', { raw: raw0, land: L, kind: 'land', n: win0.raw[raw0], day: day.dayNo(bot) }); log('dir', `the build waits on ${want} - ${raw0} grows in the ${L.biome} ${Math.round(L.d)}b off: ${L.overnight ? 'past a day\'s walk there and back - an expedition, setting out while the day lasts' : 'too far for what is left of today - first thing tomorrow'}`) }
     }
+  }
+  // LONG-LEAD SUPPLY, PLANNED AHEAD: a plant of the whole build searched out round home grows only in its own land, a dawn's
+  // walk off - fetched before its cells are the band's, as a builder reading the materials list sends for the rare things
+  // first. Booked only when the band's own wait booked nothing (the booking above wins), once a day: the dawn slot, the
+  // nearest land first (the band's own allium was found missing only when it held the castle's way, 2026-11-15)
+  if (!mem.get().farTrip && !expedition() && mem.get().longLeadDay !== day.dayNo(bot)) {
+    mem.set('longLeadDay', day.dayNo(bot))
+    let short = {}; const t0 = Date.now(); let kinds = 0; try { const cs = build.cachedStatus(bot); kinds = cs ? Object.keys(cs.need || {}).length : 0; short = cs ? (mats.planFor(bot, cs.need).raw || {}) : {} } catch {}
+    log('dir', `long-lead plan: ${Date.now() - t0}ms (${kinds} kinds)`) // (timed once a day: over ~150ms it is a lag line - read only the plants then; audit 69(a))
+    const far = Object.entries(short).filter(([r, v]) => v > 0 && forage.exhausted(r)).map(([r, v]) => ({ r, v, L: forage.landLead(r) })).filter(o => o.L).sort((a, b) => a.L.d - b.L.d || b.v - a.v)
+    if (far.length) { const o = far[0]; mem.set('farTrip', { raw: o.r, land: o.L, kind: 'land', n: o.v, day: day.dayNo(bot), longLead: true }); log('dir', `long-lead: ${o.v} ${o.r} for the whole build grow in the ${o.L.biome} ${Math.round(o.L.d)}b off - first thing tomorrow, before its cells hold the band${far.length > 1 ? ` (next: ${far.slice(1, 4).map(q => q.r).join(', ')})` : ''}`) }
   }
   // the same window the builder works in (it builds past a missing material, so the bricks for those layers
   // must come out of the chest too - with glass short, nothing was withdrawn and nothing built)
   phase('window')
-  const nextLow = {}; const next = build.nextNeeds(bot, WINDOW_LAYERS, nextLow)
+  const nextLow = {}; const nextRdy = {}; const next = build.nextNeeds(bot, WINDOW_LAYERS, nextLow, nextRdy)
   // withdraw what we have for it (anything that stands in: birch stairs for jungle stairs)
   await build.ensureScaffold(bot, build.SCAFFOLD_WANT, { shouldStop: dayStop })
-  await withdrawWindow(next, nextLow)
+  await withdrawWindow(next, nextLow, nextRdy)
   let carrying = 0
   for (const name of Object.keys(next)) carrying += countOf(name)
   let blockedOn = null
@@ -2000,6 +2196,12 @@ async function castleWorkInner () {
     if (Object.keys(tot.raw).length) log('dir', `nothing to gather now (${Object.keys(tot.raw).map(r => tot.raw[r] + ' ' + r).join(', ')} still short, none fits the hour${clay.exhausted() ? '; no clay in range' : ''}) - waiting on ${waiting}`)
     return nearDusk ? false : !!win.smelts.length
   }
+  // (PROBE, evidence only: the band waited on flower_pot - clay_ball 395 short in the window - and the round picked acacia
+  //  leaves with no word why, 2026-11-15 07:04. Said once per waited item and pick: which link of the steer let it go)
+  if (blockedOn && pick.raw !== (fuelBound ? 'fuel' : blockedRaw)) {
+    const k = blockedOn + '>' + pick.raw
+    if (steerProbeSaid !== k) { steerProbeSaid = k; let fb = '?'; try { fb = blockedRaw ? String(feasible(blockedRaw)) : '-' } catch {} log('dir', `(probe) the band waits on ${blockedOn} but the pick is ${pick.raw}: steer ${steer || 'none'}${steer && build.infillItem(steer) ? ' (infill)' : ''}, its chain ${chain.join('+') || 'none'}, blockedRaw ${blockedRaw || 'none'} (window ${blockedRaw ? win.raw[blockedRaw] || 0 : '-'}, feasible ${fb}), fuelBound ${fuelBound}${fuelBound ? ` (fuel window ${win.raw.fuel || 0}, whole ${tot.raw.fuel || 0}, feasible ${feasible('fuel')})` : ''}`) }
+  }
   log('dir', `${st.name} needs ${pick.short} more ${pick.raw} - ${pick.why}${pick.raw === blockedRaw ? ` (the builder waits on ${blockedOn})` : ''}; still short in all: ${Object.keys(tot.raw).map(r => tot.raw[r] + ' ' + r).join(', ')}`)
   buildFocus = { at: Date.now(), gathering: pick.raw, short: pick.short, why: pick.why, builderWaitsOn: blockedOn || null, shortInAll: Object.fromEntries(Object.entries(tot.raw).sort((a, b) => b[1] - a[1]).slice(0, 8)) }
   // (a PACKFUL, not the next few layers: gathering the window's want, building it, and going back out for the next
@@ -2032,6 +2234,15 @@ const MAX_NIGHTS = 3
 // (three nights and the walk back is days of a working body - and a taiga is thin on animals: a full pack of food out,
 //  and home when it runs low rather than a forage trip 900b from the farm - audit 2026-09-28)
 const FOOD_OUT = 50; const FOOD_BACK = 10
+// THE FOOD A TRIP TAKES: its walk there and back and a day's look round, at what a day and its night on the move burn - the
+// trip's own measure once it has one (its pack at the start against now, a night at a time), else BURN_DAY (50 -> 35 in two
+// nights out, 2026-11-15). And the walk home's food on top of FOOD_BACK before it turns back: FOOD_BACK alone was the walk
+// home from 600b, not from a flower forest 2630b out - home starving, or not at all; audit F81-1
+const BURN_DAY = 8
+function burnPerDay (e) { if (e && e.food0 != null && e.nights >= 1) { const b = (e.food0 - inv.foodPoints(bot)) / e.nights; if (b > 0) return Math.max(b, BURN_DAY / 2) } return BURN_DAY }
+function walkFood (ticks, e = null) { return Math.ceil(ticks / 12000 * burnPerDay(e)) } // (walked by day: 12000 ticks of it a day)
+function landWalk (land) { const h = mem.get().home; return land && h && land.x != null ? world.walkTicks(h, { x: land.x, y: h.y, z: land.z }) : 0 }
+function foodOut (ft) { const t = landWalk(ft && ft.land); return t ? Math.max(FOOD_OUT, FOOD_BACK + walkFood(2 * t) + BURN_DAY) : FOOD_OUT }
 const EXPEDITION_HP = 14 // (out there the walk goes on only this whole: no help, no grave run, the next mob unseen)
 // (an axe a stack of logs: 535 of spruce wear out four stone axes - cobblestone in the pack, and the kit's table and the
 //  tools rule make the next one out there, never a wooden one of the planks - audit 2026-09-28)
@@ -2041,7 +2252,7 @@ function expeditionGuarded () { return inv.armorPoints(bot) >= 8 || !!inv.offhan
 // EVERYTHING AN EXPEDITION WAITS ON BUT THE FOOD - one test for startExpedition and decide's packing rule: packed for a trip
 // that waited on armour, the food was hunted for again every time it was eaten below the line, all day (audit)
 function expeditionReadyBarFood () { return bot.health >= 16 && !!inv.bestWeapon(bot) && !!inv.bestTool(bot, 'axe', 1) && expeditionGuarded() }
-async function startExpedition (raw, land) {
+async function startExpedition (raw, land, n = 0) {
   if (expedition()) return true // (one at a time: the castle loop's second ask found it already set out)
   // packed from the bank while home is a short walk (the castle loop asks from the site): the food first - the pack's
   // own food only ever rises to the food rule's line, so a gate on it alone waited every day for ever - and the
@@ -2058,7 +2269,7 @@ async function startExpedition (raw, land) {
       await base.depositAll(bot, { keep: (b, i) => Math.max(base.keepCount(b, i), fill[i.name] || 0) }).catch(() => false)
     }
     for (const name of inv.GOOD_FOOD) {
-      if (inv.foodPoints(bot) >= FOOD_OUT) break
+      if (inv.foodPoints(bot) >= foodOut({ land })) break
       if (base.bankCount(name) > 0) await base.withdraw(bot, name, Math.min(16, base.bankCount(name))).catch(() => 0)
     }
     if (inv.count(bot, 'cobblestone') < COBBLE_OUT) await base.withdraw(bot, 'cobblestone', COBBLE_OUT - inv.count(bot, 'cobblestone')).catch(() => 0)
@@ -2066,12 +2277,21 @@ async function startExpedition (raw, land) {
   }
   const food = inv.foodPoints(bot)
   const guarded = expeditionGuarded()
-  if (food < FOOD_OUT || !expeditionReadyBarFood()) { log('dir', `${raw}: its country is past a day's walk - an expedition waits on ${food < FOOD_OUT ? 'food (' + food + ' pts packed' + (packed ? ', the bank included' : ' (the bank not reached from here)') + ', ' + FOOD_OUT + ' wanted - cooking and the farm make the rest)' : bot.health < 16 ? 'health' : !guarded ? 'armour (8 points) or a shield - the iron gear first' : 'a weapon and an axe'}`); return false }
-  mem.set('expedition', { raw, to: land ? { x: land.x, z: land.z, biome: land.biome } : null, phase: 'out', at: Date.now(), nights: 0, day: day.dayNo(bot), dry: 0, packed })
-  log('dir', `${raw}: its country is past a day's walk - setting out on an expedition${land ? ' toward the ' + land.biome : ''} (${food} food pts, nights camped on the way)`)
+  const want = foodOut({ land })
+  if (food < want || !expeditionReadyBarFood()) { log('dir', `${raw}: its country is past a day's walk - an expedition waits on ${food < want ? 'food (' + food + ' pts packed' + (packed ? ', the bank included' : ' (the bank not reached from here)') + ', ' + want + ' wanted - cooking and the farm make the rest)' : bot.health < 16 ? 'health' : !guarded ? 'armour (8 points) or a shield - the iron gear first' : 'a weapon and an axe'}`); return false }
+  const plant = !!(land && land.overnight) // (a plant's land: walked to and looked round - the expedition task's plant branch)
+  mem.set('expedition', { raw, to: land ? { x: land.x, z: land.z, biome: land.biome } : null, phase: 'out', at: Date.now(), nights: 0, day: day.dayNo(bot), dry: 0, packed, plant, n, food0: food })
+  // (the round trip in days of walking against the nights it may take - forage's EXPEDITION_WALK and MAX_NIGHTS are two
+  //  numbers; said when they drift apart; audit 81(b))
+  const days = landWalk(land) * 2 / 12000
+  log('dir', `${raw}: its country is past a day's walk - setting out on an expedition${land ? ' toward the ' + land.biome : ''} (${food} food pts, ${want} wanted${days ? `, ~${days.toFixed(1)} days of walking there and back` : ''}, nights camped on the way)${days + 1 > MAX_NIGHTS + 1 ? ` - its round trip runs past ${MAX_NIGHTS} nights: the walk home goes on after them` : ''}`)
   return true
 }
 function expedition () { return mem.get().expedition || null }
+// A FAR TRIP THAT IS AN EXPEDITION'S: a plant's land past a day's walk there and back (forage.landLead's overnight) - ONE
+// reading for decide's gate, the far trip task and the food task's target (a gate of 50 food against a packing of 48 asked
+// the food task again for ever; audit F72-2)
+function overnightLand (ft) { return !!ft && ft.kind === 'land' && !!(ft.land && ft.land.overnight) }
 function endExpedition (why) { const e = expedition(); if (!e) return; if (e.phase !== 'back') { e.phase = 'back'; e.why = why; mem.set('expedition', e); log('dir', `expedition for ${e.raw}: ${why} - heading home`) } }
 // (nights out: the same phase edge as notToday - night seen, or the clock wrapping past dawn in a bed)
 function watchExpedition () {
@@ -2148,14 +2368,35 @@ async function gatherForInner (raw, short) {
   // (ANY trip, not only cobble: an oak_leaves trip set out from the site with the window's blocks in the pack - "the pack is
   //  full - no oak_planks taken", the shears' sticks never made, a birch felled 79b out for nothing, 2026-10-03)
   if (base.distHome(bot) >= 24 && (mem.get().chests || []).length && (haulSize() >= 64 || inv.freeSlots(bot) < 4)) await base.goHome(bot, { shouldStop: dayStop }).catch(() => null)
-  if (base.distHome(bot) < 24 && (mem.get().chests || []).length && (haulSize() >= 64 || inv.freeSlots(bot) < 4)) {
+  // (the trip's own room - its batch in stacks and a margin: the at-home emptying is asked for it too, so a log trip never
+  //  leaves with 5 slots for 192 logs; not the far walk home - trips from the castle's far end start there as before; audit 38)
+  let st = 64; try { const it = bot.registry.itemsByName[raw]; if (it && it.stackSize) st = it.stackSize } catch {}
+  const room = Math.min(34, Math.ceil(Math.max(1, short) / st) + TRIP_MARGIN + (tripMined(raw) ? MINE_MARGIN : 0))
+  if (base.distHome(bot) < 24 && (mem.get().chests || []).length && (haulSize() >= 64 || inv.freeSlots(bot) < 4 || inv.freeSlots(bot) < room)) {
     const before = inv.freeSlots(bot)
     // (never the trip's own footing: filler stays for the planner's steps and a tower out of a pit - audit)
     // (SCAFFOLD_WANT of ANY filler, the most plentiful first: with no cobble but a stack of andesite, the andesite stays)
     const fill = {}; let need = build.SCAFFOLD_WANT
     for (const [n, c] of Object.entries(inv.counts(bot)).filter(([n]) => build.FILLER_ITEMS.test(n)).sort((a, b) => b[1] - a[1])) { const t = Math.min(c, need); if (t > 0) { fill[n] = t; need -= t } }
-    await base.depositAll(bot, { keep: (b, i) => Math.max(base.keepCount(b, i), fill[i.name] || 0) }).catch(() => false)
-    log('dir', `emptied the pack for the ${raw} trip: ${before} -> ${inv.freeSlots(bot)} free slots`)
+    // (THE TRIP'S OWN ROOM, NOT THE WHOLE PACK: everything over the kit and filler went in, the window's blocks with it - a
+    //  pumpkin trip (one slot of haul) freed 19 slots twice, the 113 dark_oak_stairs the band stood on went in the chest both
+    //  times and the step after each ran "band anchored by dark_oak_stairs (not in hand)", 2026-11-15 05:55 and 06:06. What no
+    //  keep claims goes first (the haul: depositKeep - the window's own claim kept); then, only while the trip still lacks its
+    //  room (its batch in stacks and a margin for what comes with it), the window's blocks in its own order read backwards
+    //  (windowOrder) - the band's floor kinds last. A packful trip (logs, cobble) still gets its packful; audit 38)
+    const floor = (b, i) => Math.max(base.keepCount(b, i), fill[i.name] || 0)
+    await base.depositAll(bot, { keep: (b, i) => Math.max(depositKeep(b, i), fill[i.name] || 0) }).catch(() => false)
+    const out = []
+    if (inv.freeSlots(bot) < room) {
+      const lowY = {}; const rdy = {}; let needs = {}; try { needs = build.nextNeeds(bot, WINDOW_LAYERS, lowY, rdy) || {} } catch {}
+      const { order } = windowOrder(needs, lowY, rdy)
+      const ranked = order.map(([nm]) => nm); for (const nm of new Set(inv.items(bot).map(i => i.name))) if (!ranked.includes(nm)) ranked.push(nm) // (claimed, not in the window: before nothing - after the window's own, read backwards)
+      const stacksOver = nm => { const its = inv.items(bot).filter(i => i.name === nm); if (!its.length) return 0; const k = floor(bot, its[0]); if (k === Infinity) return 0; return Math.max(0, its.length - Math.ceil(k / (its[0].stackSize || 64))) }
+      let free = inv.freeSlots(bot)
+      for (const nm of ranked.slice().reverse()) { if (free >= room) break; const sl = stacksOver(nm); if (sl > 0) { out.push(nm); free += sl } }
+      if (out.length) await base.depositAll(bot, { keep: (b, i) => out.includes(i.name) ? floor(b, i) : Infinity }).catch(() => false)
+    }
+    log('dir', `emptied the pack for the ${raw} trip: ${before} -> ${inv.freeSlots(bot)} free slots (its room ${room})${out.length ? ` - the window's ${out.slice(0, 6).join(', ')}${out.length > 6 ? ` and ${out.length - 6} more` : ''} back in the chest for it` : ''}`)
   }
   const batch = Math.min(short, tripRoom())
   // (ironKeep: the gear's ingots - gearIronKeep - for a trip's own crafts to leave alone: the spare shears; audit)
@@ -2311,6 +2552,7 @@ async function gatherForInner (raw, short) {
 }
 
 // ---- loop ---------------------------------------------------------------------------------
+const HIDEOUT_WATCH_SKIP = new Set(['hideout', 'sleep', 'idle', 'leaveForeign', 'mineHold'])
 async function loop () {
   for (;;) {
     try {
@@ -2328,7 +2570,25 @@ async function loop () {
       const scope = control.begin() // (the task's scope: an abort cancels everything it still begins - control.js)
       taskCancelled = scope.cancelled
       running = true
+      // (the hideout's call while the task runs: once no reflex holds the body - an abort mid-flee would end the reflex's own
+      //  walk too, control.js - the task is ended and the next round takes the hideout; never the operator's task, nor one
+      //  that is already in or going in)
+      let watching = !HIDEOUT_WATCH_SKIP.has(d.name) && override !== d.name && !d.starving
+      ;(async () => {
+        while (watching) {
+          await move.sleep(1000)
+          if (!watching || taskCancelled()) break
+          try {
+            if (reflex.active() || reflex.diving() || !bot.entity || bot.health <= 0) continue
+            const home = mem.get().home
+            const why = hideoutRead(home, home ? world.dist2(bot.entity.position, home) : Infinity).why
+            if (why && MINE_WORK.has(d.name) && inMineUnder()) continue
+            if (why) { log('dir', `${d.name} cut short - the hideout's call: ${why}`); control.abort(); break }
+          } catch {}
+        }
+      })()
       try { ok = await scope.run(fn) } catch (e) { log('dir', `${d.name} threw: ${e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e.message}`) }
+      watching = false // (not awaited: its sleep would add up to a second to every round - it ends on its own next wake)
       if (!taskCancelled()) { try { await craft.packUpTables(bot) } catch {} } // (the task's field tables, once it is over - never after an operator stop, audit #40)
       running = false
       if (taskCancelled()) { current = null; continue }
@@ -2374,7 +2634,7 @@ async function start (b) {
   // for their arrows at every respawn, 2026-09-26)
   bot.on('sleep', () => { try { mem.set('sleptDay', day.dayNo(bot)) } catch {} }) // (the spider night's phantom limit: the last night slept)
   try { if (mem.get().sleptDay == null) mem.set('sleptDay', day.dayNo(bot)) } catch {} // (none on record: counted from now, never an unlimited run)
-  bot.on('spawn', () => { setTimeout(() => { try { if (bot.entity && move.insideHut(world.feetPos(bot))) hut.shutDoor(bot).catch(() => {}) } catch {} }, 1500) })
+  bot.on('spawn', () => { siteSeenJob = null; setTimeout(() => { try { if (bot.entity && move.insideHut(world.feetPos(bot))) hut.shutDoor(bot).catch(() => {}) } catch {} }, 1500) })
   baseZone()
   orchard.setZone()
   pen.setZone()

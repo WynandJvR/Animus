@@ -265,6 +265,26 @@ function ticks (bot, n = 2) {
   })
 }
 
+// THE SNEAK KEY DOWN AT THE CLICK - pressed, and STILL down two ticks on. A shift-click is only one while the key is
+// down, and "pressed, then two ticks" is not that: of the hoe's three shift-clicks in one farm round two tilled (wear 0>2)
+// and the third went out standing - "sneaking false" at the click, two player_input packets between the press and the
+// block_place - and the shield took it, 2026-11-14 21:37. Something let go of every key in between (who: farm.useOn's
+// trace says). The condition, not the wait: pressed again when it is up, till it has stayed down two ticks running - the
+// look's two ticks are in them. false when it would not stay down a second (the caller clicks anyway and its report says)
+// (OURS from the first tick: pressed through the controls even when held already - a crouch held is not always the
+//  caller's: the edge guard's ledge crouch lets go when its want ends (the tower's jump leaves the ledge), and only a press
+//  through the controls hands the key to the caller; audit F30-1)
+async function sneakDown (bot) {
+  const t0 = Date.now(); let n = 0
+  bot.setControlState('sneak', true)
+  while (n < 2 && Date.now() - t0 < 1000) {
+    if (!bot.getControlState('sneak')) { bot.setControlState('sneak', true); n = 0 }
+    await ticks(bot, 1)
+    if (bot.getControlState('sneak')) n++; else n = 0
+  }
+  return n >= 2
+}
+
 // Does the player's hitbox (0.6 wide, 1.8 tall; a cell above too for a two-high thing) reach into the cell?
 const CONNECTS_RE = /(_pane|_fence|_wall|iron_bars)$/
 function inBody (bot, pos, tall = false) {
@@ -273,20 +293,34 @@ function inBody (bot, pos, tall = false) {
   return p.x + 0.3 > pos.x + e && p.x - 0.3 < pos.x + 1 - e && p.z + 0.3 > pos.z + e && p.z - 0.3 < pos.z + 1 - e && p.y + 1.8 > pos.y + e && p.y < top - e
 }
 // Step to the middle of the cell we stand in (off an edge that leans into the cell beside it).
-async function centre (bot) {
-  const c = bot.entity.position.floored()
+// (SNEAKING, a tick at a time: at a walk a tick is 0.2 of a block and the body swung past the middle - it ended anywhere
+//  within 0.3 of it; sneaking a tick is 0.065, the middle is met within `tol`, and a sneaking body leaves no edge. The key
+//  goes back to what it was)
+// (water: a wading cell counts too - feet in shallow water, a solid floor, head in air: the clay skill's stands are mostly
+//  that, and a body drifted off their middle was out of act.dig's eye reach of a block planned from the middle; 2026-11-15)
+async function centre (bot, tol = 0.12, { water = false } = {}) {
+  let c = bot.entity.position.floored()
+  const wades = q => { if (!water) return false; const fl = world.at(bot, q.x, q.y - 1, q.z); const ft = world.at(bot, q.x, q.y, q.z); const hd = world.at(bot, q.x, q.y + 1, q.z); return !!fl && !!ft && !!hd && world.isSolid(fl) && !world.DANGER_FLOOR_RE.test(fl.name) && world.isWaterBlock(ft) && world.isAirish(hd) }
   // (never onto a cell that is no stand - a fire, a fence top, air: centred over a lit campfire the body stood in it, 2026-10-07)
-  if (!world.standable(bot, c.x, c.y, c.z)) return
+  // (on a slab or a stair the feet are inside the floor's own cell: the stand is the cell over it - world.standCell)
+  if (!world.standable(bot, c.x, c.y, c.z) && !wades(c)) { c = world.standCell(bot); if (!world.standable(bot, c.x, c.y, c.z)) return }
+  // (the ledge guard's crouch let go first - its own press only (reflex.holdNoSneak): read here as the key's state and put
+  //  back after, the guard's crouch was a press with no owner - held, the body at a crawl, until some stop cleared it; audit
+  //  R1-1. The guard presses again on its next tick if it still wants it)
+  const letGo = reflex.holdNoSneak()
+  const was = bot.getControlState('sneak')
   const t0 = Date.now()
-  while (Date.now() - t0 < 1500) {
-    const p = bot.entity.position
-    const dx = c.x + 0.5 - p.x; const dz = c.z + 0.5 - p.z
-    if (Math.hypot(dx, dz) < 0.12) break
-    await bot.look(Math.atan2(-dx, -dz), 0, true).catch(() => {})
-    bot.setControlState('forward', true)
-    await sleep(50)
-  }
-  bot.setControlState('forward', false)
+  try {
+    bot.setControlState('sneak', true)
+    while (Date.now() - t0 < 1500) {
+      const p = bot.entity.position
+      const dx = c.x + 0.5 - p.x; const dz = c.z + 0.5 - p.z
+      if (Math.hypot(dx, dz) < tol) break
+      await bot.look(Math.atan2(-dx, -dz), 0, true).catch(() => {})
+      bot.setControlState('forward', true)
+      await ticks(bot, 1)
+    }
+  } finally { bot.setControlState('forward', false); bot.setControlState('sneak', was); letGo() }
 }
 
 // Place `itemName` into the empty cell `pos` against a solid neighbour. Verified by re-read.
@@ -315,6 +349,9 @@ function hotInOurCell (bot, pos, itemName) {
   const xs = [fx, Math.floor(p.x - 0.3), Math.floor(p.x + 0.3)]; const zs = [fz, Math.floor(p.z - 0.3), Math.floor(p.z + 0.3)]
   return xs.includes(pos.x) && zs.includes(pos.z) && (pos.y === fy || pos.y === fy + 1 || pos.y === fy - 1)
 }
+// (the cells a wrong block was said for - once each: evidence)
+const wrongNoted = new Set()
+function key3 (p) { return `${p.x},${p.y},${p.z}` }
 async function place (bot, pos, itemName, { faceHint = null, plans = null, accept = null, allowZones = [], timeoutMs = 20000, sneak = true, tall = false, twin = null, useRefs = false, noWalk = false, fromReflex = false, keepExit = false, spare = [] } = {}) {
   if (fromReflex) noWalk = true
   if (tall && !twin) twin = [0, 1, 0]
@@ -401,7 +438,7 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
       const held = inv.items(bot).find(i => i.name === itemName)
       if (!held) { log('act', `place ${itemName} at ${move.fmt(pos)}: none in the pack at the click - it was there before the walk into reach (${tries} tries so far)`); return false }
       // (in hand already - the next block of a run of the same: no equip round trip; ~0.5s a block went to placing, 2026-10-03)
-      if (!bot.heldItem || bot.heldItem.name !== itemName) await bot.equip(held, 'hand')
+      if (!bot.heldItem || bot.heldItem.name !== itemName) { const from = held.slot; await bot.equip(held, 'hand'); inv.heldCheck(bot, itemName, from, 'place') }
       // (and a crouch some other holder pressed is let go too - the hold only stops the guard's own: audit #8)
       bot.setControlState('sneak', !!sneak)
       if (plan.yaw != null || plan.cy != null || plan.pitch != null) {
@@ -425,6 +462,10 @@ async function place (bot, pos, itemName, { faceHint = null, plans = null, accep
       if (after && placed(after)) { try { const fg = require('./foreign'); fg.noteOwn(target, after.name); if (twin) { const t2 = target.offset(twin[0], twin[1], twin[2]); const b2 = bot.blockAt(t2); if (b2) fg.noteOwn(t2, b2.name) } } catch {} return true } // (our own hand, both halves of a door or a bed - foreign.noteOwn)
       if (w < 6) await sleep(150)
     }
+    // (ANOTHER BLOCK WENT IN - the server placed from a hand that is not the one we hold: said with the hotbar, evidence for
+    //  which hand the server used. The castle's slab cell took cobblestone, then dirt, the client holding a log, then a
+    //  chest, 2026-11-15 04:13; audit hypothesis (d), the held slot out of step with the server's)
+    { const now = bot.blockAt(target); if (now && !placed(now) && !world.isAirish(now) && (!cur || now.name !== cur.name) && !wrongNoted.has(key3(target))) { wrongNoted.add(key3(target)); const hot = []; for (let s = 36; s < 45; s++) { const it = bot.inventory.slots[s]; if (it && it.name === now.name) hot.push(s - 36) } log('act', `place ${itemName} at ${move.fmt(pos)}: the server put ${now.name} there - my hand is hotbar ${bot.quickBarSlot} (${bot.heldItem ? bot.heldItem.name : 'empty'}), ${now.name} is in hotbar ${hot.length ? hot.join(',') : 'none'}`) } }
     tries++
   }
   log('act', `place ${itemName} at ${move.fmt(pos)} failed after ${tries} tries${lastErr ? ': ' + lastErr : ''}`)
@@ -465,8 +506,9 @@ async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = []
     const letGo = reflex.holdNoSneak()
     // (an axe with a shield worn: the server reads an unsneaking axe click as the shield's raise and strips nothing -
     //  vanilla AxeItem's blocking-intent rule; 634 dead clicks 2026-09-28. A player shift-clicks, and so do we. Only the
-    //  axe: a sneaking click skips the block's own use, which is what shears on a pumpkin and a composter's layer are)
-    const secondary = !!itemName && /_axe$/.test(itemName) && inv.offhandShield(bot)
+    //  tools the shield takes the click from - inv.shieldTakesClick: the axe, and since 26.3 the hoe and the shovel: a
+    //  sneaking click skips the block's own use, which is what shears on a pumpkin and a composter's layer are)
+    const secondary = inv.shieldTakesClick(bot, itemName)
     try {
       if (held) await bot.equip(held, 'hand')
       bot.setControlState('sneak', secondary)
@@ -474,7 +516,7 @@ async function useOn (bot, pos, itemName, { accept, face = 'up', allowZones = []
       // (`yaw`: the look the use takes its direction from - a fence gate opened turns to it - else straight at the face)
       const aim = target.offset(0.5, up ? 1 : 0, 0.5)
       if (yaw != null) { const e = bot.entity.position.offset(0, bot.entity.eyeHeight || 1.62, 0); const d = aim.minus(e); await bot.look(yaw, Math.atan2(d.y, Math.hypot(d.x, d.z)), true) } else await bot.lookAt(aim, true)
-      await ticks(bot, 2)
+      if (secondary) await sneakDown(bot); else await ticks(bot, 2) // (the look on the wire - and the key down with it)
       await bot.activateBlock(b, new Vec3(0, up ? 1 : -1, 0), new Vec3(0.5, up ? 1 : 0, 0.5))
     } catch (e) { lastErr = e.message } finally { if (secondary) bot.setControlState('sneak', false); letGo() }
     for (let w = 0; w < 6; w++) {
@@ -688,4 +730,4 @@ async function collectDrops (bot, { radius = 8, maxMs = 15000, only = null } = {
   return picked
 }
 
-module.exports = { skippedDrop: id => unreachableDrops.has(id), SOIL_PLANT_RE, clearsFirst, lastDigWhy: () => lastDigWhy, grounded, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }
+module.exports = { centre, sneakDown, skippedDrop: id => unreachableDrops.has(id), SOIL_PLANT_RE, clearsFirst, lastDigWhy: () => lastDigWhy, grounded, settleAfterClose, openSettled, digRefusal, sealsUsIn, holdsUsUp, fallBelow, stepOff, dig, digBlock, place, useOn, pour, fill, collectDrops, droppedItems, reach, inBody, sleep, ticks, refUsable, PLANT_RE, NO_REF_RE, USE_REF_RE, NO_FACE_RE, REPLACEABLE_RE }

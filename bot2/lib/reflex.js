@@ -88,6 +88,7 @@ let dive = null // { maxMs, hp, broken }
 function startDive (maxMs = DIVE_HARD_MS) { dive = { maxMs: Math.min(maxMs, DIVE_HARD_MS), hp: bot.health, broken: null } }
 function endDive () { const d = dive; dive = null; return d ? d.broken : null }
 function diveBroken () { return dive ? dive.broken : null }
+function diving () { return !!dive && !dive.broken } // (a declared dive holds the body like a reflex row - the director's hideout watch waits on it)
 function diveHolds (now) {
   if (!dive || dive.broken) return false
   const under = submergedSince ? now - submergedSince : 0
@@ -1308,7 +1309,12 @@ const recentKeys = [] // (the keys held over the last 3 ticks: a press let go on
 function noteTakeoff () {
   if (!bot.entity) return
   { const c0 = bot.controlState || {}; recentKeys.push(Object.keys(c0).filter(k => c0[k])); if (recentKeys.length > 3) recentKeys.shift() }
-  const g = bot.entity.onGround
+  // (ON A LADDER IS HELD, NOT FALLING - vanilla resets the fall distance on a climbable, and a fall begins where the climb
+  //  ends. Read as "not on the ground", a ladder shaft's way down was a fall of 4-11 blocks: most "falls" of 2026-11-14/15 came
+  //  at the slide's 0.16 b/t on ladder cells (the shaft at -2289,129,-577 four times), each a fall hazard (+60 a step for a day) on the shaft's own ladder cells. The planner sums
+  //  its step costs and refuses a step past 100: the legs down one such shaft went noPath ("noPath on the leg to
+  //  -2271,124,-572") while the walk model took it, and the escape held there, 2026-11-15 00:24)
+  const g = bot.entity.onGround || world.climbableAt(bot, bot.entity.position.x, bot.entity.position.y, bot.entity.position.z)
   // landed: a fall that hurts keeps its takeoff (the death's own bounce is a takeoff too, and overwrote it)
   if (!wasGround && g && takeoff && takeoff.y - bot.entity.position.y > world.SAFE_DROP) {
     fell = Object.assign({}, takeoff, { fall: Math.round(takeoff.y - bot.entity.position.y) })
@@ -2359,4 +2365,4 @@ function setEnabled (on) { enabled = !!on; if (!on) clearActive() }
 function underMs () { return submergedSince ? Date.now() - submergedSince : 0 }
 function airLeftMs () { return airMs }
 
-module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _safeStand: (x, y, z) => safeStand(x, y, z), _burnsAt: (x, y, z, feet) => burnsAt(x, y, z, feet), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, outgunned, runAffordable, longRunOk, wayClear, noCoverAnswer, HIDEOUT_REACH, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }
+module.exports = { chooseDrop, pouring, plannedStep: () => plannedStep(), plannedNode: () => (lastPath && lastPath[0]) || null, plannedPath: () => lastPath || [], resetPlannedPath: () => { lastPath = null }, setCautious, plannerPlacedSince, findAirReachable, _bindForTest: b => { bot = b }, _leafWayOff: (...a) => leafWayOff(...a), _jumpHurts: c => jumpHurts(c), _safeStand: (x, y, z) => safeStand(x, y, z), _burnsAt: (x, y, z, feet) => burnsAt(x, y, z, feet), _leafFooting: () => leafFooting, edgeStops, install, holdNoSneak, active: isActive, info, nearestThreat, lastHurt, hurtLine, outgunned, runAffordable, longRunOk, wayClear, noCoverAnswer, HIDEOUT_REACH, edgeAhead, hostiles, onSurface, canSee, NEVER_MELEE, waitClear, setEnabled, findAir, HOSTILE, RANGED, bowReady, startDive, endDive, diveBroken, diving, underMs, airLeftMs, AIR_MS, DIVE_HARD_MS }

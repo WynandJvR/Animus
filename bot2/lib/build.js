@@ -466,6 +466,20 @@ async function setJob (bot, name, origin, { exactWood: exact = true, prefs } = {
   }
   const box = boxAt(origin, st, en)
   job = { name, origin, cells, box, index: new Map(cells.map(c => [key(c), c])), exactWood: exact }
+  // THE SHAFT'S HATCH - a wooden trapdoor of the build right over a ladder of the build. Shut, as drawn, it is a floor to every
+  // walker: the castle's shaft from the ground to its upper rooms and roof has two, and once they were placed shut the rooms
+  // over them had no way down but our pillars - taken back down, the bot was shut in the room at y125 with the door onto the
+  // shaft and the hatch under it, "the only way out is through a FINISHED cell", 2026-11-14 23:32. A player leaves it open
+  // while the work goes on and climbs through it (an open one over a ladder is a ladder: world.climbableTrapdoor). Its open
+  // state is no part of done, as a gate's (counts); the builder opens it (openHatches), the finish sets it as drawn (setGates)
+  job.hatches = []
+  for (const c of cells) {
+    if (!/_trapdoor$/.test(c.name) || /^iron_/.test(c.name)) continue
+    const u = job.index.get(key({ x: c.x, y: c.y - 1, z: c.z }))
+    if (!u || u.name !== 'ladder') continue
+    c.hatch = true; job.hatches.push(c)
+    if (c.want && c.want.open != null) { const w = Object.assign({}, c.want); delete w.open; c.want = Object.keys(w).length ? w : null }
+  }
   surveyCache = null
   mem.set('build', Object.assign({ name, origin, exactWood: woodExact }, pr ? { prefs: pr } : {}))
   move.setZone('build', { x1: box.x1 - 1, y1: box.y1 - 1, z1: box.z1 - 1, x2: box.x2 + 1, y2: box.y2 + 3, z2: box.z2 + 1 })
@@ -609,8 +623,13 @@ function detachedItems (todo, bot) {
   // stock" exception dates from when a detached cell was COVERED - a trapdoor six planks away was sealed over, audit
   // 2026-09-29; holes are kept open since. Left in, a craftable anchor nobody crafted held the band: stripped spruce logs,
   // their 41 spruce logs crafted into planks by the window, anchored y126-127 with 1606 structural cells in hand, 2026-10-06)
+  // (IN STOCK = what the placing takes for it: the exact item or a stand-in pickItem holds (acceptsFor - an aged copper for
+  //  copper, any ground for dirt). Read by the exact name, three aged lightning rods in the chests were "out of stock": the
+  //  window drew them out each round (its pool takes the stand-ins) and the haul put them back, 34-92 withdrawals an hour,
+  //  "keeping lightning_rod at -2295,121,-577 open - out of stock", 2026-11-15 01:00-01:35)
+  const stockOf = it => { let k = have[it] || 0; const re = acceptsFor(it); if (re) for (const [n, v] of Object.entries(have)) if (n !== it && re.test(n)) k += v; return k }
   for (const it of Object.keys(low)) {
-    const k = have[it] || 0
+    const k = stockOf(it)
     if (k > 0) coverMiss.delete(it) // (it turned up: a hold on "none, and the plan thinks otherwise", never a day's ban; audit)
     if (k <= 0) detached.add(it)
     // (in the ENDGAME any stock re-attaches: no band left to hold - 2 string in the pack against 4 cells kept them all detached, and
@@ -649,9 +668,10 @@ function pocketInvalidate (bot) {
   pocketDirty = []
 }
 let holdsMs = 0; let holdsPasses = 0 // (its own time, for the step profile: body first - it runs before every placement)
+let holdsFor = null // (the job the holds were last worked out for: nextNeeds works them out once when none are - holdsFor)
 function refreshHolds (todo, bot) {
   const t0h = Date.now()
-  try { refreshHoldsInner(todo, bot) } finally { holdsMs += Date.now() - t0h; holdsPasses++ }
+  try { refreshHoldsInner(todo, bot); holdsFor = job } finally { holdsMs += Date.now() - t0h; holdsPasses++ }
 }
 function refreshHoldsInner (todo, bot) {
   // THE WAITING COLUMNS: x,z -> the lowest hole kept open for its item (out of stock, or the wait above) with nothing placed
@@ -785,8 +805,58 @@ function anchorable (bot, c, det) {
 // clickable, refOk), or a plan whose neighbour is no cell of the build - a temporary support can go there (never for an
 // attached cell or a two-cell one)
 function clickableNow (bot, c) { return plansFor(c).some(p => refOk(bot, c, p)) }
-function supportableNow (c) { return !c.attach && !c.twin && plansFor(c).some(p => !job.index.has(key({ x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] }))) }
-function readyNow (bot, c) { return clickableNow(bot, c) || supportableNow(c) }
+// A TEMPORARY SUPPORT WOULD GO IN for c - by the placing's own rules (placeCell's faces, placeSupport's refusals and its
+// pillar): a face of the cell that is no cell of the build, no walking space of the finished build, open (air or water),
+// not refused as a fill - and there a block to hang the support on, or a column to stand it on from solid ground with no
+// cell of the build in it. Read as "any face that is no cell of the build", the roof's planks over the open rooms were
+// ready every pick - nothing beside the prop, a floor of the build under it - and each was walked to, tried and left:
+// "nothing to click and no temporary support would go in" 27 times in a round, 84s of it, 41 placed, 2026-11-14 21:54.
+// Not ready is not tried: the band reads past it and a block placed beside it makes it clickable. (Remembered half a
+// minute a cell - the world is read face by face - and forgotten round every block the builder places: supForget)
+const supMemo = new Map()
+function supportableNow (bot, c) {
+  if (c.attach || c.twin || !bot) return false
+  const k = key(c); const m = supMemo.get(k); if (m && Date.now() - m.t < 30000) return m.v
+  let v = false
+  // (A POUR OVER A POUR is placeCell's third way in - a filler into the lower pour cell, the upper poured against it: the
+  //  face under it is a cell of the build and the one over it no pour's, so by the faces alone the upper water of a
+  //  two-deep well walled by the build read not ready and that branch never ran; audit S2-b)
+  if (c.pour) { const uc = job.index.get(key({ x: c.x, y: c.y - 1, z: c.z })); const ub = uc && uc.pour && world.at(bot, c.x, c.y - 1, c.z); if (ub && (world.isAirish(ub) || world.isLiquidWater(ub))) v = true }
+  if (!v) for (const p of plansFor(c)) {
+    const sp = { x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] }
+    if (job.index.has(key(sp)) || walkProtected(sp)) continue
+    if ((c.pour && p.off[1] === 1) || (c.hole && p.off[1] === -1)) continue
+    const spb = world.at(bot, sp.x, sp.y, sp.z)
+    if (!spb || !(world.isAirish(spb) || world.isLiquidWater(spb)) || supportRefused(bot, sp)) continue
+    if (supportHangs(bot, sp) || (!c.hole && supportColumn(bot, sp, job))) { v = true; break }
+  }
+  if (supMemo.size > 20000) supMemo.clear()
+  supMemo.set(k, { v, t: Date.now() }); return v
+}
+function supForget (c) { for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -2; dz <= 2; dz++) { const k = key({ x: c.x + dx, y: c.y + dy, z: c.z + dz }); supMemo.delete(k); axisMemo.delete(k) } }
+// S2-a) AN AXIS WITH NO WAY IN OF ITS OWN, EVER: a log (a pillar, a chain) not clickable and with no support to be had on
+// either face of its own axis, and nothing still to come that would change it - no cell of the build on those faces still
+// to place (its click), none beside a support's cell or under it (the support's hold) - while another face of it can be
+// clicked now. It goes in with any axis at once. That was reached only through three failed tries (placeCell), and a
+// cell never ready is never tried: by the placing's own rules (supportableNow) it would wait for ever, and hold no band
+// to say so; audit S2-a. One that only WAITS - a wall's cell on its axis not placed yet - keeps its axis and waits
+const axisMemo = new Map() // (key -> when it was last read "not hopeless": asked again after half a minute, or a block placed by it)
+function axisHopeless (bot, c) {
+  const w = c.want
+  if (!w || !w.axis || c.attach || c.twin || axisRelaxed(c) || failsOf(c) >= 3) return false
+  const k = key(c); const t = axisMemo.get(k); if (t && Date.now() - t < 30000) return false
+  const wait = () => { if (axisMemo.size > 20000) axisMemo.clear(); axisMemo.set(k, Date.now()); return false }
+  const toCome = p => { const q = job.index.get(key(p)); return !!q && cellDone(bot, q) !== true }
+  for (const p of plansFor(c)) { // (not relaxed, under three misses: the two faces of its axis)
+    const sp = { x: c.x + p.off[0], y: c.y + p.off[1], z: c.z + p.off[2] }
+    if (toCome(sp)) return wait() // (its own click, still to place)
+    if (job.index.has(key(sp))) continue // (a cell of the build that stands and is no face for it: nothing to come there)
+    for (const [dx, dy, dz] of ALL_FACES) { const n = { x: sp.x + dx, y: sp.y + dy, z: sp.z + dz }; if ((n.x !== c.x || n.y !== c.y || n.z !== c.z) && toCome(n)) return wait() } // (a hold for a support there, to come)
+    for (let y = sp.y - 1; y > sp.y - 30; y--) { const b = world.at(bot, sp.x, y, sp.z); if (!b) return wait(); if (world.isSolid(b)) break; if (toCome({ x: sp.x, y, z: sp.z })) return wait() } // (a pillar's ground, to come)
+  }
+  return ALL_FACES.some(off => refOk(bot, c, { off: off.slice() })) || wait()
+}
+function readyNow (bot, c) { return clickableNow(bot, c) || supportableNow(bot, c) }
 function lowestStructural (todo, bot, det = bot ? detachedItems(todo, bot) : null) {
   let m = Infinity
   for (const c of todo) {
@@ -880,10 +950,28 @@ function status (bot) {
 }
 // Items for the cells from the lowest unfinished layer up to `layers` above it (the window the builder
 // works in), plus attached cells whose support already stands. Same keying as status().need.
-function nextNeeds (bot, layers = 4, lowY = null) {
+// (how long a cell's rest still runs, ms - 3 min after its first miss, then 6, 12... up to 2h; 0: not resting. The step's
+//  own rule, read by the window's withdraw too)
+function restLeft (k) { const f = cellFails.get(k); if (!f || f.n < 1) return 0; return Math.max(0, Math.min(2 * 3600000, 3 * 60000 * Math.pow(2, f.n - 1)) - (Date.now() - f.at)) }
+// (readyOf: { item: n } - the window's cells that can take their block NOW: a face to click, the cell under them not
+//  waiting, not resting past the step's first minutes; a cell of the band's own floor counts a thousand - the band's layer
+//  first. A cell awake with no face yet - the next layer over cells still to place - counts a millionth (a thousandth on
+//  the band's floor): under 1 a kind is not placeable yet, 0 and every cell of it rests. The pack's order: withdrawWindow)
+function nextNeeds (bot, layers = 4, lowY = null, readyOf = null) {
   if (!job) return {}
   const md = world.data(bot)
   const todo = job.cells.filter(c => !c.follows && cellDone(bot, c) !== true)
+  // (THE HOLDS ONCE, when none are worked out for this job yet - after a restart, before the first build pass: with no waiting
+  //  columns every cell over a hole kept open for an out-of-stock item anchored, the band read y120 where the step's was
+  //  y131-132, and the round's first withdraw took the floor's decor - "88 kinds wanted" where the next round's was 143,
+  //  pack 0 bank 0 at its head - so the step ran out of its own blocks and went home: a round lost after every restart,
+  //  2026-11-14 22:11, 22:51, 23:04. The pass's own reading (refreshHolds), not a copy; once a job - never on every call)
+  // (only with the site loaded - its middle column read: unloaded, every cell reads not done, every column a hole, and the
+  //  verdict would stand for the job; tried again on the next call. A throw sets it as worked out - the window then reads as
+  //  before, never broken for the session by a pass that will throw again; audit)
+  if (holdsFor !== job && world.at(bot, Math.floor((job.box.x1 + job.box.x2) / 2), job.box.y1, Math.floor((job.box.z1 + job.box.z2) / 2))) {
+    try { detachedItems(todo, bot); refreshHolds(todo, bot) } catch (e) { holdsFor = job; log('build', `the holds before the first window threw: ${e.message} - the window reads without them`) }
+  }
   const minY = lowestStructural(todo, bot)
   const out = {}
   for (const c of todo) {
@@ -896,6 +984,13 @@ function nextNeeds (bot, layers = 4, lowY = null) {
     // (a cell that makes the way to the window's stand-less cells ranks with the band's floor: its item first - accessFor)
     const ly = Number.isFinite(minY) && accessHas(c) ? Math.min(c.y, minY) : Number.isFinite(minY) && c.y < minY ? minY + layers : c.y
     needsOf(bot, c, md, (it, n) => { out[it] = (out[it] || 0) + n; if (lowY && !(lowY[it] <= ly)) lowY[it] = ly })
+    if (readyOf && restLeft(key(c)) < 180000) {
+      // (the step's OWN ready test - readyNow: a face, or a place for a temporary support. By the face alone, a floor's next
+      //  course over air - every cell support-first - read "not placeable", and its planks were the put-back's; audit)
+      const now = (!c.attach || supportThere(bot, c)) && readyNow(bot, c) && !belowWaits(bot, c) && !(c.twin && !supportThere(bot, c))
+      const floor = !c.attach && Number.isFinite(minY) && c.y <= minY
+      needsOf(bot, c, md, (it, n) => { readyOf[it] = (readyOf[it] || 0) + (now ? n + (floor ? 1000 : 0) : n * (floor ? 1e-3 : 1e-6)) })
+    }
   }
   return out
 }
@@ -1034,10 +1129,21 @@ async function goSite (bot, goal, label, opts0 = {}) {
   // UNDER THE BUILD: the plaza overhangs the mountainside, and the bot, come up the slope from a grave run or a flee,
   // stood in the hollow under the finished floor at y112 trying to reach cells above it - the floor between, every
   // walk "stuck", a day of cells written off (2026-09-26). Out onto open ground first, then the site from the top.
-  if (job && underTheBuild(bot)) {
+  // (NOT FOR A GOAL DOWN HERE, NOR ONE THE WALK FROM HERE REACHES, AND ONLY AS FAR AS OUT: the rule is for cells over the
+  //  floor that nothing under it gets to. It ran for every goal - the day's teardown took a scaffold block in the hollow at
+  //  y117 and the next walk, to another block of the same hollow, went "out onto open ground first": all the way home, 46
+  //  blocks, two legs timed out at 45s and 53s, two minutes of a day for nothing, 2026-11-14 21:18. The walk search starts
+  //  under the floor as well as anywhere (startUnder): a goal in its set is walked from here. And out is out - the walk
+  //  home ends where no finished floor is overhead any more)
+  let underOut = !!job && underTheBuild(bot) && !(goal && goal.y != null && goal.y < job.box.y1)
+  if (underOut && goal && goal.x != null && goal.constructor && goal.constructor.name === 'GoalBlock') {
+    await walkReach(bot).catch(() => null)
+    if (reachCurrent(bot) && !reach.capped && reach.cells.has(key({ x: goal.x, y: goal.y, z: goal.z }))) underOut = false
+  }
+  if (underOut) {
     const h = mem.get().home
     log('build', `under the build's floor at ${move.fmt(bot.entity.position)} - out onto open ground first`)
-    const out = await move.travel(bot, h || { x: job.origin.x - 8, y: job.origin.y, z: job.origin.z - 8 }, { range: 6, label: 'out from under the build' }).catch(() => null)
+    const out = await move.travel(bot, h || { x: job.origin.x - 8, y: job.origin.y, z: job.origin.z - 8 }, { range: 6, label: 'out from under the build', shouldStop: () => !underTheBuild(bot) || !!(shouldStop && shouldStop()) }).catch(() => null)
     // (no walk out - the rim closed round the hollow as its foundation went in: the climb straight up, which takes our own
     //  floor block over the head and the builder puts it back. Leg after leg "stuck" from a cell a step off the last one
     //  never tripped the same-cell climb, 2026-09-29)
@@ -1068,8 +1174,15 @@ async function goSite (bot, goal, label, opts0 = {}) {
       //  cells, 94s a try - lost to the walker's one scaffold step up, 2026-10-03)
       // (only for a stand ABOVE us - the scaffold step's case; a walled-in courtyard at our level has the long way round as its
       //  only way, and the walker's 30s ran out on it, 0 of 8, 2026-10-03)
-      if (detourTooLong(bot, tgt, route.length)) { said = said || `the route to ${move.fmt(tgt)} runs ${route.length} cells round - the walker's way instead`; break }
-      const plain = q => { const fl = world.at(bot, q.x, q.y - 1, q.z); const ft = world.at(bot, q.x, q.y, q.z); const hd = world.at(bot, q.x, q.y + 1, q.z); return !!fl && fl.boundingBox === 'block' && world.isSolid(fl) && !!ft && world.isAirish(ft) && !!hd && world.isAirish(hd) }
+      // (THE LONG WAY ROUND IS A WAY - the legs walk it, whatever its length against the straight line. The detour rule
+      //  (detourTooLong: a stand 3+ up, its route over 30 cells and three times the straight line) handed such routes to the
+      //  walker - dig and place allowed, 30s - for "its one scaffold step up", 2026-10-03. The castle's stairs and ladder are
+      //  the way up now, and every way up from the ground is that long: today the walker got 3 of 8 such hand-offs (148s on
+      //  the other 5) and pillar feet 113 cells round "couldn't reach", while the legs finished 26 of 26 routes of 60 cells
+      //  and more (115 cells in 37s on average), 2026-11-14. The cost of a long walk is the pick's to weigh - the order and
+      //  the stand both go by the route's length (reachFromHere) - never a refusal here. The legs' own failure still hands
+      //  the rest to the walker, below)
+      const plain = q => { const fl = world.at(bot, q.x, q.y - 1, q.z); const ft = world.at(bot, q.x, q.y, q.z); const hd = world.at(bot, q.x, q.y + 1, q.z); return !!fl && fl.boundingBox === 'block' && world.isSolid(fl) && !!ft && world.isAirish(ft) && !!hd && world.isAirish(hd) && holdsStill(bot, q) } // (a leg never stops on a ladder: the body slides off it between legs - holdsStill; audit H14-1)
       const isDoorCell = q => { const b = world.at(bot, q.x, q.y, q.z); return !!b && /_door$|_fence_gate$/.test(b.name) }
       const stops = []; let last = 0
       for (let i = 1; i < route.length - 1; i++) {
@@ -1131,13 +1244,17 @@ async function goSite (bot, goal, label, opts0 = {}) {
   //  them. Forgotten, a walk that towered 7 up on the castle's rim and then failed left the bot on the top, a drop all
   //  round, every walk after it stuck for 25 minutes, 2026-10-03 - the chop's own rule, gather.js tFell)
   const tWalk = Date.now()
+  const rc = reach && reach.job === job && !reach.capped ? reach : null // (the search as it stood when the walk began: the outcome line's)
   if (shouldStop && shouldStop()) return { ok: false, why: 'stopped' }
   const r = await move.goTo(bot, goal, { timeoutMs: 30000, stuckMs: 8000, label: 'site ' + (label || ''), movements: () => siteMovements(bot, { place, dig }), shouldStop })
   // (THE WALKER'S OUTCOME, with why it walked: its failures were 43% of a day's build-step time (130 timeouts, 51 give-ups,
   //  2026-10-07) and its successes said nothing - no rate to judge it by. One line a walk; a step away is no walk to judge)
   if (r && !r.ok && /noPath|stuck/.test(r.why || '')) { watchStatus(bot); walkerFailed.set(sk0, statusGen); if (walkerFailed.size > 50) walkerFailed.delete(walkerFailed.keys().next().value) }
-  if (walkerWhy !== 'a step away' && !(r && r.why === 'stopped')) { const g = goal && goal.x != null ? goal : null; log('build', `site walker (${label || '-'}): ${r && r.ok ? 'reached' : (r ? r.why : 'no answer')} in ${((Date.now() - tWalk) / 1000).toFixed(1)}s${g ? ` to ${move.fmt(g)} (${world.dist3(g, bot.entity.position).toFixed(1)}b off now, dy ${Math.floor(g.y != null ? g.y : bot.entity.position.y) - Math.floor(bot.entity.position.y)})` : ''} - walked because: ${walkerWhy}`) }
-  for (const q of reflex.plannerPlacedSince(tWalk)) if (!(job && job.index.has(key(q))) && !myPillar.some(c => c.x === q.x && c.y === q.y && c.z === q.z)) myPillar.push({ x: q.x, y: q.y, z: q.z })
+  // (and where a walk that ARRIVED ended, with the blocks it laid to get there: a cell the search called "none" and the
+  //  walker reached is the search's model wrong - or the walker building its own way; the line tells the two apart)
+  const laid = reflex.plannerPlacedSince(tWalk)
+  if (walkerWhy !== 'a step away' && !(r && r.why === 'stopped')) { const g = goal && goal.x != null ? goal : null; log('build', `site walker (${label || '-'}): ${r && r.ok ? 'reached' : (r ? r.why : 'no answer')} in ${((Date.now() - tWalk) / 1000).toFixed(1)}s${g ? ` to ${move.fmt(g)} (${world.dist3(g, bot.entity.position).toFixed(1)}b off now, dy ${Math.floor(g.y != null ? g.y : bot.entity.position.y) - Math.floor(bot.entity.position.y)})` : ''}${r && r.ok ? ` [ended at ${move.fmt(world.standCell(bot))}, ${laid.length} laid, ${rc ? `${rc.cells.has(key(world.standCell(bot))) || rc.cells.has(key(world.feetPos(bot))) ? 'a cell of my walk' : 'no cell of my walk'} (the search ${Math.round((tWalk - rc.at) / 1000)}s old at the start)` : 'no search'}]` : ''} - walked because: ${walkerWhy}`) }
+  for (const q of laid) if (!(job && job.index.has(key(q))) && !myPillar.some(c => c.x === q.x && c.y === q.y && c.z === q.z)) myPillar.push({ x: q.x, y: q.y, z: q.z })
   return r
 }
 
@@ -1265,6 +1382,7 @@ function allJobs () { const out = [...extraJobs.values()]; if (job) out.push(job
 // A finished block of any build (the right material in its cell) is never broken: not by a walk, not by
 // any dig (act.dig asks this). One exception for digs: the safehouse's door cell is opened and sealed
 // every day (its seal block, a rehung door) - it stays protected from walks only.
+function holeFaceAt (p) { return holeFaces.has(key(p)) } // (a waiting hole's last open face - the protector's own 'fill' rule; gather's survival tower asks it)
 move.setProtector((block, purpose) => {
   if (purpose === 'fill' && holeFaces.has(key(block.position))) return true // (a waiting hole's last open face: holeFaces)
   for (const j of allJobs()) {
@@ -1297,45 +1415,64 @@ function pickItem (bot, c, items = inv.items(bot)) {
 // nothing to attach to either (an x-axis log in a wall needs a neighbour on its x side, where there is
 // only air): stand a thin pillar up from the ground to it. Every block is scaffold: the snapshot diff
 // finds it at the end (mem.scaffold is only a hint).
+// (placeSupport's refusal and its pillar's column, each ONE reading - the placing's and supportableNow's)
+function supportRefused (bot, p) { const b = world.at(bot, p.x, p.y, p.z); return (!!b && move.isProtected(b, 'fill')) || walkProtected(p) }
+// A BLOCK TO HANG THE SUPPORT ON - a neighbour act.place clicks for it (act.refUsable: solid, a face, not a block that is used
+// when clicked - placeSupport's click goes out without useRefs). Read as "any solid neighbour", a trapdoor beside the support's
+// cell (closed or open: solid by the data) made the cell ready every pick; walked to, then "nothing solid to place against" -
+// three cells in a minute at the castle's upper floors, 2026-11-14 23:17. ONE reading: supportableNow's and placeSupport's
+function supportHangs (bot, sp) { return ALL_FACES.some(([dx, dy, dz]) => act.refUsable(world.at(bot, sp.x + dx, sp.y + dy, sp.z + dz))) }
+// the column a support at sp stands on - sp and the open cells under it down to solid ground; null with no ground within
+// 30, an unloaded cell, a cell of the build in it (that goes in first) or a refused one (all or none: never half a pillar)
+function supportColumn (bot, sp, j) {
+  const column = [sp]
+  let grounded = false
+  for (let y = sp.y - 1; y > sp.y - 30; y--) {
+    const b = world.at(bot, sp.x, y, sp.z)
+    if (!b) return null
+    // (ground the column's first block is clicked onto - supportHangs' reading: a trapdoor, a chest is solid and no ground)
+    if (world.isSolid(b)) { if (!act.refUsable(b)) return null; grounded = true; break }
+    if (j.index.has(key({ x: sp.x, y, z: sp.z }))) return null
+    column.unshift({ x: sp.x, y, z: sp.z })
+  }
+  if (!grounded) return null
+  if (column.some(p => supportRefused(bot, p))) return null
+  return column
+}
+let propLaid = [] // (the blocks the last placeSupport put in, bottom first: placeCell takes them back - takeProps)
 async function placeSupport (bot, sp, j, { noPillar = false } = {}) {
+  propLaid = []
   const fillerName = () => { const f = inv.items(bot).find(i => FILLER_ITEMS.test(i.name)); return f && f.name }
   if (!fillerName()) return false
-  const record = p => { supportsLaid++; mem.update(m => { m.scaffold = m.scaffold || []; m.scaffold.push({ x: p.x, y: p.y, z: p.z }) }) }
+  // (wet: the cell held water when the block went in - it holds that water back now, and is never taken out again: takeProps)
+  const wetAt = p => { const b = world.at(bot, p.x, p.y, p.z); return !!b && world.isWaterBlock(b) }
+  const record = (p, wet) => { supportsLaid++; propLaid.push({ x: p.x, y: p.y, z: p.z, wet: !!wet }); mem.update(m => { m.scaffold = m.scaffold || []; m.scaffold.push({ x: p.x, y: p.y, z: p.z }) }) }
   // (a support is a fill: never into a cell of the build nor a waiting hole's last open face - the protector's one
   //  question; act.place does not ask it, it places the build's own cells; audit)
   // (and never in the finished build's walking space - the support itself nor any block of its pillar: a support pillar stood
   //  on the castle's ladder top - cobblestone in its three cells, three ledger entries in a row, the ladder to the upper
   //  floor capped for a day, 2026-10-07; only the support cell was asked, by its caller)
-  const refused = p => { const b = world.at(bot, p.x, p.y, p.z); return (!!b && move.isProtected(b, 'fill')) || walkProtected(p) }
-  if (refused(sp)) return false
+  if (supportRefused(bot, sp)) return false
   // 1) straight on: any solid neighbour of the support cell will do (usually the wall we are building)
-  const hasNeighbour = ALL_FACES.some(([dx, dy, dz]) => { const nb = world.at(bot, sp.x + dx, sp.y + dy, sp.z + dz); return nb && world.isSolid(nb) })
-  if (hasNeighbour) {
-    if (await act.place(bot, sp, fillerName(), { allowZones: ['build', 'base'] })) { record(sp); return true }
+  if (supportHangs(bot, sp)) {
+    const wet = wetAt(sp)
+    if (await act.place(bot, sp, fillerName(), { allowZones: ['build', 'base'] })) { record(sp, wet); return true }
   }
   // (never for a HOLE's cell: over a cave a side support has nothing under it either, and the pillar would be built from the
   //  cave floor 20+ down, walked to in the dark and torn down there after; audit 2026-10-04)
   if (noPillar) return false
   // 2) nothing to hang it on: a thin pillar up from whatever is below, however far that is (a fixed cap left
   //    the upper logs with no support at all). 30 is only a guard against building into open void.
-  const column = [sp]
-  let grounded = false
-  for (let y = sp.y - 1; y > sp.y - 30; y--) {
-    const b = world.at(bot, sp.x, y, sp.z)
-    if (!b) return false
-    if (world.isSolid(b)) { grounded = true; break }
-    if (j.index.has(key({ x: sp.x, y, z: sp.z }))) return false // a build cell below: that goes in first
-    column.unshift({ x: sp.x, y, z: sp.z })
-  }
-  if (!grounded) return false
-  if (column.some(refused)) return false // (all or none: never half a pillar)
+  const column = supportColumn(bot, sp, j) // (a build cell below goes in first; all or none: never half a pillar)
+  if (!column) return false
   for (const p of column) {
     const cur = world.at(bot, p.x, p.y, p.z)
     if (cur && world.isSolid(cur)) continue
     const n = fillerName()
     if (!n) return false
+    const wet = wetAt(p)
     if (!await act.place(bot, p, n, { allowZones: ['build', 'base'], faceHint: [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]] })) return false
-    record(p)
+    record(p, wet)
   }
   return true
 }
@@ -1380,31 +1517,59 @@ function stateOf (b) { try { const p = b.getProperties(); const s = KEY_PROPS.fi
 // within 3 of the cell so its top reaches it (only the eight beside it: the rose window's ring filled all eight with
 // its own cells, "no pillar up to it", 2026-09-27).
 // (rej: { reason: count } - why each column round the cell was no foot, for the stand-plan line; never changes the answer)
-function feetFor (bot, c, rej = null) {
-  const me = bot.entity.position
+// THE TALLEST TOWER OF OURS THE BODY CLIMBS - a pillar's (here) and a lift's (ring.js towerFoot): one bound
+const TOWER_MAX = 16
+// (off: a list - the feet refused for being off my walk alone go in it, each with its station: the lift's targets, liftTargets)
+function feetFor (bot, c, rej = null, off = null) {
+  // (no build set - the hut's cells come through placeCell too, hut.buildHut: read off a job that is not there, every hut
+  //  cell out of reach threw "reading 'box' of null" and the safehouse was never built on a start with no build given)
+  if (!job) return []
+  const me = bot.entity.position; const byRoute = reachFromHere(bot)
   const out = []
   const no = r => { if (rej) rej[r] = (rej[r] || 0) + 1 }
+  // THE STATION, NOT THE CELL'S HEIGHT (S1, 2026-11-15): the tower rose to c.y - 1 whatever it was for, so its column had to
+  // be free of the build from the ground to over the cell - and a castle's upper cells have their own walls, floors and
+  // vaults in every column round them: 324 "stand plan ... none" in two hours for cells at y127-145, 2079 columns refused
+  // for "a build cell at the cell's height" and 4035 for "a build cell below" (2026-11-15 10:00-12:00). A builder stops the
+  // tower where the cell is in arm's reach with a face of it to click toward him: the LOWEST such top. Only the tower's own
+  // blocks and the body's two cells must be no cell of the build (a body in an unbuilt cell is picked as that cell's place
+  // and refused - its own miss, the licence to cover; audit F70-1); the jump's headroom over the head need only be open now
+  // (each usable face - the normal out of the clicked block into the cell - and its centre; none usable now (a cell that
+  //  takes a temporary support) keeps the old top: the support's own face is not known yet)
+  const faces = plansFor(c).filter(pl => refOk(bot, c, pl)).map(pl => ({ n: pl.off.map(v => -v), f: [c.x + 0.5 + pl.off[0] * 0.5, c.y + 0.5 + pl.off[1] * 0.5, c.z + 0.5 + pl.off[2] * 0.5] }))
+  const station = (x, z, lo) => {
+    if (!faces.length) return c.y - 1
+    for (let t = lo; t <= c.y - 1; t++) {
+      const e = [x + 0.5, t + EYE, z + 0.5]
+      if ((e[0] - c.x - 0.5) ** 2 + (e[1] - c.y - 0.5) ** 2 + (e[2] - c.z - 0.5) ** 2 > REACH * REACH) continue
+      if (faces.some(q => (e[0] - q.f[0]) * q.n[0] + (e[1] - q.f[1]) * q.n[1] + (e[2] - q.f[2]) * q.n[2] > 0.05)) return t
+    }
+    return null
+  }
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) {
     if ((!dx && !dz) || Math.hypot(dx, dz) > 3.2) continue
     const x = c.x + dx; const z = c.z + dz
     const gy = world.groundY(bot, x, z, c.y - 1)
-    if (gy == null || c.y - 1 - gy > 16) { no('no ground within 16'); continue }
+    if (gy == null) { no('no ground within 16'); continue }
     // (never under the plaza's floor - a gap in it showed the slope 4 below; nor on top of an old scaffold pillar a
     //  walk can't get up onto - the columns tried before were full of their own dirt, 2026-09-27)
-    const inFoot = x >= job.box.x1 && x <= job.box.x2 && z >= job.box.z1 && z <= job.box.z2
-    if (inFoot && gy < job.box.y1 - 1) { no('under the floor'); continue }
+    // (the hollow - move.underFloorAt, the foot's feet cell: the open slope inside the box below the base is open ground)
+    if (move.underFloorAt({ x, y: gy + 1, z })) { no('under the floor'); continue }
     const g = world.at(bot, x, gy, z)
     // (and never on a floor lower than a whole block - a bottom slab, a carpet, farmland (a stair's top step is whole): the feet stand in its own cell and the tower aims there; the jump from a slab peaks under the
     //  top of the block the tower needs - feet at 119.5 reach 120.75, the block wants 121 - so the first block never goes in;
     //  "towered ... to y119 (cell y119 cobblestone_slab)", 2026-10-03)
     if (g && g.shapes && g.shapes.length && Math.max(...g.shapes.map(sh => sh[4])) < 0.99) { no('a low floor'); continue }
     if (g && gy > job.box.y1 && !job.index.has(key({ x, y: gy, z })) && /^(dirt|cobblestone|andesite|diorite|tuff|coarse_dirt)$/.test(g.name)) { no('an old filler pillar'); continue }
+    const top = station(x, z, gy + 1)
+    if (top == null) { no('no station there sees a face of it'); continue }
+    if (top - 1 - gy > TOWER_MAX) { no('no ground within 16'); continue }
     let clear = true; let why = ''
-    for (let y = gy + 1; y <= c.y + 1 && clear; y++) { const b = world.at(bot, x, y, z); if (job.index.has(key({ x, y, z }))) { clear = false; why = y > c.y - 1 ? 'a build cell at the cell\'s height' : 'a build cell below the cell' } else if (!b || !world.isAirish(b)) { clear = false; why = 'a block in the column' } }
+    for (let y = gy + 1; y <= top + 2 && clear; y++) { const b = world.at(bot, x, y, z); if (y < top + 2 && job.index.has(key({ x, y, z }))) { clear = false; why = y < top ? 'a build cell under the station' : 'a build cell where I would stand' } else if (!b || !world.isAirish(b)) { clear = false; why = 'a block in the column' } }
     if (!clear) { no(why); continue }
-    // (the tower's own blocks - the foot's column up to under the stand that reaches the cell - never in the finished build's
-    //  walking space: designwalk.js)
-    { let prot = false; for (let y = gy + 1; y <= c.y - 2 && !prot; y++) if (walkProtected({ x, y, z })) prot = true; if (prot) { no('the castle\'s own walking space'); continue } }
+    // (the tower's own blocks - the foot's column up to under the station - never in the finished build's walking space:
+    //  designwalk.js)
+    { let prot = false; for (let y = gy + 1; y <= top - 1 && !prot; y++) if (walkProtected({ x, y, z })) prot = true; if (prot) { no('the castle\'s own walking space'); continue } }
     // (on the floor or the ground, not up on a ledge of the build: the walk to a window ledge at y128 stuck every time)
     const raised = gy > job.box.y1 ? 25 : 0
     // (and below the build's floor, off its rim, last: the slope under the south rim - feet at y112-115 for a y125 cell -
@@ -1412,8 +1577,12 @@ function feetFor (bot, c, rej = null) {
     //  if it ever got there, 2026-10-03. A foot at the floor's level wins when there is one)
     const sunk = gy < job.box.y1 - 1 ? (job.box.y1 - 1 - gy) * 6 : 0
     // (and a foot no walk gets to - an upper floor nothing climbs to yet: 24 pillar feet so, each a stuck walk; walkReach)
-    if (!canWalkTo(bot, { x, y: gy + 1, z })) { no('off my walk'); continue }
-    out.push({ x, y: gy + 1, z, d: Math.hypot(x + 0.5 - me.x, gy + 1 - me.y, z + 0.5 - me.z) + Math.hypot(dx, dz) + raised + sunk })
+    if (!canWalkTo(bot, { x, y: gy + 1, z })) { no('off my walk'); if (off) off.push({ x, y: gy + 1, z, top }); continue }
+    // (the way there BY THE ROUTE when the search began where I stand - reachFromHere, as reachStandFor and clusterStand: by the
+    //  straight line a raised foot 200 route cells round beat one 10 cells along my floor once the long way was walked; audit)
+    const dr = byRoute ? reach.depth.get(x + ',' + (gy + 1) + ',' + z) : null
+    // (a block of tower is a jump and a dig back down: the shorter of two feet at the same walk, by half a cell a block)
+    out.push({ x, y: gy + 1, z, top, d: (dr != null ? dr : Math.hypot(x + 0.5 - me.x, gy + 1 - me.y, z + 0.5 - me.z)) + Math.hypot(dx, dz) + raised + sunk + (top - gy - 1) * 0.5 })
   }
   return out.sort((a, b) => a.d - b.d)
 }
@@ -1425,6 +1594,8 @@ function feetFor (bot, c, rej = null) {
 let reach = null
 const badLegCells = new Map() // cell key -> when a site leg to it failed: the walk model's mismatch with the body (walkReach routes round)
 const REACH_MARGIN = 10; const REACH_CAP = 15000
+// (THE SITE'S GROUND - the walk search's area, the box and REACH_MARGIN round it: one test, walkReach's and the step's own walk onto it)
+function onSiteGround (q) { const b = job && job.box; return !!b && q.x >= b.x1 - REACH_MARGIN && q.x <= b.x2 + REACH_MARGIN && q.z >= b.z1 - REACH_MARGIN && q.z <= b.z2 + REACH_MARGIN }
 const DEAR_STEP = 50 // (a step the planner takes only with no other way: a trap's 50, under the build's 60; a campfire's side 30 is a cost)
 async function walkReach (bot) {
   if (!job || !bot.entity) return null
@@ -1461,21 +1632,57 @@ async function walkReach (bot) {
   //  so a walk that starts down there can leave, never a road. In the dear tier it was one: the south strip's pocket behind a
   //  door, closed but for a 2-deep pit into the hollow under the floor, read as reachable through the hollow; the bot went in
   //  that way and stuck walk after walk, broke out, a trap, twice an hour, 2026-10-07. From under the floor: the way out)
-  const fb = world.feetPos(bot); const bx = job.box
-  const inFoot = (x, z) => x >= bx.x1 && x <= bx.x2 && z >= bx.z1 && z <= bx.z2
-  const startUnder = fb.y < bx.y1 && inFoot(fb.x, fb.z)
-  const avoid = (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return (!!t && Date.now() - t < 600000) || stepCost(x, y, z) >= 100 || (!startUnder && y < bx.y1 && inFoot(x, z)) }
+  // (ONE READING OF "THE HOLLOW" - move.underFloorAt: this search's start, its avoid, the planner's price and the
+  //  escape's rule. The planner's prices read the whole footprint below the base and were a ban where they met (100) -
+  //  this search's own rule below was not the only one shutting the open ground; 2026-11-14 22:15. One price since
+  //  2026-11-15, a cost and never a ban: this search still keeps the hollow as no way IN)
+  const fb = world.feetPos(bot)
+  const startUnder = move.underFloorAt(fb)
+  // (UNDER THE FLOOR, NOT UNDER THE BOX: the hollow is where the build's base floor goes over the ground - a cell of the
+  //  blueprint at the base layer or the one over it in that column. Read as the whole footprint below the base, the open
+  //  ground beside the walls inside the box's corners - the terrain a block lower than the base along the north face, the way
+  //  round to the west door - was "the hollow" too: from home the search stopped at the castle's own doorstep, 2438 cells
+  //  none over y125, and every cell of the upper floors read "no stand in my walk" - pillars, rings, strays and the walker
+  //  for stands the castle's stairs and ladder lead to (4326 cells and all three floors with the open ground walked, the site
+  //  as it stood 2026-11-14 20:38; five minutes of a round with nothing placed, 20:33-20:38). The real hollow stays shut)
+  const avoid = (x, y, z) => { const t = badLegCells.get(x + ',' + y + ',' + z); return (!!t && Date.now() - t < 600000) || stepCost(x, y, z) >= 100 || (!startUnder && move.underFloorAt({ x, y, z })) }
   const W = rooms.walkModel(rw, () => false, { opens: true, avoid }); const b = job.box
-  const inArea = q => q.x >= b.x1 - REACH_MARGIN && q.x <= b.x2 + REACH_MARGIN && q.z >= b.z1 - REACH_MARGIN && q.z <= b.z2 + REACH_MARGIN
+  // THE WATER THE LEGS' PLANNER WADES IS A WAY: the walk model stands on floors only - a pond a block deep across the short
+  // way is a wall to it, and the search went round: from home to the upper floor 203 cells where the planner that walks the
+  // legs takes 70 moves through the pond west of the castle (99 by this search with the wade), a teardown stand 7 blocks off
+  // 195 cells round and 61 across - legs of 214, 218 and 228 cells, 67-73s each, the first walk of every round, 2026-11-14.
+  // A WET cell - water at the feet, room for the head - is a cell of the walk, by THE PLANNER'S OWN MOVES and nothing else:
+  // into one from a floor beside it, on through the water, out onto a stand of the model (straight steps and the column, no
+  // dig, no place, cost <= 100 - deadEnd's and plannerNext's rule; a head under water it prices out, the avoid as for every
+  // cell). A WAY, NEVER A STAND: the set answers "a stand I can walk to" to its readers by membership alone (reachStandFor,
+  // standWalk, the ring's stand) - and by the least depth, which a wet cell on the short way has - so the wet cells are
+  // walked by the search and its one-way test (cells, parent, depth, back) and taken out of the set after them: the routes
+  // run through the water, no stand, no leg's end (goSite stops its legs on plain floor) and no "here" is ever in it; audit
+  const wetSet = new Set()
+  const wet = (x, y, z) => { const fw = rw.at(x, y, z); if (!fw || fw.name !== 'water') return false; const hd = rw.at(x, y + 1, z); return !!hd && world.bodyPassable(hd) }
+  const waterBy = c => { for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (let dy = 1; dy >= -world.SAFE_DROP; dy--) { const bw = rw.at(c.x + dx, c.y + dy, c.z + dz); if (bw && bw.name === 'water') return true } return false }
+  const wade = (c, cw) => {
+    if (!cw && !waterBy(c)) return []
+    let ms = []; try { ms = mv.getNeighbors({ x: c.x, y: c.y, z: c.z, remainingBlocks: 0 }) } catch { return [] }
+    const out = []
+    for (const m of ms) {
+      if (m.cost > 100 || (m.toBreak && m.toBreak.length) || (m.toPlace && m.toPlace.length)) continue
+      if (Math.abs(m.x - c.x) + Math.abs(m.z - c.z) > 1 || (m.x === c.x && m.y === c.y && m.z === c.z)) continue
+      if (!(wet(m.x, m.y, m.z) || (cw && W.st(m.x, m.y, m.z))) || avoid(m.x, m.y, m.z)) continue
+      out.push({ x: m.x, y: m.y, z: m.z })
+    }
+    return out
+  }
+  const inArea = onSiteGround
   // (where I stand is a start whatever it costs - under the floor, the way out is the walk's: the model without the avoid)
   const W0 = rooms.walkModel(rw, () => false, { opens: true })
   const start = [0, -1, 1].map(dy => ({ x: f.x, y: f.y + dy, z: f.z })).find(q => W0.st(q.x, q.y, q.z))
   // (no cell the walk model stands in under me - a stair, a slab's edge, a ladder: no search from here; read as a set of
   //  one, 20 cells were held at once, 2026-10-02)
-  if (!start) { reach = null; shutIn = null; return null }
+  if (!start) { reach = null; shutIn = null; reachNone = { why: 'no stand of the walk model under me', at: Date.now() }; return null }
   // (standing outside the site's ground - at the chests by home: no question to ask from here, every stand is unknown; read
   //  as a set of one, every cell was held and nothing walked; audit)
-  if (!inArea(start)) { reach = null; shutIn = null; return null }
+  if (!inArea(start)) { reach = null; shutIn = null; reachNone = { why: 'I stand off the site', at: Date.now() }; return null }
   const cells = new Set([key(start)]); const q = [start]; let i = 0; let capped = false
   const parent = new Map() // (the way each cell was reached: the route to a stand is read back from it - reachRoute)
   const depth = new Map([[key(start), 0]]) // (its route's length: detourTooLong)
@@ -1489,13 +1696,14 @@ async function walkReach (bot) {
     if (Date.now() - slice > 8) { longest = Math.max(longest, Date.now() - slice); await new Promise(r => setImmediate(r)); slice = Date.now() }
     const c = q[i++]
     if (!inArea(c)) { leaves.push(key(c)); continue } // (reached, not walked on from: the site's own ground is the question)
-    const ns = W.next(c)
+    const cw = wet(c.x, c.y, c.z)
+    const ns = cw ? wade(c, true) : W.next(c).concat(wade(c, false)) // (in the water: the planner's moves alone)
     // (A DEAD END IS NO STAND: a cell the walk drops into with no step out of it, nor any move of the legs' own planner (no
     //  dig, no place) - rooms.deadEnd. A 1x1 shaft over a lantern was a leg's end: dropped in, every walk an instant noPath
     //  for 20 minutes, 2026-10-07. Asked without the avoid - a leg failed lately is no wall to the body - and only when the
     //  model has no step: the planner is asked of those few cells alone)
     if (!ns.length && c !== start && rooms.deadEnd(W0, c, plannerExits)) { cells.delete(key(c)); continue }
-    for (const n of ns) { const k = key(n); { const bl = back.get(k); if (bl) bl.push(key(c)); else back.set(k, [key(c)]) } if (!cells.has(k)) { cells.add(k); parent.set(k, c); depth.set(k, (depth.get(key(c)) || 0) + 1); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
+    for (const n of ns) { const k = key(n); { const bl = back.get(k); if (bl) bl.push(key(c)); else back.set(k, [key(c)]) } if (!cells.has(k)) { cells.add(k); if (wet(n.x, n.y, n.z)) wetSet.add(k); parent.set(k, c); depth.set(k, (depth.get(key(c)) || 0) + 1); if (dear(n.x, n.y, n.z)) dearQ.push(n); else q.push(n) } }
   }
   // ONE-WAY POCKETS ARE NO STANDS: cells the walk gets down into and never back out of - no way from them to where I stand or
   //  past the site's area (rooms.deadEnd's rule for a region, not a cell). The walk dropped into the chimney nest round
@@ -1510,18 +1718,42 @@ async function walkReach (bot) {
     if (!sinks.size) sinks = null
     if (sinks) { for (const k of sinks) cells.delete(k); if (Date.now() - sinkSaid > 120000) { sinkSaid = Date.now(); log('build', `walk reach: ${sinks.size} cells one way only (no walk back out) left out - e.g. ${[...sinks][0]}`) } }
   }
+  // THE START'S OWN GROUND - reach.twoWay: the cells with a walk BACK to where the search began (its steps read the other
+  // way, from the start; through the water too). The set alone says "I can get there" - and a perch, a floor a pillar took
+  // me up to, the top of a drop are left by a step the walk does not take back: the stand for a trapdoor was a step down
+  // off a 5-cell perch, the body took it, the cells whose stands were on the perch were then "walk stands" of a search it
+  // had no way back to - a walker's 30s, the ground, a 197-cell climb back up: 134s of a 480s round for one cell,
+  // 2026-11-14 21:29. Read by the order (the cells I can do and come back from first) and by the pick (a search whose
+  // start I cannot walk back to is no answer for where I stand). Unknown (null) when the search was capped
+  let twoWay = null
+  if (!capped) { twoWay = new Set([key(start)]); const tq = [key(start)]; for (let j = 0; j < tq.length; j++) for (const pk of back.get(tq[j]) || []) if (!twoWay.has(pk) && cells.has(pk)) { twoWay.add(pk); tq.push(pk) } }
+  for (const k of wetSet) cells.delete(k) // (ways, never stands - above)
   // (SHUT IN - no cell of the set outside the build: every stand reads out of reach, no walk is made, and the walker's own
   //  escapes never run. Unknown, said once: the walks go and the escape gets its chance; audit)
   // (and PERCHED - a handful of cells: the top of a scaffold pillar on the rim, every side a drop; the site walk climbs down
   //  on its own blocks, which a walk-only search cannot see - a set of one held 11 cells, 2026-10-02: unknown too)
-  if (!capped && cells.size < 50) { reach = null; watchStatus(bot); shutIn = { job, kind: 'perched', cells, at: Date.now(), gen: statusGen, from: f }; return null }
+  if (!capped && cells.size < 50) { reach = null; watchStatus(bot); shutIn = { job, kind: 'perched', cells, at: Date.now(), gen: statusGen, from: f }; reachNone = { why: `perched (${cells.size} cells)`, at: Date.now() }; return null }
   if (!capped && ![...cells].some(k => { const [x, , z] = k.split(',').map(Number); return x < b.x1 || x > b.x2 || z < b.z1 || z > b.z2 })) {
-    if (Date.now() - shutSaid > 60000) { shutSaid = Date.now(); log('build', `walk reach: shut in at ${move.fmt(f)} (${cells.size} cells, none outside the build) - stands unknown, the walks go`) }
-    reach = null; watchStatus(bot); shutIn = { job, kind: 'shut in', cells, at: Date.now(), gen: statusGen, from: f }; return null
+    // THE SET IS STILL WHERE I CAN STAND - an island: up on a floor by a pillar of ours, the walk-only search has no way off it
+    // and read the whole floor "shut in, stands unknown"; every stand on it went to the walker (dig and place, 30s, "the
+    // search has no answer from here"), and a stand 7 blocks along the same floor ended on the ground at y120 - twice in a
+    // quarter of an hour, 2026-11-14 20:15 and 20:25: 75 blocks placed in 37s up there, then the floor was lost, 83 a ten-minute
+    // round. The verdict stays (shutIn: goSite's escape, the planner's pocket rule - as before, read by nobody else); the set
+    // is kept beside it and answers for the stands ON the island alone: the legs walk to those, the pick takes their cells
+    // first (the step's onWalk), and a cell none of them reaches goes to the walker at once, as it did - reach.island: no
+    // "none" of this set holds a walk back (getInReach), no design way or access plan is read from it (as before: they
+    // had no set here). The way home, the bed and the flee never read this set (move.js reads sinkAt and pocketHere only)
+    if (Date.now() - shutSaid > 60000) { shutSaid = Date.now(); log('build', `walk reach: no walk off the build from ${move.fmt(f)} (${cells.size} cells, none outside it) - its own stands known, off it the walker's way`) }
+    watchStatus(bot); shutIn = { job, kind: 'shut in', cells, at: Date.now(), gen: statusGen, from: f }
+    // (WITHOUT its one-way pockets - sinks: null. Kept, sinkAt priced every planner walk out of them for a minute, and an
+    //  island's way down IS such a drop - the ledge outside the rim: the walker, the escape and the walk home would dig down
+    //  through our own blocks or time out instead. As before, when the island had no set and so no sinks; audit)
+    reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent, depth, sinks: null, island: true, twoWay }
+    return reach
   }
   shutIn = null
-  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent, depth, sinks }
-  if (Date.now() - reachLast > 120000) { reachLast = Date.now(); log('build', `walk reach: ${cells.size} cells from ${move.fmt(f)}${capped ? ' (capped - unknown past it)' : ''} in ${reach.ms}ms (longest slice ${longest}ms)`) }
+  reach = { job, at: Date.now(), cells, capped, ms: Date.now() - t0, longest, from: f, start, parent, depth, sinks, wet: wetSet, twoWay }
+  if (Date.now() - reachLast > 120000) { reachLast = Date.now(); log('build', `walk reach: ${cells.size} cells from ${move.fmt(f)}${wetSet.size ? ` (and ${wetSet.size} of water waded on the way)` : ''}${capped ? ' (capped - unknown past it)' : ''} in ${reach.ms}ms (longest slice ${longest}ms)`) }
   return reach
 }
 let reachLast = 0; let shutSaid = 0; let sinkSaid = 0
@@ -1544,6 +1776,20 @@ let shutIn = null
 let shutEsc = null // (the escape's last answer from a shut place: { k, gen, urgent } - asked again when the place changes)
 const walkerFailed = new Map() // stand key -> statusGen: a walker walk from it failed (noPath/stuck) with the world as it was
 // standing on a pillar of our own - this step's (myPillar) or the litter ledger's: the perched case the escape's descent is for
+// (WHY THE SEARCH HAS NO ANSWER, said with the stand plan's "no answer": 64 of 104 of those since 2026-11-14 12:00 began
+//  12+ up on a column with a drop all round, a 27s walker "stuck" each, the step's own descent not taken - which null it
+//  was (no start, off the site, perched) and whose column it is decide the fix. Evidence only)
+let reachNone = null
+function reachWhyNone (bot) {
+  const parts = []
+  if (!reach) parts.push(reachNone && Date.now() - reachNone.at < 60000 ? reachNone.why : 'no search yet')
+  else if (reach.job !== job) parts.push('a search of another job')
+  else if (reach.capped) parts.push('capped')
+  else if (Date.now() - reach.at > 30000) parts.push(`a search ${Math.round((Date.now() - reach.at) / 1000)}s old`)
+  else parts.push(`I am off the search begun at ${move.fmt(reach.start)}`)
+  parts.push(`on our pillar ${onOurPillar(bot) ? 'yes' : 'no'}, ${myPillar.length} pillar blocks this step`)
+  return parts.join('; ')
+}
 function onOurPillar (bot) { const f = world.standCell(bot); const u = { x: f.x, y: f.y - 1, z: f.z }; return myPillar.some(q => q.x === u.x && q.y === u.y && q.z === u.z) || require('./litter').has(u) }
 // the verdict for where I stand now (the search redone when it is stale): null when none
 async function shutHere (bot) {
@@ -1577,31 +1823,80 @@ function reachRoute (bot, p) {
 }
 let legLast = 0; let legN = 0
 function legSaid (s) { legN++; if (Date.now() - legLast > 30000) { legLast = Date.now(); log('build', `${s}${legN > 1 ? ` [${legN} walks since the last line]` : ''}`); legN = 0 } } // (one line in 30s: the evidence)
-// A RAISED CELL WHOSE ROUTE RUNS ROUND THE BUILD: the legs refuse it (a route 3+ up, over 30 cells and three times the
-// straight line: the walker's one scaffold step up was the better bet, 2026-10-03) - so it is no stand the walk reaches
-// either. Read as reachable, a wall-top stand 5 up with a 225-cell route was chosen, the legs handed it to the walker, and
-// the walker stuck under it at the wall's foot, 30s, 2026-10-07. ONE rule: goSite's and canWalkTo's
-function detourTooLong (bot, p, len = null) {
-  const me = bot.entity.position
-  if (p.y - Math.floor(me.y) < 3) return false
-  const n = len != null ? len : (reachCurrent(bot) && reach.depth ? (reach.depth.get(key(p)) != null ? reach.depth.get(key(p)) + 1 : null) : null)
-  return n != null && n > Math.max(30, 3 * world.dist3(me, p))
+// (a cell the walk search reaches is one the legs walk to - the long way round too: goSite)
+function canWalkTo (bot, p) { return !reachCurrent(bot) || reach.capped || reach.cells.has(key(p)) }
+// THE EYE AT STAND s0 IS WITHIN r OF CELL p's CENTRE - from every height the eye can be at on that floor (world.eyesAt: a
+// stair's low step as well as its high one): one test for every "a stand that reaches it"
+// A STAND THE BODY STAYS ON - no ladder under the feet. A ladder is a plate on the wall behind it, its box a whole block in
+// the data: every walker reads it as a floor, and the walk search's stands ran up every ladder shaft - each cell a "stand",
+// the cell over the top one too. The body on one with no key held slides down it (3 blocks a second; a player holds sneak),
+// and over the top one there is nothing under the body at all: the stand -2289,130,-577 over the shaft's last ladder,
+// walked to three times - climbed to y128.9, slid back to y124, "stuck three times here", rounds of 1 and 0 placed,
+// 2026-11-14 23:50-23:53. A way THROUGH the shaft is the walk's; a stand to place from is never on a ladder. ONE reading:
+// the pickers' (reachStandFor, standWalk's order, clusterStand and its room rule's standsOf)
+function holdsStill (bot, s) { const f = world.at(bot, s.x, s.y - 1, s.z); return !(f && f.name === 'ladder') }
+function eyeReaches (bot, s0, p, r) {
+  const ex = p.x - s0.x; const ez = p.z - s0.z; const h = ex * ex + ez * ez
+  for (const e of world.eyesAt(bot, s0)) { const ey = p.y + 0.5 - e; if (h + ey * ey > r * r) return false }
+  return true
 }
-function canWalkTo (bot, p) { return !reachCurrent(bot) || reach.capped || (reach.cells.has(key(p)) && !detourTooLong(bot, p)) }
 // A STAND THE WALK SEARCH REACHES within a player's reach of p (the eye within 4.3 of its centre), the nearest to me: the
 // stand; false when the search is current and has none; null when it is no answer (stale, capped, none from here)
-// (detour: true - a stand the search reaches by a long way round counts too: the legs refuse that route, the walker walks it)
-function reachStandFor (bot, p, { detour = false } = {}) {
+function reachStandFor (bot, p) {
   if (!reachCurrent(bot) || reach.capped) return null
-  const me = bot.entity.position; let best = null; let bd = Infinity
+  // (the nearest BY THE ROUTE when the search began where I stand - reachFromHere: by the straight line a stand a floor down,
+  //  under the cell, beat the one six cells along my own floor, and the legs walked 104 cells round to it, 2026-11-14 20:45)
+  // (and a stand WITH A WALK BACK before one without - reach.twoWay, read only when I can walk back to the search's start
+  //  myself (backToStart): the nearest of those first, a one-way stand only when the cell has no other)
+  const me = bot.entity.position; let best = null; let bd = Infinity; const byRoute = reachFromHere(bot)
+  const tw = reach.twoWay && backToStart(bot) ? reach.twoWay : null; let best2 = null; let bd2 = Infinity
   for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 2; dy++) {
     const s0 = { x: p.x + dx, y: p.y + dy, z: p.z + dz }
-    if (!reach.cells.has(key(s0)) || (!detour && detourTooLong(bot, s0))) continue
-    const ex = p.x - s0.x; const ey = p.y + 0.5 - world.eyeAt(bot, s0); const ez = p.z - s0.z // (the eye from the floor's real top: world.eyeAt)
-    if (ex * ex + ey * ey + ez * ez > 4.3 * 4.3) continue
-    const d = world.dist3(s0, me); if (d < bd) { bd = d; best = s0 }
+    if (!reach.cells.has(key(s0))) continue
+    if (!eyeReaches(bot, s0, p, 4.3) || !holdsStill(bot, s0)) continue // (the eye from the floor's real top - every height it can be at: eyeReaches; never on a ladder: holdsStill)
+    const dr = byRoute ? reach.depth.get(key(s0)) : null
+    const d = dr != null ? dr : world.dist3(s0, me); if (d < bd) { bd = d; best = s0 }
+    if (tw && tw.has(key(s0)) && d < bd2) { bd2 = d; best2 = s0 }
   }
-  return best || false
+  return best2 || best || false
+}
+// DOES THE WALK I HAVE REACH A STAND FOR c (the long way round counts: goSite's legs walk it) - one answer a search: the
+// step's order asks it of every ready cell at every pick
+let walkMemo = null
+// (and HOW FAR BY THE WALK: the shortest route of the search to a stand for c, in cells from the search's start - dep; null
+//  with no stand. A route's length, not the straight line: two cells 7 blocks apart through a floor were 104 cells by the
+//  stairs - standWalk)
+function standWalk (bot, c) {
+  if (!reachCurrent(bot) || reach.capped) return null
+  if (!walkMemo || walkMemo.reach !== reach) walkMemo = { reach, m: new Map() }
+  const k = key(c); let v = walkMemo.m.get(k)
+  if (v === undefined) {
+    // (two: a stand of it has a walk back to the search's start - reach.twoWay; its dep is then the nearest SUCH stand's,
+    //  the one reachStandFor takes. Unknown two-way ground (a capped search): every stand counts as one, as before)
+    let dep = Infinity; let ok = false; let two = false; let dep2 = Infinity; const tw = reach.twoWay
+    for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 2; dy++) {
+      const s0 = { x: c.x + dx, y: c.y + dy, z: c.z + dz }; const sk = key(s0)
+      if (!reach.cells.has(sk)) continue
+      if (!eyeReaches(bot, s0, c, 4.3) || !holdsStill(bot, s0)) continue // (reachStandFor's own reach test and stand rule)
+      ok = true; const d = reach.depth ? reach.depth.get(sk) : null; if (d != null && d < dep) dep = d
+      if (!tw || tw.has(sk)) { two = true; if (d != null && d < dep2) dep2 = d }
+    }
+    v = { ok, two, dep: !ok ? null : two ? (dep2 < Infinity ? dep2 : null) : (dep < Infinity ? dep : null) }; walkMemo.m.set(k, v)
+  }
+  return v
+}
+function standOnWalk (bot, c) { const v = standWalk(bot, c); return !!v && v.ok }
+// THE SEARCH BEGAN WHERE I STAND: its depths are routes from its start - read as lengths only then (a set kept from another
+// stand of the same floor is still "can I get there", never "how far")
+function reachFromHere (bot) {
+  if (!reachCurrent(bot) || reach.capped || !reach.start || !reach.depth) return false
+  const f = world.standCell(bot); return Math.abs(reach.start.x - f.x) + Math.abs(reach.start.z - f.z) <= 1 && Math.abs(reach.start.y - f.y) <= 1
+}
+// I CAN WALK BACK TO WHERE THE SEARCH BEGAN (reach.twoWay holds my cell): the set is then mine as well - what its start
+// walks to, I walk to through it. Not so: the set is somebody else's - the body stepped down off the search's ground
+function backToStart (bot) {
+  if (!reachCurrent(bot) || reach.capped || !reach.twoWay) return false
+  const f = world.standCell(bot); return [0, -1, 1].some(dy => reach.twoWay.has(key({ x: f.x, y: f.y + dy, z: f.z })))
 }
 function footFor (bot, c) { return feetFor(bot, c)[0] || null }
 // Pillar feet the walk could not get to, skipped for half an hour by every cell (the south end's floor inside the facade:
@@ -1615,24 +1910,32 @@ const footBad = f => { const t = badFeet.get(key(f)); return !!t && Date.now() -
 let missingAnchorItems = [] // (the last step's anchors' missing items - missingItem; the director's window takes them first)
 let myPillar = []
 async function descendPillar (bot) {
-  const ours = q => myPillar.some(p => p.x === q.x && p.y === q.y && p.z === q.z)
-  for (let guard = 0; guard < 20 && myPillar.length; guard++) {
-    const me = bot.entity.position; const under = { x: Math.floor(me.x), y: Math.floor(me.y - 0.01), z: Math.floor(me.z) }
-    if (!ours(under)) break
+  const gather = require('./gather')
+  const n0 = myPillar.length; const d0 = pillarDug; const at0 = world.standCell(bot)
+  let keptWhy = null // (the last block of the pillar under me the build's guards kept)
+  const ours = q => {
+    if (!myPillar.some(p => p.x === q.x && p.y === q.y && p.z === q.z)) return false
     // (a pillar block standing in a cell of the build that wants just that is the build now - never dug)
-    { const bc = job && job.index.get(key(under)); if (bc && !bc.clear && cellDone(bot, bc) === true) break }
+    { const bc = job && job.index.get(key(q)); if (bc && !bc.clear && cellDone(bot, bc) === true) { keptWhy = `${move.fmt(q)} is a finished build cell`; return false } }
     // (nor one a finished attached cell hangs on - a torch or lantern put on the pillar's side when it was the only
     //  neighbour; audit)
-    if (job && job.cells.some(q => q.sup && q.sup.x === under.x && q.sup.y === under.y && q.sup.z === under.z && cellDone(bot, q) === true)) break
-    // (the fall the dig makes: the walker's blocks are a bridge as often as a stack - a gap under one is a drop of its
-    //  height; never onto lava or into water - the escape's own guard)
-    { const bl = world.at(bot, under.x, under.y - 1, under.z); if (act.fallBelow(bot, under) > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) break }
-    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { force: true, own: true, noWalk: true, allowZones: ['build', 'base'], timeoutMs: 6000 }).catch(() => false)) break
-    const t0 = Date.now(); while (!bot.entity.onGround && Date.now() - t0 < 1500) await act.sleep(50)
-    myPillar = myPillar.filter(p => !(p.x === under.x && p.y === under.y && p.z === under.z)); pillarDug++
+    if (job && job.cells.some(c => c.sup && c.sup.x === q.x && c.sup.y === q.y && c.sup.z === q.z && cellDone(bot, c) === true)) { keptWhy = `${move.fmt(q)} holds a finished attached cell`; return false }
+    return true
   }
+  // THE ONE DESCENT - gather.climbDownPillar: the block the hitbox stands on (a body half over the pillar's edge stands on it
+  // while the cell under its centre is a neighbour's), landed first, each drop waited for BY HEIGHT, each fall checked. This
+  // copy read the cell under the centre and waited on the ground flag, true still the tick after the dig: "1 of 4 dug ...
+  // under me is no block of this pillar (air)" - the next read a cell over the hole, the rest left standing, 2026-11-15 07:01
+  if (myPillar.length) {
+    await gather.climbDownPillar(bot, ours, { allowZones: ['build', 'base'], force: true, own: true, max: 20, onDug: c => { keptWhy = null; myPillar = myPillar.filter(p => !(p.x === c.x && p.y === c.y && p.z === c.z)); pillarDug++ } }).catch(() => 0)
+  }
+  let stopWhy = gather.downWhy() || keptWhy
+  if (!stopWhy && myPillar.length) { const on = gather.standingOn(bot); stopWhy = on.length ? `under me is no block of this pillar (${on.map(c => `${(world.at(bot, c.x, c.y, c.z) || {}).name || '?'} at ${move.fmt(c)}`).join(', ')})` : 'under me is no solid block (in the air)' }
   // (what could not come down - walked off it, a block that would not dig - is the site's scaffold still: the site diff
   //  and the finish take it; forgotten here so no later walk digs under someone else's feet)
+  // (said when blocks of it stay: the bot was left 12+ up on a column "on our pillar no, 0 pillar blocks this step" and the
+  //  walker ran 27s stuck there, 2026-11-15 06:02 - which guard stopped the descent decides the fix. Evidence only)
+  if (myPillar.length && n0) { try { log('build', `pillar down from ${move.fmt(at0)}: ${pillarDug - d0} of ${n0} dug, ${myPillar.length} left standing (${myPillar.slice(0, 6).map(p => `${move.fmt(p)} ${(world.at(bot, p.x, p.y, p.z) || {}).name || '?'}`).join(', ')}), me at ${move.fmt(world.standCell(bot))} - stopped: ${stopWhy || 'its 20 tries'}`) } catch {} } // (its blocks named: "under me cobblestone, no block of this pillar" three times - an off-by-one record, or walked off it; evidence)
   myPillar = []
 }
 async function pillarTo (bot, c, first, stop = cellStop) {
@@ -1658,7 +1961,8 @@ async function pillarTo (bot, c, first, stop = cellStop) {
     // (the TOWER's own blocks, not a fixed 16: the tower rises to c.y - 1 from the foot - with 24 filler in the pack a 4-high
     //  pillar walked 42b to the chest and back for "1 andesite", 2026-10-06. Two over it: the walk back to the foot may spend
     //  some; audit. Short is a tower stopped, a miss like any)
-    const r2 = await topUpAt(bot, Math.max(4, c.y - f.y + 2), f, () => goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar', { shouldStop: stop }), { shouldStop: stepStop }, 1)
+    const top = f.top != null ? f.top : c.y - 1 // (the station feetFor found; a foot handed in without one, the old top)
+    const r2 = await topUpAt(bot, Math.max(4, top - f.y + 2), f, () => goSite(bot, new goals.GoalBlock(f.x, f.y, f.z), 'back to the foot of a pillar', { shouldStop: stop }), { shouldStop: stepStop }, 1)
     if (r2.why === 'stopped') return false
     if (!r2.ok) { log('build', `pillar for ${c.name} at ${move.fmt(c)}: not back at its foot ${move.fmt(f)} after the scaffold top-up (${r2.why})`); continue }
     // (the planner let go of first: its goal left standing, it set the controls every tick and the tower's jump never
@@ -1666,7 +1970,7 @@ async function pillarTo (bot, c, first, stop = cellStop) {
     try { bot.pathfinder.setGoal(null) } catch {}
     bot.clearControlStates()
     await act.sleep(100)
-    for (let i = 0; i < 16 && Math.floor(bot.entity.position.y) < c.y - 1; i++) {
+    for (let i = 0; i < 16 && Math.floor(bot.entity.position.y) < top; i++) {
       if (!await require('./gather').towerUp(bot, { allowZones: ['build', 'base'], builder: true, onPlaced: q => { myPillar.push(q); pillarLaid++ } })) break
     }
     if (act.reach(bot, new Vec3(c.x, c.y, c.z), 4.8)) return true
@@ -1722,7 +2026,7 @@ async function designFor (bot) {
 // not ours): not this route. Returns the strays taken out (0: none, or no such route)
 const designTried = new Set()
 async function clearDesignWay (bot, c) {
-  if (!design || design.job !== job || !reachCurrent(bot) || reach.capped) return 0
+  if (!design || design.job !== job || !reachCurrent(bot) || reach.capped || reach.island) return 0 // (an island's set: no way read from it - walkReach)
   // the design's stands in reach of c, the nearest first
   const ds = []
   for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 1; dy++) {
@@ -1770,9 +2074,30 @@ async function clearDesignWay (bot, c) {
 //  story read "no stand" cell after cell with its floors unlaid, 2026-10-07. Worked out once a walk search (reach.at), at most
 //  every 30s, yielding; a hint to the order only - every rule of the window (belowWaits, the anchor, the doorway) still decides
 let accessMemo = null; let accessBusy = false
+let wayHoldSaid = null; const topChainSaid = new Set()
+// (an item none of which is to hand - the pack and the chests, a stand-in pickItem would take counting (acceptsFor) - or one
+//  the band's own reading already calls out of stock (det): the castle's way's "held" test, the chain's and its probe's)
+// (stock: the pack's and the bank's counts, read once a pass by the caller - wayStock - never a chest-memory rebuild a call; audit F40-1)
+function wayStock (bot) { const st = Object.assign({}, base().bankCounts()); for (const [n, k] of Object.entries(inv.counts(bot))) st[n] = (st[n] || 0) + k; return st }
+function wayItemOut (it, det, stock) {
+  if (!it || det.has(it)) return !!it
+  if ((stock[it] || 0) > 0) return false
+  const re = acceptsFor(it); if (re) for (const [n, v] of Object.entries(stock)) if (v > 0 && re.test(n)) return false
+  return true
+} // (the access cell held by a waiting hole, last said: once a hole)
+// THE ITEM THAT HOLDS A CELL'S NEXT STEP, or null: its step's item out of stock - or, on a TWO-STEP cell's first step (a pot
+// and its plant), the second's: the step tries one only with both in hand (buildStepInner's `has`). The chain read "holds on
+// no out-of-stock item" over potted_allium@-2271,123,-587 - its flower_pot in stock, its allium (11 short) not, never tried -
+// and the castle's own stairs for 233 cells waited with no trip for the flower, 2026-11-15 07:50-08:34
+function wayHoldItem (bot, q, det, stock) {
+  const it = stepItem(bot, q)
+  if (wayItemOut(it, det, stock)) return it
+  if (q.then && it !== q.then && wayItemOut(q.then, det, stock)) return q.then
+  return null
+}
 function accessHas (c) { return !!accessMemo && accessMemo.job === job && accessMemo.cells.has(key(c)) }
 async function accessFor (bot, cells) {
-  if (!design || design.job !== job || !reachCurrent(bot) || reach.capped || accessBusy) return
+  if (!design || design.job !== job || !reachCurrent(bot) || reach.capped || reach.island || accessBusy) return // (an island's set: as with none - walkReach)
   if (accessMemo && accessMemo.job === job && (accessMemo.reachAt === reach.at || Date.now() - accessMemo.at < 30000)) return
   accessBusy = true; const t0 = Date.now(); const tick = ringTicker()
   try {
@@ -1939,6 +2264,74 @@ async function layRing (bot, plan, needy, c) {
   return laid.length
 }
 
+// ---- THE LIFT (ring.js planLift): up to a floor my walk does not reach, beside a cell with no stand -----------------
+// A tower of our filler up beside a stand off my walk, its top level with that stand's floor: the body steps across and the
+// floor is walked like any from then on - a roof's and upper story's cells had stands and pillar feet on floors no walk
+// climbed to, and none from the floors it did (2026-11-15). THIS STEP'S SCAFFOLD: a tower is no way back up once left, so the
+// lifts come down when the body is done up there - the next cell no stand of this floor's walk reaches, or the step's end
+// (liftDown) - never left as a perch nobody reaches, each block of it "an old filler pillar"
+let myLifts = [] // (the lifts up this step, the last on top: { top, tower: [..] as laid } - liftDown's)
+// the stands off my walk a lift might go to for c: stands of the world as it is in an eye's reach of c (reachStandFor's
+// window and rule), then the pillar feet feetFor refused for being off my walk alone - nearest the cell first
+function liftTargets (bot, c) {
+  if (!reachCurrent(bot) || reach.capped || reach.island) return []
+  const ok = s => !reach.cells.has(key(s)) && world.standable(bot, s.x, s.y, s.z) && holdsStill(bot, s) && !move.underFloorAt(s) && !job.index.has(key(s)) && !job.index.has(key({ x: s.x, y: s.y + 1, z: s.z }))
+  const out = []
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) for (let dy = -5; dy <= 2; dy++) {
+    const s = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
+    if (eyeReaches(bot, s, c, 4.3) && ok(s)) out.push(s)
+  }
+  out.sort((a, b) => world.dist3(a, c) - world.dist3(b, c))
+  const off = []; feetFor(bot, c, null, off)
+  for (const f of off) { const s = { x: f.x, y: f.y, z: f.z }; if (ok(s) && !out.some(q => key(q) === key(s))) out.push(s) }
+  return out
+}
+async function liftFor (bot, c, targets) {
+  if (!targets.length) return false
+  const tick = ringTicker(); const memo = new Map(); const stats = {}; const tp = Date.now()
+  const work = job.cells.filter(q => !q.clear && Math.abs(q.x - c.x) <= 12 && Math.abs(q.z - c.z) <= 12 && Math.abs(q.y - c.y) <= 6 && cellDone(bot, q) !== true)
+  const stand = (x, y, z) => reachCurrent(bot) && !reach.capped && reach.cells.has(`${x},${y},${z}`) && holdsStill(bot, { x, y, z })
+  const plan = await ring.planLift(ringWorld(bot), targets.slice(0, 12), { stand, refused: r => ringRefusal(bot, r, work, memo, tick), tick, towerMax: TOWER_MAX, stats })
+  log('build', `lift plan for ${c.name} at ${move.fmt(c)}: ${targets.length} stand${targets.length > 1 ? 's' : ''} off my walk for it, ${plan ? `a tower of ${plan.tower.length} from ${move.fmt(plan.from)} across to ${move.fmt(plan.target)}` : 'none'} (${Date.now() - tp}ms, ${stats.tried} columns${Object.keys(stats.why).length ? ': ' + Object.entries(stats.why).sort((a, b) => b[1] - a[1]).map(([r, n]) => n + ' ' + r).join(', ') : ''})`)
+  if (!plan) return false
+  if (ringSpare(bot) < plan.tower.length) { log('build', `lift waits: ${plan.tower.length - ringSpare(bot)} filler short (${RING_RESERVE} kept for the step's supports) for ${c.name} at ${move.fmt(c)}`); return false }
+  const t0 = Date.now(); const stop = () => (stepStop && stepStop()) || Date.now() - t0 > RING_MS
+  const ar = await goSite(bot, new goals.GoalBlock(plan.from.x, plan.from.y, plan.from.z), 'lift', { place: false, dig: false, shouldStop: stop }) // (the walk model's own route: no dug shortcut beside the build; audit F73-1)
+  if (!ar || !ar.ok) { log('build', `lift for ${c.name} at ${move.fmt(c)}: its foot ${move.fmt(plan.from)} not reached (${ar ? ar.why : '?'})`); return false }
+  const lift = { top: plan.tower[plan.tower.length - 1], tower: [] }; myLifts.push(lift)
+  const gather = require('./gather')
+  for (let i = 0; i < plan.tower.length && Math.floor(bot.entity.position.y + 0.01) < plan.target.y && !stop(); i++) {
+    const fill = ringFiller(bot)[0]; if (!fill || ringSpare(bot) < 1) break
+    if (!await gather.towerUp(bot, { allowZones: ['build', 'base'], builder: true, item: fill.n, onPlaced: q => { lift.tower.push({ x: q.x, y: q.y, z: q.z }); mem.update(m => { m.scaffold = m.scaffold || []; m.scaffold.push({ x: q.x, y: q.y, z: q.z }) }) } })) break
+  }
+  if (Math.floor(bot.entity.position.y + 0.01) < plan.target.y) { log('build', `lift for ${c.name} at ${move.fmt(c)}: the tower stopped at y${Math.floor(bot.entity.position.y)} (${gather.towerWhy() || '?'}) - it comes down`); await liftDown(bot); return false }
+  const r = await move.goTo(bot, new goals.GoalBlock(plan.target.x, plan.target.y, plan.target.z), { timeoutMs: 8000, stuckMs: 4000, dig: false, place: false, label: 'off the lift', shouldStop: stop }).catch(() => null)
+  const sc = world.standCell(bot); const across = sc.x === plan.target.x && sc.z === plan.target.z && Math.abs(sc.y - plan.target.y) <= 1
+  reach = null; await walkReach(bot).catch(() => null)
+  log('build', `lift for ${c.name} at ${move.fmt(c)}: ${lift.tower.length} up from ${move.fmt(plan.from)}, ${across ? `across onto ${move.fmt(plan.target)} - ${reach ? reach.cells.size : '?'} stands in my walk from here` : `not across (${r ? r.why : '?'}) - it comes down`}`)
+  if (!across) { await liftDown(bot); return false }
+  return true
+}
+// DOWN THE LIFTS, THE LAST FIRST: this floor's own pillar (descendPillar), back onto the lift's top by the walk, its tower dug
+// from under the feet (gather.climbDownPillar - each drop waited for, each fall checked); what will not come down is said and
+// left on the ledger (the site's teardown)
+async function liftDown (bot) {
+  const gather = require('./gather')
+  if (myPillar.length) await descendPillar(bot)
+  const stands = p => { const b = world.at(bot, p.x, p.y, p.z); return !!b && !world.isAirish(b) }
+  while (myLifts.length) {
+    const lift = myLifts.pop(); const left = lift.tower.filter(stands)
+    if (!left.length) continue
+    const sc = world.standCell(bot)
+    if (sc.x !== lift.top.x || sc.z !== lift.top.z) await move.goTo(bot, new goals.GoalBlock(lift.top.x, lift.top.y + 1, lift.top.z), { timeoutMs: 8000, stuckMs: 4000, dig: false, place: false, label: 'back onto the lift' }).catch(() => null)
+    const ours = q => left.some(p => p.x === q.x && p.y === q.y && p.z === q.z)
+    const n = await gather.climbDownPillar(bot, ours, { allowZones: ['build', 'base'], force: true, own: true, max: left.length + 2 }).catch(() => 0)
+    const still = lift.tower.filter(stands)
+    log('build', `lift down from ${move.fmt(lift.top)}: ${n} of ${left.length} dug${still.length ? `, ${still.length} left standing (${still.slice(0, 4).map(p => move.fmt(p)).join(', ')}) - stopped: ${gather.downWhy() || 'not on its top'}` : ''}, me at ${move.fmt(world.standCell(bot))}`)
+  }
+  reach = null
+}
+
 // THE STAND PLAN, SAID ONCE A CELL A BAND: a walk-search stand, else a pillar foot, else none - and for none, why each column
 // round it was no foot. The upper layers' reach misses were 70% of a step at y129-130 with nothing to say which of these
 // the cells lacked, 2026-10-07 16:21 - the data that decides between feetFor's rules and a scaffold ring (measurement only)
@@ -1950,7 +2343,7 @@ function standPlanSay (bot, c, pos) {
     const rs = reachStandFor(bot, pos)
     let what
     if (rs) what = `walk stand ${move.fmt(rs)}`
-    else if (rs === null) what = 'the walk search has no answer from here'
+    else if (rs === null) what = `the walk search has no answer from here (${reachWhyNone(bot)})`
     else {
       const rej = {}; const f = feetFor(bot, c, rej).filter(q => !footBad(q))
       what = f.length ? `pillar foot ${move.fmt(f[0])} (${f.length} feet)` : `none - no walk stand, no pillar foot (${Object.entries(rej).sort((a, b) => b[1] - a[1]).map(([r, n]) => n + ' ' + r).join(', ') || 'no column'})`
@@ -1967,6 +2360,7 @@ let stepTry = null // ({ k, alone }: the build step's own try of the cell - only
 //  rest is the place itself; 22% of castle time went to placing at ~2s a block, 2026-09-28 - measured, not guessed)
 const placeProf = { reach: 0, dig: 0 }
 const sealSaid = new Set() // (cells covered for want of a route: said once)
+const detSaidN = new Map() // (out-of-stock cells kept open, an item: said at its 1st, 2nd, 4th... cell)
 const timed = async (k, p) => { const t = Date.now(); try { return await p } finally { placeProf[k] += Date.now() - t } }
 const onFiller = new Set() // (pour cells being poured against a filler in the pour cell under them - placeCell)
 async function placeCell (bot, c, j = job) {
@@ -1974,6 +2368,7 @@ async function placeCell (bot, c, j = job) {
   lastPlaceFail = ''
   const pos = new Vec3(c.x, c.y, c.z)
   const own = { force: true, own: true, allowZones: ['build', 'base'], timeoutMs: 15000 }
+  let props = null // (the temporary support this try put in: taken back once the cell stands - takeProps)
   // AN ANIMAL STANDING IN THE CELL: the server refuses a block where a body is - a sheep fallen into a hole in the hub's
   // floor stood in its stone cell, "Server refused to place stone" for six hours, and the pen's leads walked to it and
   // "lost the sheep" thirty times, 2026-10-04. A wild farm animal (never a named one - someone's) is taken, as a player
@@ -2040,14 +2435,15 @@ async function placeCell (bot, c, j = job) {
   // Within reach of the cell, by the site walker: `faces` the faces to see, or none (a step onto a block that stands).
   // (where the miss was from: the body's cell and its height against the cell - down the slope or up to it; audit)
   const whereFrom = () => { const me = world.feetPos(bot); return ` - from ${me.x},${me.y},${me.z}, ${me.y - c.y >= 0 ? '+' : ''}${me.y - c.y} to the cell, ${world.dist3(me, c).toFixed(1)}b off` }
-  const getInReach = async (faces) => {
+  const getInReach = async (faces, empty = false) => { // (empty: the cell holds nothing to look at yet - its support comes after)
     // A CELL HIGH OVER ITS FLOOR: pillar up from the floor beside it first. Left to find its own way, the planner climbed
     // onto the rose window's one-wide ring 8 over the plaza and stuck there, cell after cell (2026-09-27).
     let pillared = false
     // A FOUNDATION CELL: a stand below it on the OUTSIDE first - the trench floor or the slope foot, as a player builds a
     // retaining wall - not a sight line from a pillar 5 off across a 3-wide gap: every south rim cell was "stuck"
     // (2026-09-28). Never from the hollow inside: its last rim cell would wall the bot in under the floor (audit)
-    if (c.foundation && !act.reach(bot, pos, 4.3)) {
+    // (the BUILD's rule - its box and its cells: with no build set, a hut foundation cell goes by the walk below, as any cell)
+    if (c.foundation && job && !act.reach(bot, pos, 4.3)) {
       const st = foundationStand(bot, c)
       // (an OUTSIDE stand is walked to from the outside: never through the castle's doors - the rim's trench lies below the
       //  floor, and the door fallback crossed the south-west rooms toward it, 40s a cell, 8 cells a step, 2026-09-29. Far
@@ -2086,11 +2482,33 @@ async function placeCell (bot, c, j = job) {
     // look-at goal below is no stand, so goSite handed it straight to the walker - dig and place allowed, 30s, no route - and
     // it timed out 35 times since 11:30 (1074s, 51% of its tries), the body ending 6-12 under the cell or in a pocket, while
     // a stand the legs could walk to was there for some of them, 2026-10-07. The legs first, the look-at walk only after
-    const rs = reachStandFor(bot, pos)
+    // (ON AN ISLAND - reach.island, walkReach: its "none" is no verdict on a cell off it. No far stand, no ring, no rest for
+    //  it and no hold on the walk: the walker at once, as when the island had no set - by the step's order (onWalk) that is
+    //  the island's own work done, or the room a closed one: the walker's failure there is the escape's proof, goSite)
+    const rs0 = reachStandFor(bot, pos)
+    const offIsland = rs0 === false && !!reach && !!reach.island
+    const rs = offIsland ? null : rs0
     if (rs) {
+      // (its route's own time on the cell's clock: a walk that goes on along a route the search has is no try that ran out -
+      //  half a second a cell and a margin; the legs measured a third of a second a cell, 2026-10-07)
+      { const n = reach && reach.depth ? reach.depth.get(key(rs)) : null; if (n != null) cellEnd = Math.max(cellEnd, Date.now() + 15000 + n * 500) }
       const r0 = await goSite(bot, new goals.GoalBlock(rs.x, rs.y, rs.z), 'place', { shouldStop: cellStop })
       if (r0 && r0.why === 'shut in') return why('shut in - the escape has the body')
       if (act.reach(bot, pos, 4.3)) return true
+      // IN THE STAND'S CELL AND STILL SHORT: a stand is judged from its cell's MIDDLE (eyeReaches), and a walk ends anywhere
+      // in the cell - still in the air of its last step, or a quarter of a block off the middle: the eye 4.44 from a cell its
+      // stand's middle was 4.27 from, 4.64 from another a jump's top high, "its stand in my walk was not enough" - and the
+      // look-at walker next, off the walk's ground onto a perch with no answer for any cell after: 15 misses, 368s of a 474s
+      // step, 2026-11-14 22:02. As a player: land, a step to the middle, then the arm. (4.4 - the place's own reach, act.place:
+      // the stand's 4.3 from the middle and the 0.08 the step leaves)
+      if (r0 && r0.ok) {
+        const sc = world.standCell(bot)
+        if (sc.x === rs.x && sc.z === rs.z && Math.abs(sc.y - rs.y) <= 1) {
+          await landed(bot)
+          await act.centre(bot, 0.08)
+          if (act.reach(bot, pos, 4.4)) return true
+        }
+      }
       if (cellOutOfTime()) return why(`could not get within reach (its stand ${move.fmt(rs)} in my walk not reached: ${r0 ? r0.why : '?'}; its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`)
     }
     // NO STAND IN MY WALK AND NO PILLAR GOT THERE - the cell rests, said, never the open-ended look-at walk: with the search
@@ -2102,16 +2520,8 @@ async function placeCell (bot, c, j = job) {
     //  ONCE a cell (noStandOnce), never on a cell with a miss of its own already, never for the band's last ready cell or the
     //  job's last cells (stepTry.alone), only in the build step's own try, and it is NOT TRIED, not a miss: no fail counted, nothing rested round it, the room
     //  rule's work list keeps it (the step holds it back for this step only); audit)
-    // (and a stand cut only by the detour rule - reached the long way round, which the legs refuse - is walked to: the walker
-    //  to that stand, not the open look-at goal)
     if (rs === false) {
-      const far = reachStandFor(bot, pos, { detour: true })
-      if (far) {
-        const r1 = await goSite(bot, new goals.GoalBlock(far.x, far.y, far.z), 'place', { shouldStop: cellStop, why: `its stand ${move.fmt(far)} only the long way round` })
-        if (r1 && r1.why === 'shut in') return why('shut in - the escape has the body')
-        if (act.reach(bot, pos, 4.3)) return true
-        if (cellOutOfTime()) return why(`could not get within reach (its stand ${move.fmt(far)} the long way round not reached: ${r1 ? r1.why : '?'})${whereFrom()}`)
-      } else if (stepTry && stepTry.k === key(c) && !ringTried.has(key(c) + '@' + planBand) && !feetFor(bot, c).some(f => !footBad(f))) {
+      if (stepTry && stepTry.k === key(c) && !ringTried.has(key(c) + '@' + planBand) && !feetFor(bot, c).some(f => !footBad(f))) {
         // NO STAND AND NO PILLAR FOOT: a ring - the layer's walkway of our own filler (ring.js), laid once a cell a band; the
         // cell is then NOT TRIED this step (no miss): the next pick finds the ring's top in the walk
         ringTried.add(key(c) + '@' + planBand)
@@ -2119,6 +2529,16 @@ async function placeCell (bot, c, j = job) {
         //  and the cell tried again with the walk it opens; a ring only where the design has no such way)
         const cleared = await clearDesignWay(bot, c)
         if (cleared) return why(`not tried: ${cleared} of our strays taken off the castle's own way up - its stand comes with the next pick${whereFrom()}`)
+        // (A FLOOR OFF MY WALK FOR IT FIRST - the lift: a stand of a floor no walk climbs to, or a pillar foot on one, a tower of
+        //  ours away; up there its walk stand or its pillar as on any floor, and the floor's other cells with the next picks)
+        if (await liftFor(bot, c, liftTargets(bot, c))) {
+          if (act.reach(bot, pos, 4.3)) return true
+          const rs3 = reachStandFor(bot, pos)
+          if (rs3) { const r3 = await goSite(bot, new goals.GoalBlock(rs3.x, rs3.y, rs3.z), 'place', { shouldStop: cellStop }); if (r3 && r3.why === 'shut in') return why('shut in - the escape has the body'); if (act.reach(bot, pos, 4.3)) return true }
+          const f3 = feetFor(bot, c).find(f => !footBad(f))
+          if (f3 && await pillarTo(bot, c, f3) && act.reach(bot, pos, 4.3)) return true
+          return why(`not tried: a lift up to a floor off my walk beside it - its stand comes with the next pick${whereFrom()}`)
+        }
         const laid = await ringFor(bot, c)
         if (laid) {
           const rs2 = reachStandFor(bot, pos)
@@ -2131,10 +2551,21 @@ async function placeCell (bot, c, j = job) {
         return why(`not tried: no stand in my walk reaches it${pillared ? ', and the pillar did not get there' : ''} - the look-at walk next time${whereFrom()}`)
       }
     }
-    const goal = faces ? new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces, LOS: true }) : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 })
+    // THE SEARCH'S "NONE" IS THE VERDICT WHILE OTHER WORK WAITS: current, uncapped, and no stand of it within a player's reach
+    // of the cell - no pillar got there, no stand the long way round, no ring (all above). The look-at walk that came next
+    // reached 11 of 59 such cells in the last evening's five hours and ran its 30s out on the other 48 (1450s for 153s of
+    // arrivals; a placed block every 146s against 5s for the rest), laying its stepping stones on the site as it went, and
+    // both of a day's first tries on 2026-11-14 (61s, the step ended with nothing placed). A miss, as that walk's timeout was
+    // - the cell rests, a block placed beside it wakes it - without the walk. The walker stays the last resort where it is
+    // one: the step's only ready cell or the job's last cells (stepTry.alone), a search with no answer (stale, capped, shut
+    // in), and every caller that is not the build step's own try
+    if (rs === false && stepTry && stepTry.k === key(c) && !stepTry.alone && !act.reach(bot, pos, 4.3)) return why(`no stand to get within reach from (the walk search current: none in reach of it, no pillar foot, no ring) - not walked while other cells wait${whereFrom()}`)
+    // (an EMPTY cell has no face to see: a look-at goal ends on a ray that meets the block, and through air it never does - the
+    //  walker would run its whole time out beside the cell. Near it instead - the scaffold's own goal; the support goes in from there)
+    const goal = faces ? new goals.GoalPlaceBlock(pos, bot.world, { range: 4, faces, LOS: true }) : empty ? new goals.GoalNear(pos.x, pos.y, pos.z, 3) : new goals.GoalLookAtBlock(pos, bot.world, { reach: 4 })
     // (why the walker walks, said with its outcome: the next sample tells the cells the search has no stand for from the
     //  ones it cannot answer)
-    const r = await goSite(bot, goal, 'place', { shouldStop: cellStop, why: rs ? `its stand ${move.fmt(rs)} in my walk was not enough` : rs === false ? 'no stand in my walk reaches it' : 'the walk search has no answer from here' })
+    const r = await goSite(bot, goal, 'place', { shouldStop: cellStop, why: rs ? `its stand ${move.fmt(rs)} in my walk was not enough (the eye ${bot.entity.position.offset(0, 1.62, 0).distanceTo(new Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)).toFixed(2)}b from the cell, the body at ${bot.entity.position.x.toFixed(2)},${bot.entity.position.y.toFixed(2)},${bot.entity.position.z.toFixed(2)})` : rs === false ? 'no stand in my walk reaches it' : offIsland ? 'no stand of the floor I am on reaches it - off it' : 'the walk search has no answer from here' })
     if (r.why === 'shut in') return why('shut in - the escape has the body') // (no miss of the cell's: the step ends)
     if (!r.ok && cellOutOfTime() && !act.reach(bot, pos, 4.8)) return why(`could not get within reach (its ${CELL_REACH_MS / 1000}s ran out)${whereFrom()}`) // (never "stopped": that word ends the step)
     // (a cell high over us: the planner won't tower toward a "see this face" goal - it never found one for the nave's
@@ -2178,6 +2609,12 @@ async function placeCell (bot, c, j = job) {
       // "blockUpdate did not fire")
       const filler = inv.items(bot).find(i => FILLER_ITEMS.test(i.name))
       if (!filler) return why('nothing to click and no filler for a temporary support')
+      // IN REACH OF THE CELL BEFORE ITS SUPPORT: the support went in first, from wherever the body stood - act.place's own
+      // walk to a cell 26 blocks off across the site, no stand search, no legs: "place cobblestone at <x,y,z>: could not get
+      // within reach (noPath) from <x,y,z>" eleven times in a step, 105s of its 227s, and a support that did go in stood by a
+      // cell the body then never reached, 2026-11-14 20:03-20:05. As a player: walk to the place, then put the prop in. The
+      // cell's own way there (its stand, its legs, its misses by their names); from there the support is a block at arm's length
+      if (!act.reach(bot, pos, 4.3) && !await timed('reach', getInReach(null, true))) return false
       const me = bot.entity.position.floored()
       let supported = false
       for (const p of plans) {
@@ -2189,7 +2626,7 @@ async function placeCell (bot, c, j = job) {
         if (sp.x === me.x && sp.z === me.z && (sp.y === me.y || sp.y === me.y + 1)) continue
         const spb = world.at(bot, sp.x, sp.y, sp.z)
         if (!spb || !(world.isAirish(spb) || world.isLiquidWater(spb))) continue
-        if (await placeSupport(bot, sp, j, { noPillar: !!c.hole })) { supported = true; break }
+        if (await placeSupport(bot, sp, j, { noPillar: !!c.hole })) { supported = true; props = propLaid.slice(); break }
       }
       if (!supported) return why('nothing to click and no temporary support would go in')
     }
@@ -2247,13 +2684,60 @@ async function placeCell (bot, c, j = job) {
     const gate = /_fence_gate$/.test(c.name) && DIRS[c.want.facing] && !DIRS[c.want.facing][1]
     if (open != null && open !== c.want.open) await act.useOn(bot, pos, null, { accept: b => String(propsOf(b).open) === c.want.open, allowZones: ['build', 'base'], yaw: gate ? yawOf(c.want.facing) : null })
   }
-  if (cellDone(bot, c) === true) return true
+  if (cellDone(bot, c) === true) { supForget(c); if (props && props.length && j === job) await takeProps(bot, props).catch(e => log('build', `taking the support back threw: ${e.message}`)); await openHatches(bot).catch(() => {}); return true }
   // placed, but not what the blueprint shows: out again (our own cell), and the failure counts
   const b = bot.blockAt(pos)
   log('build', `${c.name} at ${move.fmt(c)} came out ${b ? stateOf(b) : '?'} (want ${JSON.stringify(c.want || wantOf(c))}) - taking it out again`)
   // (poured water is no block to dig out)
   if (!c.pour) await act.dig(bot, pos, own)
   return why('came out in the wrong state - taken out again') // (was "unlogged": 430s of the evening's misses; audit)
+}
+
+// THE PROP COMES OUT AGAIN once the block it was put in for stands - as a player takes his own scaffold block back while
+// he still stands beside it. Left where they went in, the supports WERE the site's scaffold: 29 in a round, 1039 standing
+// "from the band up, holding a finished cell, or out of reach" for the finish to take down a walk at a time (13 in a 384s
+// teardown), in the way of stands and walks meanwhile, 2026-11-14 21:50. From the top of what was laid, each block only
+// while: it is still our filler and no cell of the build; it went into no water and holds none back, nothing rests or
+// hangs on it (propHolds); no part of my body stands on it; and it is in arm's reach from where I stand - never walked to.
+// What stays, stays on the ledger for the teardown, as before. (Its drop is not fetched: it falls where it falls, picked
+// up when a walk passes over it - no walk is made for it on a roof's edge)
+let propsBack = 0
+function propHolds (bot, p) {
+  // (WATER OR LAVA beside or over it: it is the dam - a support by a pour's cell, one that shut a cave's flow; taken out,
+  //  the well's source ran across the floor; audit S1-a)
+  for (const [dx, dy, dz] of ALL_FACES) { if (dy < 0) continue; const b = world.at(bot, p.x + dx, p.y + dy, p.z + dz); if (b && (world.isWaterBlock(b) || world.isLavaBlock(b))) return true }
+  const up = world.at(bot, p.x, p.y + 1, p.z)
+  if (up && (world.FALLING_RE.test(up.name) || GRAVITY_RE.test(up.name))) return true // (sand, gravel, powder, an anvil on it)
+  for (const [dx, dy, dz] of ALL_FACES) {
+    const n = { x: p.x + dx, y: p.y + dy, z: p.z + dz }
+    const q = job.index.get(key(n))
+    if (q && ((q.sup && key(q.sup) === key(p)) || (q.attach && cellDone(bot, q) === true))) return true // (a cell hung on it)
+    // (and anything with no body of its own beside or on it - a torch of ours, a plant, a sign: it would pop off)
+    if (dy >= 0) { const b = world.at(bot, n.x, n.y, n.z); if (!b || (!world.isAirish(b) && !world.isWaterBlock(b) && b.boundingBox === 'empty')) return true }
+  }
+  return false
+}
+async function takeProps (bot, laid) {
+  const gone = new Set()
+  for (const p of laid.slice().reverse()) {
+    const b = world.at(bot, p.x, p.y, p.z)
+    if (!b || !FILLER_ITEMS.test(b.name) || p.wet || job.index.has(key(p)) || propHolds(bot, p)) break
+    const f = world.feetPos(bot)
+    if (p.x === f.x && p.z === f.z && p.y < f.y && f.y - p.y <= 2) break // (the column under my feet)
+    // (and any block the HITBOX rests on - the body half over the next column stands on the prop from beside it; audit S1-b)
+    if (require('./gather').standingOn(bot).some(q => q.x === p.x && q.y === p.y && q.z === p.z)) break
+    const v = new Vec3(p.x, p.y, p.z)
+    if (!act.reach(bot, v, 5)) break
+    if (!await act.dig(bot, v, { force: true, allowZones: ['build', 'base'], timeoutMs: 6000, noWalk: true, reachMax: 5 })) break
+    gone.add(key(p)); propsBack++
+  }
+  if (gone.size) {
+    mem.update(m => { m.scaffold = (m.scaffold || []).filter(q => !gone.has(key(q))) }); surveyCache = null
+    // (a prop the walk search stood a cell on is a floor gone: that search is no answer now - a leg to a stand on it would
+    //  fail and mark the cell bad for ten minutes; only then, no search for the rest; audit S1-c)
+    if (reach && [...gone].some(k => { const [x, y, z] = k.split(',').map(Number); return reach.cells.has(key({ x, y: y + 1, z })) })) reach = null
+  }
+  return gone.size
 }
 
 // Place as much as the pack allows. Returns {placed, blockedOn: item|null, done}.
@@ -2299,13 +2783,13 @@ let cellEnd = Infinity // (the chosen cell's deadline: buildStepInner sets it as
 const cellStop = () => (!!stepStop && stepStop()) || Date.now() > cellEnd
 const cellOutOfTime = () => Date.now() > cellEnd && !(stepStop && stepStop())
 async function buildStep (bot, opts = {}) {
-  try { return await buildStepInner(bot, opts) } finally { if (myPillar.length) await descendPillar(bot).catch(() => {}); stepStop = null; cellEnd = Infinity } // (no stale stop for later walks: goSite's default)
+  try { return await buildStepInner(bot, opts) } finally { if (myPillar.length) await descendPillar(bot).catch(() => {}); if (myLifts.length) await liftDown(bot).catch(() => {}); stepStop = null; cellEnd = Infinity } // (no stale stop for later walks: goSite's default)
 }
 async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   stepStop = shouldStop || null
   myPillar = [] // (a walk's tower from outside a step - the teardown's, the finish's - is no pillar of this one; audit)
   missingAnchorItems = [] // (this step's own, or none: a step that ends another way leaves no stale list; audit)
-  const t0 = Date.now(); const supports0 = supportsLaid; const pl0 = pillarLaid; const pd0 = pillarDug
+  const t0 = Date.now(); const supports0 = supportsLaid; const pl0 = pillarLaid; const pd0 = pillarDug; const pb0 = propsBack
   holdsMs = 0; holdsPasses = 0 // (this step's own)
   let roomMs = 0 // (the doorway checks' own time this step: the profile)
   let fillerTopUps = 0 // (mid-step scaffold top-ups this step: bounded)
@@ -2315,12 +2799,25 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   let placedAtRise = 0 // (placed when it last rose: a rise only after a placement since - bandRises)
   let bandFloor = null // (the step's first band: it rises within the step at most two layers over it - bandRises)
   if (!ensureSnapshot(bot) || !ensureFoundation(bot)) return { placed, blockedOn: null, done: false }
+  // ONTO THE SITE'S GROUND FIRST: the walk search starts only within REACH_MARGIN of the box (walkReach's inArea), and home
+  // - where every round begins (the director's "to site" goes home, the home jobs come first) - lies past it. From there the
+  // search had no answer, the step's first cell went to the 30s look-at walker blind: 10 of 104 "no answer" walks since
+  // 2026-11-14 12:00, ending in the ground room under a cell 10-13 up, each a miss against the cell. A plain walk onto the
+  // nearest ground inside the margin first (a few blocks from home); one that fails leaves the walker its try, as before
+  { const b = job.box; const f = world.standCell(bot); const m = REACH_MARGIN - 2
+    if (!onSiteGround(f)) {
+      const tgt = { x: Math.min(b.x2 + m, Math.max(b.x1 - m, f.x)), y: f.y, z: Math.min(b.z2 + m, Math.max(b.z1 - m, f.z)) }
+      const r = await move.travel(bot, tgt, { range: 2, anyY: true, label: 'onto the site', maxMs: 60000, shouldStop: shouldStop || undefined }).catch(() => null)
+      log('build', `off the site's ground at ${move.fmt(f)} (the walk search starts only on it): ${r && r.ok ? 'walked onto it, at ' + move.fmt(world.standCell(bot)) : `could not walk onto it (${r ? r.why : 'no answer'}) - the walker from here, as before`}`)
+      if (shouldStop && shouldStop()) return { placed, blockedOn: null, done: false }
+    }
+  }
   // (a cell that keeps failing is tried again ever more rarely - 5 min after its third miss, then 10, 20... up to 2h -
   //  never forgotten: the same window glass cells took three tries each, every step, minutes of every day, 2026-09-26)
   const failed = { get: k => { const f = cellFails.get(k); return f ? f.n : 0 }, set: (k, n) => cellFails.set(k, { n, at: Date.now() }) }
   // (after ONE miss: a step's tries were 0 of 8 and 0 of 9 - 30-40s each, walking 25 blocks to cells the reach could not
   //  make, three tries apiece before they rested, while cells in reach waited, 2026-09-27)
-  const resting = k => { const f = cellFails.get(k); if (!f || f.n < 1) return false; return Date.now() - f.at < Math.min(2 * 3600000, 3 * 60000 * Math.pow(2, f.n - 1)) }
+  const resting = k => restLeft(k) > 0 // (one rule with the window's withdraw: restLeft)
   // what the lowest layers wait on, as last seen - reported even when the step placed something: a step that placed 19
   // scattered cobblestone in seven minutes counted as progress while 50 glass cells held every layer above them, and
   // the glass's sand and fuel were only fetched when a step placed nothing - at dusk, too late (2026-09-26)
@@ -2339,7 +2836,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
   //  class the step's time goes to, the numbers stripped; audit 2026-09-29)
   const missed = (why, ms) => { const k = String(why || 'unlogged').replace(/\s*[-(].*$/, '').replace(/-?\d+/g, '#').slice(0, 40) || 'unlogged'; const e = prof.why[k] || (prof.why[k] = { n: 0, ms: 0 }); e.n++; e.ms += ms }
   placeProf.reach = 0; placeProf.dig = 0
-  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass${compWait.size ? `, ${compWait.size} cells wait for a way in` : ''}${regionMs ? `, stand regions ${regionMs}ms` : ''}${roomMs ? `, doorway checks ${roomMs}ms` : ''}); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports, ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
+  const profLog = () => { if (prof.tries) log('build', `step profile: ${placed}/${prof.tries} placed, ${Math.round(prof.ms / prof.tries)}ms a try (${placed ? Math.round(prof.okMs / placed) : 0}ms a placed block), ${(prof.dist / prof.tries).toFixed(1)} blocks off on average, ${Math.round(prof.pick / Math.max(1, prof.tries))}ms choosing each (holds ${holdsPasses ? Math.round(holdsMs / holdsPasses) : 0}ms a pass${compWait.size ? `, ${compWait.size} cells wait for a way in` : ''}${regionMs ? `, stand regions ${regionMs}ms` : ''}${roomMs ? `, doorway checks ${roomMs}ms` : ''}); a try: ${Math.round(placeProf.reach / prof.tries)}ms getting in reach, ${Math.round(placeProf.dig / prof.tries)}ms clearing, ${Math.round((prof.ms - placeProf.reach - placeProf.dig) / prof.tries)}ms placing; ${Math.round((prof.ms - prof.okMs) / 1000)}s of ${Math.round(prof.ms / 1000)}s on the ${prof.tries - placed} misses${Object.keys(prof.why).length ? ' (' + Object.entries(prof.why).sort((a, b) => b[1].ms - a[1].ms).slice(0, 4).map(([k, e]) => `${k} x${e.n} ${Math.round(e.ms / 1000)}s`).join(', ') + ')' : ''}; the walks laid ${reflex.plannerPlacedSince(t0).filter(q => q.x >= job.box.x1 - 3 && q.x <= job.box.x2 + 3 && q.z >= job.box.z1 - 3 && q.z <= job.box.z2 + 3).length} blocks on the site, the builder ${supportsLaid - supports0} supports (${propsBack - pb0} taken back out), ${pillarLaid - pl0} pillar blocks up, ${pillarDug - pd0} taken back down`) } // (where the site's scaffold comes from - ~1 a castle block, 2026-09-29)
   while (Date.now() - t0 < maxMs) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (shouldStop && shouldStop()) break
@@ -2362,6 +2859,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (a two-step cell is ready only with both steps' items in hand: the pot went in without its flower, the step "failed"
     //  and rested, and a second walk came later for the plant - 5 of a step's 16 misses, 2026-09-28)
     const has = c => (stepOf(c, world.at(bot, c.x, c.y, c.z)) === 'then' ? items.some(i => i.name === c.then) : !!pickItem(bot, c, items) && (!c.then || items.some(i => i.name === c.then)))
+    // (THE ITEM A CELL `has` IS SHORT OF: a pot in hand and its flower not waits on the flower - one reading for the name the
+    //  director steers by and for the anchors' withdraw list, which took more pots and never the flower; audit 50-(b))
+    const missingFor = c => (stepOf(c, world.at(bot, c.x, c.y, c.z)) !== 'then' && c.then && pickItem(bot, c, items) ? c.then : stepItem(bot, c))
     // what the band is really held up by: a structural cell of the lowest layers first. A carpet or a pot holds
     // nothing up - reported first, the director chased unreachable sheep for "red_carpet" while two granite stairs
     // and twelve panes (sand) were what kept the walls from rising (2026-09-23)
@@ -2374,12 +2874,12 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       // (and EVERY anchor's missing item, for the window's withdraw: one named a round, the band anchored by two - a birch
       //  fence gate and dark oak stairs - got one each round, and the stairs lost the pack's room to lower cells' blocks, the
       //  band at y125 for an hour with 182 in the chest, 2026-10-03)
-      missingAnchorItems = [...new Set(lowAll.filter(c => !has(c) && anchors(c)).map(c => stepItem(bot, c)).filter(Boolean))]
+      missingAnchorItems = [...new Set(lowAll.filter(c => !has(c) && anchors(c)).map(missingFor).filter(Boolean))]
       // (then infill waiting on its material - glass: the sand trips are still wanted, only the layers don't wait)
       const m = low || todo.filter(c => c.attach && !cellUnsourced(c) && supportThere(bot, c)).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c) && c.y <= lowestAll + 1).find(c => !has(c)) || todo.filter(c => infillCell(c) && !cellUnsourced(c)).sort((a, b) => a.y - b.y).find(c => !has(c)) || lowAll.find(c => !has(c))
       // (the item really missing: a pot in hand and its flower not is waiting on the flower - named for the director; audit)
       waitingCell = m || null
-      return m ? (stepOf(m, world.at(bot, m.x, m.y, m.z)) !== 'then' && m.then && pickItem(bot, m, items) ? m.then : stepItem(bot, m)) : null
+      return m ? missingFor(m) : null
     }
     // the lowest two layers of what we HAVE the blocks for: 24 missing glass panes in a wall no longer hold up
     // every brick above them (the windows go in when the glass comes)
@@ -2407,7 +2907,13 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  or two up stood ready in hand; 2026-10-03. Still never past the band's 3-layer cap: walls rise together)
     // (added to the window, never in place of it: the window keeps an anchor below its floor that waits on a blocker, and a
     //  cell at lowestAll+4; replaced, the anchor was never offered and the band could stall; audit)
-    if (doable.length < 16 && minY <= lowestAll + 3) { const dk = new Set(doable.map(key)); for (const c of structural) if (c.y <= lowestAll + 3 && !dk.has(key(c)) && tryable(c)) doable.push(c) }
+    // (THIN BY WHAT CAN BE TRIED: counted by its cells whatever their state, two layers of 20 cells kept out by their own blockers
+    //  - a shared miss, a waiting column, no face - and held back this step read as a full window, the three layers over them
+    //  were never added, and the step ended "nothing ready ... 9 doable none clickable" with 0 placed, 154 spruce planks in the
+    //  pack and the y130 anchors "ready, out of the step's window (its floor y127)" - the round went home and out for acacia
+    //  leaves, 2026-11-14 19:50. The cells a try can still go to this step are the window's measure)
+    let live = 0; for (const c of doable) { if (!holdBack.has(key(c)) && tryable(c) && ++live >= 16) break }
+    if (live < 16 && minY <= lowestAll + 3) { const dk = new Set(doable.map(key)); for (const c of structural) if (c.y <= lowestAll + 3 && !dk.has(key(c)) && tryable(c)) doable.push(c) }
     // (the ground swaps once nothing else is ready: nothing else ever does them, and left out for good the build could never
     //  read done; audit)
     if (!doable.length) { const gh = todo.filter(c => !c.attach && has(c) && groundHeldBy(bot, c)); if (gh.length) { const y0 = Math.min(...gh.map(c => c.y)); doable = gh.filter(c => c.y <= y0 + 1) } }
@@ -2442,7 +2948,9 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  55 cells on the swap list by 2026-09-29, 50 of them holes. Kept open, the column over it waits, and the band rises
       //  past it all the same: the anchor over it takes a shared miss (anchorMiss). Operator: "i dont want this to ruin a
       //  build". A solid wrong block is caught above; an item with no route at all is covered as before)
-      if (det.has(stepItem(bot, b)) && !sealSaid.has('det:' + key(b))) { sealSaid.add('det:' + key(b)); log('build', `keeping ${b.name} at ${move.fmt(b)} open - out of stock; the column over it waits`) }
+      // (said at an item's 1st, 2nd, 4th, 8th... cell, with the count: one line a cell was 126 andesite lines in one pass after
+      //  every restart - the watchdog's loop alarm each time, 2026-11-15 04:31)
+      if (det.has(stepItem(bot, b)) && !sealSaid.has('det:' + key(b))) { sealSaid.add('det:' + key(b)); const n = (detSaidN.get(b.name) || 0) + 1; detSaidN.set(b.name, n); if ((n & (n - 1)) === 0) log('build', `keeping ${b.name} at ${move.fmt(b)} open - out of stock; the column over it waits (${n} ${b.name} cell${n > 1 ? 's' : ''} kept open so far)`) }
       if (failsOf(b) >= 1 && !(cellFails.get(key(b)) || {}).shared) { noteToSwap(b, (world.at(bot, b.x, b.y, b.z) || {}).name || 'air'); return false } // (covered, never forgotten: the endgame's worklist; audit) // (its OWN miss only: a patch's shared rest proves nothing about it, and covered it is sealed in and dropped - a hole in the wall; audit)
       return !!belowWaits(bot, c) // (the rule itself, with anchorable: one definition - the branches above are its notes)
     }
@@ -2462,6 +2970,48 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     }
     waiting = missingItem()
     waitingHolds = !!waiting && !!waitingCell && anchors(waitingCell)
+    // (THE CASTLE'S OWN WAY HELD BY A HOLE UNDER IT: an access cell - a stair the finished build walks up (accessFor) - standing
+    //  in the column over a hole kept open for its out-of-stock item cannot go in till the hole does (waitCols), so that item
+    //  holds every cell the way leads to. Named "detached - holding nothing", no morning went for it: a potted allium under
+    //  the castle's stair held the way to 348 upper cells, 536 clay short and not one clay trip all day, 1 block a minute,
+    //  2026-11-15. Named as the band's wait - the round's bottleneck trip goes for its raw while the day is young. What
+    //  the step reports only: every hold of the window stands)
+    if (!waitingHolds && accessMemo && accessMemo.job === job) {
+      let best = null; let top = null; const wst = wayStock(bot)
+      for (const [k, n] of accessMemo.cells) {
+        { const c0 = job.index.get(k); if (c0 && !c0.clear && (!top || n > top.n) && cellDone(bot, c0) !== true) top = { n, c: c0 } }
+        if (best && n <= best.n) continue
+        const c = job.index.get(k); if (!c || c.clear || cellDone(bot, c) === true) continue
+        // (what really holds it: its own item out of stock, else down the chain of "the cell under it waits" (belowWaits - the
+        //  rule that keeps it out) to the first cell whose item is out of stock. NOT the column's lowest waiting hole (waitCols
+        //  is the anchor's rule only - a carpet 8 over a jack o'lantern was named held by it while the carpet itself was the
+        //  one out of stock, 05:12; audit)
+        let hole = null
+        // (OUT OF STOCK BY THE STOCK ITSELF, not only by det: det is read off the band's structural cells, and a pot, a carpet or a
+        //  torch never is one - the stairs that make the castle's own way for 183 cells stood on a potted_allium whose flower_pot
+        //  had none in the pack or the chests (100 wanted, its bricks out too) and the chain said "no out-of-stock item": the way
+        //  never held the build, no clay trip, 05:10-06:33 2026-11-15)
+        let it = null
+        for (let q = c, i = 0; q && i < 12; i++) { it = wayHoldItem(bot, q, det, wst); if (it) { hole = q; break } q = belowWaits(bot, q) }
+        if (!hole) continue
+        best = { n, c, hole, it }
+      }
+      // (THE TOP WAY-MAKER WITH NO OUT-OF-STOCK HOLE in its chain, said once a cell with the chain: spruce_stairs@-2271,125,-587
+      //  led "access first" for ~200 cells from 05:10 to 06:10 and was never tried nor named held - what keeps it is the
+      //  question. Evidence only)
+      if (top && (!best || best.c !== top.c) && !topChainSaid.has(key(top.c))) {
+        topChainSaid.add(key(top.c)); if (topChainSaid.size > 200) topChainSaid.clear()
+        try {
+          const chain = []; let q = top.c
+          for (let i = 0; q && i < 12; i++) { const it = stepItem(bot, q); const wb = world.at(bot, q.x, q.y, q.z); const ho = wayHoldItem(bot, q, det, wst); chain.push(`${q.name}@${key(q)} [item ${it}${q.then && q.then !== it ? '+' + q.then : ''}${ho ? ' OUT ' + ho : ''}, done ${cellDone(bot, q)}, holds ${wb ? wb.name : '?'}, misses ${failsOf(q)}${(cellFails.get(key(q)) || {}).shared ? ' shared' : ''}]`); q = belowWaits(bot, q) }
+          log('build', `the castle's top way ${top.c.name}@${key(top.c)} (for ${top.n} cells) holds on no out-of-stock item - its chain: ${chain.join(' <- ')}${q ? '' : ' (nothing under the last waits)'}`)
+        } catch {}
+      }
+      if (best) {
+        waiting = best.it; waitingHolds = true
+        if (wayHoldSaid !== best.it + '@' + key(best.hole)) { wayHoldSaid = best.it + '@' + key(best.hole); log('build', `the castle's own way ${best.c.name}@${key(best.c)} (for ${best.n} cells) waits on the ${best.it} ${best.hole === best.c ? 'it is made of' : 'kept open under it at ' + key(best.hole)} - out of stock: it holds the build`) }
+      }
+    }
     // (EVERY anchor in hand that is never doable - the cell under it waits - takes its miss at the step's end, not only the
     //  first: one a step, the band rose one cell a step - "andesite_wall ... anchors the band but is never doable" ending
     //  step after step with 4,480 in hand, 2026-09-29; audit. Shared where the cell under it waits: nothing seals it)
@@ -2513,7 +3063,11 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // build waits for its neighbours (trying it costs ~20s of failed placing, and a wall of x-axis logs
     // placed out of order was nothing but failures)
     const clickable = c => clickableNow(bot, c)
-    const supportable = c => supportableNow(c)
+    const supportable = c => supportableNow(bot, c)
+    // (asked here first, the event loop back every 8ms: a cell not yet read costs its faces' and its column's blocks)
+    { let sl = Date.now(); for (const c of doable) { const m = supMemo.get(key(c)); if (!(m && Date.now() - m.t < 30000) && !c.attach && !c.twin && !clickable(c)) supportableNow(bot, c); if (Date.now() - sl > 8) { await new Promise(r => setImmediate(r)); sl = Date.now() } } }
+    // (and an axis with no way in of its own, ever, takes any face now - axisHopeless)
+    for (const c of doable) if (c.want && c.want.axis && !clickable(c) && !supportable(c) && axisHopeless(bot, c)) { relaxAxis(c); supMemo.delete(key(c)); log('build', `${c.name} at ${move.fmt(c)} goes in with any axis (no face nor support on its own axis, and nothing still to come there)`) }
     const ready = doable.filter(c => !holdBack.has(key(c)) && (clickable(c) || supportable(c)))
     if (!ready.length) {
       // (and what anchors the band there - the lowest cell that holds the layers: the step's end is its reach, not the
@@ -2542,7 +3096,57 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     // (ACCESS FIRST - accessFor: a cell that makes the finished build's way to the window's stand-less cells, before one in reach)
     if (ready.length > 1) await accessFor(bot, todo.filter(q => !q.foundation && q.y <= lowestAll + 3))
     const acc = q => accessHas(q) ? 1 : 0
-    ready.sort((a, b) => (clickable(b) - clickable(a)) * 100 + (acc(b) - acc(a)) * 75 + (inReach(b) - inReach(a)) * 50 + (a.y - b.y) + world.dist3(a, me) - world.dist3(b, me))
+    // WHAT MY WALK REACHES FIRST - a stand for it in the walk search's set (standOnWalk), in arm's reach, or a foundation cell
+    // (its own outside stand): before any cell that needs a pillar, a ring or the walker to get to. By distance and height
+    // alone, a round begun on the ground went at the upper floor's cells one by one - "no walk stand, no pillar foot", "not
+    // tried", 13 and 27 cells resting with them, 110s at two strays no walk got to - three minutes before the first block; and
+    // up on a floor the next pick was a cell whose stand lay off it, the walker took the body down to the ground and the
+    // floor's other cells were left, 2026-11-14 20:10-20:25. As a player: what I can walk to from here, then the climb.
+    // Only with a current, uncapped search - without one every cell ranks alike, as before
+    // AND THE NEAREST BY THE WALK, NOT BY THE LINE: on the upper floors the next cell "5 blocks off" lay a floor down or behind
+    // a wall - legs of 93, 104, 82, 104 cells, 25-31s each, for two to five blocks a walk: 19 placed in the first 3.5 minutes
+    // of a day with the whole site in the search, 2026-11-14 20:44-20:48. The distance in the order is the route's length to
+    // the cell's nearest stand (standWalk's dep) - from a search begun where I stand: redone here when the body has moved off
+    // its start and no ready cell is in arm's reach (a walk is coming: goSite would redo it anyway); the straight line where
+    // there is no such search, and for a cell with no stand in it
+    await walkReach(bot).catch(() => null)
+    // (asked once a cell before the sort, the event loop back every 8ms: a fresh search's first pick asks it of every ready cell)
+    const onW = new Map(); const wd = new Map(); const twoW = new Map(); const rank = new Map()
+    // (THE RANKS FIRST, THE DISTANCE ONLY BETWEEN EQUALS: summed, a route of 80-130 cells outvoted "clickable" (100) and
+    //  "access first" (75) - the straight line rarely passed 30 and never did. The ranks weigh against each other as they
+    //  always have; the layer and the walk's length order the cells of one rank - nearer by the walk beats a layer lower,
+    //  within the band's cap. A foundation cell has no stand in the set: its straight line, so it goes first in its rank -
+    //  meant; audit E5-b, E5-d)
+    // (AND WHAT I CAN DO AND COME BACK FROM, FIRST - twoW, a tier of its own under "on my walk": a cell in arm's reach, a
+    //  foundation cell, or one with a stand that has a walk back to where I stand (standWalk's two), before a cell whose
+    //  only stand is a step off this ground with no walk back - the perch, the floor a pillar took me to, are finished
+    //  before they are left. Only when the search's start is ground I can walk back to - backToStart; from the ground the
+    //  whole site is two-way and the tier says nothing)
+    const order = async () => {
+      const walkKnown = reachCurrent(bot) && !reach.capped
+      const fromHere = walkKnown && reachFromHere(bot)
+      const backKnown = walkKnown && !!reach.twoWay && backToStart(bot)
+      let sl = Date.now()
+      for (const q of ready) {
+        const near = inReach(q); const v = walkKnown && !near ? standWalk(bot, q) : null
+        onW.set(q, (walkKnown && (q.foundation || near || (v && v.ok))) ? 1 : 0)
+        twoW.set(q, (backKnown && (q.foundation || near || (v && v.ok && v.two))) ? 1 : 0)
+        wd.set(q, near ? 0 : fromHere && v && v.dep != null ? v.dep : world.dist3(q, me))
+        if (Date.now() - sl > 8) { await new Promise(r => setImmediate(r)); sl = Date.now() }
+      }
+      for (const q of ready) rank.set(q, onW.get(q) * 1000 + twoW.get(q) * 500 + clickable(q) * 100 + acc(q) * 75 + inReach(q) * 50)
+      ready.sort((a, b) => (rank.get(b) - rank.get(a)) || ((a.y - b.y) + wd.get(a) - wd.get(b)))
+    }
+    await order()
+    // (THE SEARCH FROM HERE when the body has left its start and the order's first cell wants a walk - goSite would search
+    //  again for that walk anyway: one search a walk, none while the cells in arm's reach go in. AND when I cannot walk
+    //  back to its start at all - backToStart: off a perch, down a drop, the set is somebody else's, a cell in arm's reach
+    //  or not: kept, the perch's stands were "walk stands" to a body with no way back to them, 2026-11-14 21:29. No set
+    //  from here - perched: the set AND the verdict I had, the pair as it was; audit E5-a)
+    if (reachCurrent(bot) && !reachFromHere(bot) && (!inReach(ready[0]) || (!!reach.twoWay && !backToStart(bot)))) {
+      const prev = reach; const prevShut = shutIn; reach = null; await walkReach(bot).catch(() => null)
+      if (!reach) { reach = prev; shutIn = prevShut } else await order()
+    }
     const c = ready[0]
     cellEnd = Date.now() + CELL_REACH_MS // (this cell's reach budget: cellStop)
     const tp = Date.now(); const d0 = world.dist3(c, bot.entity.position)
@@ -2554,6 +3158,8 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
     //  own try - the same ground defeats both, 8s + 14s for one cell; a quick no-path falls through to it; audit)
     // (on our pillar and the next cell out of its reach: down first - the next walk starts from the ground)
     if (myPillar.length && !inReach(c)) await descendPillar(bot)
+    // (and off the lifts once the next cell has no stand in this floor's walk: its walk starts from below - liftDown)
+    if (myLifts.length && !inReach(c)) { const v = standWalk(bot, c); if (v && !v.ok) await liftDown(bot) }
     let skipTry = false
     // (c.ownWay: a cell whose cluster stand's walk ran out goes its own way next time - placeCell's look-at walk, which may
     //  find a wall top; the same unreachable stand was chosen again every step and the look-at walk never ran; audit)
@@ -2592,7 +3198,7 @@ async function buildStepInner (bot, { shouldStop, maxMs = 10 * 60000 } = {}) {
       //  cell's own way anyway - 14 of the day's 85 'site place' timeouts began at such a stand, 2026-10-07. Not a closed room
       //  (that waits above): its own way - getInReach's pillar from a foot the search reaches, then the walker)
       if (st && st.out) log('build', `no stand for ${c.name} at ${move.fmt(c)} in my walk from ${move.fmt(world.standCell(bot))} (the nearest ${move.fmt(st)}; its room leads out - no closed room) - its own way`)
-      if (st && !st.out && (st.n >= 3 || (st.n >= 1 && reachCurrent(bot) && reach && !reach.capped && reach.cells.has(key(st)) && !detourTooLong(bot, st)))) {
+      if (st && !st.out && (st.n >= 3 || (st.n >= 1 && reachCurrent(bot) && reach && !reach.capped && reach.cells.has(key(st))))) {
         const tw = Date.now()
         const r = await goSite(bot, new goals.GoalBlock(st.x, st.y, st.z), 'place', { shouldStop: cellStop }).catch(() => null)
         placeProf.reach += Date.now() - tw
@@ -2978,7 +3584,7 @@ function wayOut (bot, c, from = null, withC = true) {
     // (open sky is out only where a tower may rise: below the floor a column with a cell of the build over it is the
     //  climb's "no tower - a cell of the build", and read as a way out it kept the wall-opening escape from running -
     //  the south rim's trench, walk and climb failing in turn, 2026-09-29)
-    if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; for (let y = p.y + 1; y <= b0.y2; y++) { const q = job.index.get(`${p.x},${y},${p.z}`); if (q && !q.clear && !(q.foundation && q.name === 'cobblestone')) clear = false } /* (a filler foundation cell a tower may rise through: the protector's rule) (at ANY height, not only under the floor: a sky column through the layer's unbuilt cells read as an exit the tower may never take - the crawlspace at -2269,121,-583 was "a way out" to the search through eleven give-ups, 2026-09-29; audit) */ if (clear) { lastExit = p; return true } }
+    if (!job.index.has(key(p)) && world.openSky(bot, p) && !isC(p.x, p.y, p.z)) { let clear = true; for (let y = p.y + 2; y < p.y + 22; y++) if (isC(p.x, y, p.z)) clear = false; for (let y = p.y + 1; y <= b0.y2; y++) { const q = job.index.get(`${p.x},${y},${p.z}`); if (q && !q.clear && !(q.foundation && q.name === 'cobblestone')) clear = false } /* (a filler foundation cell a tower may rise through: the protector's rule) (at ANY height, not only under the floor: a sky column through the layer's unbuilt cells read as an exit the tower may never take - the crawlspace under the floor was "a way out" to the search through eleven give-ups, 2026-09-29; audit) */ if (clear) { lastExit = p; return true } }
     for (const n of W.next(p)) { const k = key(n); if (!seen.has(k)) { seen.add(k); q.push(n) } }
   }
   return false
@@ -3003,12 +3609,12 @@ function highHead (bot, p) { return world.floorTop(world.at(bot, p.x, p.y - 1, p
 // Every cell a body could stand at to place c - clusterStand's own candidates (standable, within reach, no cell of the build
 // at the feet or head): the room rule asks whether all of them lie inside a room
 function standsOf (bot, c) {
-  const eyeM = new Map(); const eyeOf = p => { const k = key(p); let v = eyeM.get(k); if (v === undefined) { v = world.eyeAt(bot, p); eyeM.set(k, v) } return v } // (one floor read a stand)
-  const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - eyeOf(p); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
+  const eyeM = new Map(); const eyeOf = p => { const k = key(p); let v = eyeM.get(k); if (v === undefined) { v = world.eyesAt(bot, p); eyeM.set(k, v) } return v } // (one floor read a stand; every height the eye can be at on it - world.eyesAt)
+  const within = (p, q) => { const dx = q.x - p.x; const dz = q.z - p.z; const h = dx * dx + dz * dz; return eyeOf(p).every(e => { const dy = q.y + 0.5 - e; return h + dy * dy <= REACH * REACH }) }
   const out = []
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -4; dy <= 1; dy++) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
-    if (!within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || highHead(bot, p) || !world.standable(bot, p.x, p.y, p.z)) continue
+    if (!within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || highHead(bot, p) || !world.standable(bot, p.x, p.y, p.z) || !holdsStill(bot, p)) continue
     out.push(p)
   }
   return out
@@ -3020,21 +3626,31 @@ function clusterStand (bot, c, ready, bad = new Set(), reachOf = null) {
   const normals = new Map(near.map(q => [q, plansFor(q).filter(pl => refOk(bot, q, pl)).map(pl => pl.off.map(v => -v))]))
   const faces = (p, q) => (normals.get(q) || []).some(nv => (p.x - q.x) * nv[0] + (p.y + 1 - q.y) * nv[1] + (p.z - q.z) * nv[2] > 0)
   const me = bot.entity.position
-  const eyeM = new Map(); const eyeOf = p => { const k = key(p); let v = eyeM.get(k); if (v === undefined) { v = world.eyeAt(bot, p); eyeM.set(k, v) } return v } // (one floor read a stand)
-  const within = (p, q) => { const dx = q.x + 0.5 - (p.x + 0.5); const dy = q.y + 0.5 - eyeOf(p); const dz = q.z + 0.5 - (p.z + 0.5); return dx * dx + dy * dy + dz * dz <= REACH * REACH }
-  let best = null
+  const eyeM = new Map(); const eyeOf = p => { const k = key(p); let v = eyeM.get(k); if (v === undefined) { v = world.eyesAt(bot, p); eyeM.set(k, v) } return v } // (one floor read a stand; every height the eye can be at on it - world.eyesAt)
+  const within = (p, q) => { const dx = q.x - p.x; const dz = q.z - p.z; const h = dx * dx + dz * dz; return eyeOf(p).every(e => { const dy = q.y + 0.5 - e; return h + dy * dy <= REACH * REACH }) }
+  let best = null; const cands = []; const byRoute = reachFromHere(bot)
   for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) for (let dy = -4; dy <= 1; dy++) {
     const p = { x: c.x + dx, y: c.y + dy, z: c.z + dz }
-    if (bad.has(key(p)) || !within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || highHead(bot, p) || !world.standable(bot, p.x, p.y, p.z)) continue
-    // (never under the build: a stand below the base inside the box is the hollow - the eviction sends the bot home from it)
-    if (p.y < job.box.y1 && p.x >= job.box.x1 && p.x <= job.box.x2 && p.z >= job.box.z1 && p.z <= job.box.z2) continue
+    if (bad.has(key(p)) || !within(p, c) || job.index.has(key(p)) || job.index.has(key({ x: p.x, y: p.y + 1, z: p.z })) || highHead(bot, p) || !world.standable(bot, p.x, p.y, p.z) || !holdsStill(bot, p)) continue
+    // (never under the build's floor - move.underFloorAt: the eviction sends the bot home from it; the open slope inside the
+    //  box below the base is the castle's own way to its gate, not the hollow)
+    if (move.underFloorAt(p)) continue
     if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ax, az]) => world.dropAt(bot, p.x + ax + 0.5, p.y, p.z + az + 0.5) > world.SAFE_DROP)) continue
     let n = 0; for (const q of near) if (within(p, q) && faces(p, q)) n++
-    const d = world.dist3(p, me)
+    // (the route's length when the search began where I stand - else the straight line: standWalk)
+    const dep = byRoute ? reach.depth.get(key(p)) : null
+    const d = dep != null ? dep : world.dist3(p, me)
     // (a stand the bot can walk to first, whatever it serves: an unreachable one is tried only when no other stands; reach
     //  null = unknown, no preference)
     const inR = !reachOf || reachOf(p) ? 1 : 0
-    if (!best || inR > best.inR || (inR === best.inR && (n > best.n || (n === best.n && d < best.d)))) best = { x: p.x, y: p.y, z: p.z, n, d, inR }
+    cands.push({ x: p.x, y: p.y, z: p.z, n, d, inR, dep: dep != null ? dep : null })
+  }
+  // (THE STAND THAT SERVES THE MOST - among those about as near by the route as the nearest: one that serves a cell more a
+  //  floor down, 100 cells round by the stairs, is a 30s walk for it. Twelve cells of slack: a stand a few steps along)
+  let depMin = Infinity; for (const q of cands) if (q.inR && q.dep != null && q.dep < depMin) depMin = q.dep
+  for (const q of cands) {
+    if (q.inR && q.dep != null && q.dep > depMin + 12) continue
+    if (!best || q.inR > best.inR || (q.inR === best.inR && (q.n > best.n || (q.n === best.n && q.d < best.d)))) best = q
   }
   if (best && reachOf && !best.inR) {
     // (every stand out of walking reach and HIGH - a roof's own top, 3+ over where the bot walks: no room to wait for a way
@@ -3113,7 +3729,7 @@ function foundationStand (bot, c) {
   // (from the hollow only when already IN it: sent in from the floor above - through the castle's doors, down its holes -
   //  the walk failed round after round, the bot ended stuck under the floor every other step, 2026-09-29. The holes are
   //  being filled; the hollow is the rim's inside, not a way to it)
-  { const f = world.feetPos(bot); if (!(f.y < job.box.y1 && f.x >= job.box.x1 && f.x <= job.box.x2 && f.z >= job.box.z1 && f.z <= job.box.z2)) { c.noOutside = false; return null } }
+  { const f = world.feetPos(bot); if (!move.underFloorAt(f)) { c.noOutside = false; return null } } // (IN it - move.underFloorAt)
   const lit = job.cells.some(q => q.foundation && q.name === 'torch' && world.dist3(q, c) <= 12 && cellDone(bot, q) === true)
   if (!lit && !(world.phase(bot) === "day" && bot.health >= 20)) { c.noOutside = false; return null }
   // FROM INSIDE THE HOLLOW when no outside stand will do - the rim's trench stands sat behind drops the walk would not take,
@@ -3513,6 +4129,19 @@ function complete (bot) {
   const s = survey(bot)
   return !!s && s.cellsLeft === 0 && s.snapshot && !s.scaffold.length && !s.holes.length
 }
+// THE ITEMS THE JOB PLACES - every cell's item and its second step's (then), a stand-in a cell accepts (acceptsFor) counted
+// with them: what a deposit keeps whole while the window cannot be read (director bandKeep, the site not loaded). Once a job
+const usesMemo = { job: null, set: null, alts: null, m: new Map() }
+function jobUses (bot, name) {
+  if (!job || !name) return false
+  if (usesMemo.job !== job) {
+    const md = world.data(bot); const set = new Set()
+    for (const c of job.cells) { if (c.clear) continue; let it = null; try { it = itemOf(c, md) } catch {} if (it) set.add(it); if (c.then) set.add(c.then) }
+    usesMemo.job = job; usesMemo.set = set; usesMemo.alts = [...set].map(n => acceptsFor(n)).filter(Boolean); usesMemo.m = new Map()
+  }
+  let v = usesMemo.m.get(name); if (v === undefined) { v = usesMemo.set.has(name) || usesMemo.alts.some(re => re.test(name)); usesMemo.m.set(name, v) }
+  return v
+}
 function siteLoaded (bot) {
   if (!job) return false
   const r = siteRegion(job)
@@ -3565,13 +4194,33 @@ async function finish (bot, { shouldStop } = {}) {
   return did > 0
 }
 
+// THE SHAFT'S HATCHES OPEN while the build goes on (job.hatches): each one in reach, shut, with its ladder under it - never
+// one the body stands on. After every placing: a hatch just placed comes out shut, and one placed shut before is opened
+// whenever the body passes by it. (A hatch that would not open rests ten minutes - after every placing a refused click was
+// paid again for each block laid beside the shaft; audit H13-1)
+const hatchFailed = new Map()
+async function openHatches (bot) {
+  if (!job || !job.hatches || !job.hatches.length) return
+  const under = new Set(require('./gather').standingOn(bot).map(key))
+  for (const c of job.hatches) {
+    const pos = new Vec3(c.x, c.y, c.z)
+    if (under.has(key(c)) || !act.reach(bot, pos, 4.3) || Date.now() - (hatchFailed.get(key(c)) || 0) < 600000) continue
+    const b = world.at(bot, c.x, c.y, c.z); const u = world.at(bot, c.x, c.y - 1, c.z)
+    if (!b || b.name !== c.name || world.isOpenTrapdoor(b) || !u || u.name !== 'ladder') continue
+    const ok = await act.useOn(bot, pos, null, { accept: b2 => world.isOpenTrapdoor(b2), noWalk: true, allowZones: ['build', 'base'] }).catch(() => false)
+    if (ok) hatchFailed.delete(key(c)); else hatchFailed.set(key(c), Date.now())
+    log('build', `the shaft's hatch at ${move.fmt(c)} ${ok ? 'opened - the ladder is the way up and down while the build goes on' : 'would not open'}`)
+  }
+}
 // THE GATES AS DRAWN, at the finish: a gate's open state is no part of "done" (counts) - the walks open them - so the last
-// round sets each one the blueprint draws open or shut, a click from beside it
+// round sets each one the blueprint draws open or shut, a click from beside it (and the shaft's hatches: job.hatches, and
+// the wooden doors - left open by the walks, move.crossDoor; the lower half's click swings both)
 async function setGates (bot, { shouldStop } = {}) {
   let n = 0
   for (const c of job.cells) {
     if (shouldStop && shouldStop()) break
-    if (!/_fence_gate$/.test(c.name) || !c.props || c.props.open == null) continue
+    const door = /_door$/.test(c.name) && !/^iron_/.test(c.name) && c.props && c.props.half === 'lower'
+    if (!(/_fence_gate$/.test(c.name) || c.hatch || door) || !c.props || c.props.open == null) continue
     const b = world.at(bot, c.x, c.y, c.z); if (!b || b.name !== c.name) continue
     let open = null; try { open = String(b.getProperties().open) } catch {}
     if (open == null || open === String(c.props.open)) continue
@@ -3610,9 +4259,16 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
   // cobblestone counts: the pack carries hundreds for the walls and the planner towers on it. Asking for dirt first sent
   // the bot to dig grass at the foot of the west cliff it could not reach, twenty seconds a block for ten minutes, with
   // 250 cobblestone in the pack (2026-09-27). Dirt is dug only when there is no cobblestone either.
-  const filler = () => inv.items(bot).filter(i => FILLER_ITEMS.test(i.name) || i.name === 'cobblestone').reduce((s, i) => s + i.count, 0)
-  if (filler() >= n) return true
+  // (THE SCAFFOLD IN THE PACK IS THE SPARE: filler over the build's own claim on it (base.buildNeedOf - the window's blocks,
+  //  the band's anchors), the ring's own reading (ringFiller) and the walks' (move.scaffoldOk). Counted whole, 30 andesite the
+  //  window wanted for its own cells made "32 in hand" here while the rings had 9: "ring waits: 2 filler short" 108 times in
+  //  ten minutes with 5817 cobblestone in the chests and 5 in the pack, 2026-11-15 06:10-06:20; audit)
   const base = require('./base')
+  const filler = () => ringFiller(bot).reduce((s, e) => s + e.spare, 0)
+  // (what the pack must hold of a kind before any of it is spare: the build's claim less what is in hand - none for a kind
+  //  the band claims whole (Infinity: an anchor), never taken as scaffold)
+  const claimGap = nm => { const c = base.buildNeedOf(nm); return c === Infinity ? null : Math.max(0, c - inv.count(bot, nm)) }
+  if (filler() >= n) return true
   const KINDS = ['andesite', 'diorite', 'tuff', 'dirt', 'cobbled_deepslate', 'cobblestone']
   // (what the build does not place first: the castle's own andesite, tuff and coarse dirt went up as scaffold while its 559
   //  andesite cells were short, and the bank ran dry of filler, 2026-10-06. Still taken last - a tower over none)
@@ -3623,13 +4279,15 @@ async function ensureScaffold (bot, n = SCAFFOLD_WANT, { shouldStop } = {}) { //
     for (const name of KINDS) {
       const have = filler()
       if (have >= n) return
-      const k = Math.min(n - have, spare(name))
+      const gap = claimGap(name); if (gap == null) continue
+      const k = Math.min(n - have + gap, spare(name))
       if (k > 0) await base.withdraw(bot, name, k).catch(() => 0)
     }
     for (const name of KINDS) {
       const have = filler()
       if (have >= n) return
-      if (base.bankCount(name) > 0) await base.withdraw(bot, name, n - have).catch(() => 0)
+      const gap = claimGap(name); if (gap == null) continue
+      if (base.bankCount(name) > 0) await base.withdraw(bot, name, n - have + gap).catch(() => 0)
     }
   }
   await fromBank()
@@ -3724,7 +4382,7 @@ async function costReport (bot, name, prefs = null) {
   return { name, total, typicalUnitSec: med, kinds: rows.length, blocks: rows.reduce((a, r) => a + r.count, 0), flagged: rows.filter(r => r.flag), top: rows.slice(0, 12) }
 }
 
-module.exports = { sinkAt, pocketHere, walkModelOver, walkProtected, designFor, boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, walkReach, reachStandFor, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
+module.exports = { siteLoaded, jobUses, holeFaceAt, sinkAt, pocketHere, walkModelOver, walkProtected, designFor, boxFor, costReport, missingAnchors: () => missingAnchorItems.slice(), walkModel, walkReach, reachStandFor, strayAt, siteScaffoldTakeable, wayOut, wayOutPoint, FILLER_ITEMS, SCAFFOLD_WANT, cachedStatus, exactWood, isOpenCell, INFILL_RE, infillItem, unsourced, strayBuildBlocks,
   finishSite, woodClass, woodForm, acceptsFor, itemOf, LOG_ANY, PLANKS_ANY, ensureScaffold, unskippedObstructions, setJob, getJob, status, nextNeeds,
   buildStep, clearSite, obstructions, removeScaffold, siteScaffoldTeardown, loadSchematic, cellDone, cellsDone, inBox, placeCell, registerJob, key,
   complete, needsWork, finish, survey, scaffoldList, holesList, ensureSnapshot, snapshotInfo, snapName,

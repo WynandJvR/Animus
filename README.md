@@ -29,14 +29,14 @@ bot2/
   brain-llm.js           the local-model brain; command.gbnf is its grammar
   lib/                   reflexes, director and skills
   schematics/            blueprints to build (.schem / .litematic / .nbt)
-  patch-mc262.js         Minecraft 26.2 data for the protocol libraries
+  patch-mc262.js         Minecraft 26.2 / 26.3 support for the protocol libraries
   config.example.json    copy to config.json (gitignored - holds your server address)
 tools/                   deploy, monitoring and offline test scripts
 ```
 
 ## Requirements
 
-- **Node.js 22+** and **git** (the 26.2 data patch clones from GitHub)
+- **Node.js 22+** and **git** (the Minecraft 26.2 data patch clones from GitHub)
 - **bash** for the helper scripts (Git Bash on Windows works)
 - *Optional, for the brain:* [Ollama](https://ollama.com) or
   [llama.cpp](https://github.com/ggerganov/llama.cpp) and a GPU with ~16 GB VRAM
@@ -44,7 +44,7 @@ tools/                   deploy, monitoring and offline test scripts
 ## Quickstart
 
 On Windows, run **Animus.exe**: set the server and account, press Start. On first run
-it installs the dependencies and the 26.2 data patch, then starts the bot and the
+it installs the dependencies and the Minecraft 26.2 / 26.3 patch, then starts the bot and the
 brain. [RUN.md](RUN.md) walks through it.
 
 By hand:

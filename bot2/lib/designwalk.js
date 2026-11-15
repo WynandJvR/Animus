@@ -12,6 +12,8 @@
 //   routeTo(graph, k) -> [keys] from a source to k
 const rooms = require('./rooms')
 const world = require('./world')
+// (a block the body stands on that is a sliver over the cell's floor: missing, the stand is one lower - never a way of its own)
+const THIN_FLOOR_RE = /_carpet$|_pressure_plate$|^snow$/
 const key = p => `${p.x},${p.y},${p.z}`
 const parse = k => { const [x, y, z] = k.split(',').map(Number); return { x, y, z } }
 
@@ -159,6 +161,11 @@ async function accessPlan (w, graph, { reachHas, cells, isTodo, eyeReaches, at =
         if (at) {
           const lb = at(q.x, q.y, q.z); const db = w.at(q.x, q.y, q.z)
           if (dy === -1 && lb && world.isSolid(lb) && !world.isOpenTrapdoor(lb)) continue // (a floor there already)
+          // (a THIN FLOOR not laid yet over a floor that is: the body stands one lower, on the floor under it - routeBlockers'
+          //  own reading. Counted, a green carpet on a laid plank floor "made the way" for 305 cells, ranked first in the access
+          //  order and named as the build's wait - a morning's trip for wool and dye for a cell that holds nothing, 2026-11-15
+          //  05:12; audit F34-1)
+          if (dy === -1 && db && THIN_FLOOR_RE.test(db.name)) { const ub = at(q.x, q.y - 1, q.z); if (ub && world.isSolid(ub) && !world.isOpenTrapdoor(ub)) continue }
           if (dy === 0 && !(db && /^(ladder|vine)$/.test(db.name) && !(lb && lb.name === db.name))) continue // (its feet: only a ladder not hung)
         }
         const kk = key(q); let set = out.get(kk); if (!set) out.set(kk, (set = new Set()))

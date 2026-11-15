@@ -42,7 +42,10 @@ function bestTool (bot, kind, minLeft = 2) {
   }
   return best
 }
-function toolTier (bot, kind) { const t = bestTool(bot, kind); return t ? tierOf(t.name) : 0 }
+function toolTier (bot, kind) { const t = bestTool(bot, kind); if (!t) wearSkipSay(bot, kind, 'counted in the kit'); return t ? tierOf(t.name) : 0 }
+// (a tool of the kind IN the pack, none counted - said with what its wear reads, once a minute a tool: the dig's skip (andesite dug
+//  bare, a stone pickaxe in the pack, 2026-11-15 01:28) and the kit's "missing stone_pickaxe" with one there (05:19). Evidence only)
+function wearSkipSay (bot, kind, what) { try { const t = items(bot).find(i => i.name.endsWith('_' + kind)); if (!t || Date.now() - (skipSaid.get(t.name) || 0) <= 60000) return; skipSaid.set(t.name, Date.now()); require('./log').log('inv', `a ${t.name} in the pack (slot ${t.slot}) but no ${kind} ${what}: durability left ${durabilityLeft(bot, t)}, used ${t.durabilityUsed}, components ${JSON.stringify(t.components || null).slice(0, 400)}`) } catch {} }
 
 function toolKindFor (block) {
   // the harvest-tool list is authoritative (iron/copper ore have material "incorrect_for_wooden_tool",
@@ -63,16 +66,32 @@ function toolKindFor (block) {
   return null
 }
 
+// THE HAND AFTER AN EQUIP, read: an equip that resolved with another item in the hand is said, with the slots - stone was
+// dug bare (10s a block, nothing dropped) holding a slab with a stone pickaxe in the pack, and the castle's places went out
+// holding a log or a chest where a slab was equipped, 2026-11-15 04:13. Evidence only: what moved the hand is unknown yet
+function heldCheck (bot, want, fromSlot, what, err) {
+  const h = bot.heldItem
+  if (h && h.name === want && !err) return true
+  try {
+    const now = items(bot).find(i => i.name === want)
+    require('./log').log('inv', `equip ${want} for the ${what} did not take: holding ${h ? h.name : 'nothing'} (hotbar ${bot.quickBarSlot}, the item was in slot ${fromSlot}, now ${now ? 'slot ' + now.slot : 'not in the pack'}, window ${bot.currentWindow ? bot.currentWindow.type || 'open' : 'none'}${err ? ', ' + err.message : ''})`)
+  } catch {}
+  return false
+}
 // Hold the fastest tool for a block; bare hand if nothing helps.
 let mdRef = null // minecraft-data, set on first use (toolKindFor has no bot handle)
+const skipSaid = new Map()
 async function equipFor (bot, block) {
   if (!mdRef) mdRef = world.data(bot)
   const kind = toolKindFor(block)
   // use a tool until it breaks - low durability is a reason to craft a spare, not to dig bare-handed
   let tool = kind ? bestTool(bot, kind, 0) : null
   if (!tool && kind === 'hoe') tool = null
+  // (A TOOL OF THE KIND IN THE PACK AND NONE TAKEN - said with what its wear reads: andesite dug bare twelve times running,
+  //  a stone pickaxe in the pack, +2 of 293, 2026-11-15 01:28. Evidence only, once a minute a tool)
+  if (!tool && kind) wearSkipSay(bot, kind, 'taken for ' + block.name)
   if (tool) {
-    if (!bot.heldItem || bot.heldItem.name !== tool.name) await bot.equip(tool, 'hand').catch(() => {})
+    if (!bot.heldItem || bot.heldItem.name !== tool.name) { const from = tool.slot; let err = null; await bot.equip(tool, 'hand').catch(e => { err = e }); heldCheck(bot, tool.name, from, 'dig', err) }
     return tool
   }
   // don't dig dirt with the sword (it wears the sword): hold something harmless
@@ -117,6 +136,12 @@ function wornArmor (bot) {
 }
 // the shield lives in the off-hand (slot 45)
 function offhandShield (bot) { try { const it = bot.inventory.slots[45]; return !!(it && it.name === 'shield') } catch { return false } }
+// THE SHIELD TAKES THE CLICK: with a shield in the off-hand the server reads an unsneaking use of an axe on a block as the
+// shield's raise (vanilla's blocking-intent rule) - and, since 26.3, of a hoe and a shovel too ("raising the Shield will take
+// precedence over tilling and path making", the 26.3 changelog): the block is sent back unchanged, the tool unworn - every
+// hoe click on the farm's grass since the server went to 26.3, 21 cells bare, 25s a round, 2026-11-14. A player shift-clicks.
+// ONE rule for every tool's use on a block (act.useOn, the farm's own click)
+function shieldTakesClick (bot, itemName) { return !!itemName && /_(axe|hoe|shovel)$/.test(itemName) && offhandShield(bot) }
 function hasShield (bot) { return offhandShield(bot) || items(bot).some(i => i.name === 'shield') }
 async function equipShield (bot) {
   if (offhandShield(bot)) return true
@@ -201,8 +226,8 @@ const JUNK = /^(raw_copper|raw_gold|redstone|lapis_lazuli|rotten_flesh|poisonous
 // spare beside a tool that does not (base.keepCount) - ONE number: kept lower, the check crafted a new tool the deposit then
 // banked, round after round (audit 2026-10-07)
 const TOOL_JOB_USES = 32
-module.exports = { SAFE_RAW, TOOL_JOB_USES,
+module.exports = { heldCheck, SAFE_RAW, TOOL_JOB_USES,
   TIERS, TIER_RANK, GOOD_FOOD, RAW_FOOD, COOKED_OF, JUNK, ARMOR_SLOTS,
   items, count, has, counts, freeSlots, tierOf, durabilityLeft, bestTool, toolTier, toolKindFor, equipFor, canHarvest,
-  bestWeapon, equipWeapon, wornArmor, armorPieces, armorPoints, REGEN_FOOD, shelterBlock, betterArmorInPack, wearBestArmor, offhandShield, hasShield, equipShield, foodItems, foodPoints, rawFoodCount
+  bestWeapon, equipWeapon, wornArmor, armorPieces, armorPoints, REGEN_FOOD, shelterBlock, betterArmorInPack, wearBestArmor, offhandShield, shieldTakesClick, hasShield, equipShield, foodItems, foodPoints, rawFoodCount
 }

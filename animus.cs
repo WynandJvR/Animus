@@ -43,8 +43,8 @@ class Animus : Form
     // (the body's command line as run.js spawns it - path.join(__dirname, "main.js"), absolute: pinned to THIS install, so
     //  another checkout's body is never matched)
     static string BodyNeedle { get { return Path.Combine(BotDir, "main.js"); } }
-    // (the file the 26.2 data patch itself checks for - patch-mc262.js patchData)
-    static string Mc262Data { get { return Path.Combine(BotDir, "node_modules", "minecraft-data", "minecraft-data", "data", "pc", "26.2", "protocol.json"); } }
+    // (what the bot needs to join the server's Minecraft version - patch-mc262.js puts it into node_modules)
+    static string McData(string ver) { return Path.Combine(BotDir, "node_modules", "minecraft-data", "minecraft-data", "data", "pc", ver, "protocol.json"); }
     static string CfgPath { get { return Path.Combine(BotDir, "config.json"); } }
     static string ModelFile { get { return Path.Combine(Root, "animus-model.txt"); } }
     const string DefaultModel = "qwen3:14b";
@@ -141,6 +141,7 @@ class Animus : Form
     string authValue = "offline";
     bool brainEnabled = true;
     string brainGoal = "";
+    string liveModelShown = null, liveGoalShown = null; // what the /brain poll last saw live (the boxes follow only that)
     string goalText = "—";
     string chipText = "OFFLINE";
 
@@ -149,6 +150,9 @@ class Animus : Form
     volatile bool livePolling = false;   // one in-flight live poll at a time
     volatile bool povBusy = false;
     volatile bool botUp = false;
+    volatile bool fatalSaid = false; // (the body gave its own reason for stopping - StartBot adds none)
+    int starting = 0;                    // 1 while a Start runs (Interlocked: one at a time)
+    volatile int runGen = 0;             // moved on by every Stop: a Start begun before it spawns nothing more
     volatile bool statusPolling = false; // one in-flight status scan at a time
     Process botProc, brainProc;          // headless children this panel owns
     volatile int stateFails = 0;         // consecutive /state failures (offline after 3)
@@ -295,7 +299,10 @@ class Animus : Form
         RefreshTarget();
         RefreshSchem();
         Log("Ready. Set your server, pick a model, then Start Bot + Brain.");
-        RunBg(RefreshModels);
+        // (once the window is up: from the constructor, an Ollama that answered fast reached cbModel.BeginInvoke before the
+        //  form had a handle - it threw, unseen, and the model list stayed empty. And never for --shot: "render and exit,
+        //  never touch the bot" still started `ollama serve` through it)
+        if (!shotMode) Shown += delegate { RunBg(RefreshModels); };
 
         statusTimer = new System.Windows.Forms.Timer();
         statusTimer.Interval = 2000;
@@ -352,8 +359,19 @@ class Animus : Form
         tips.SetToolTip(btnSetup, "Server, brain model and schematics — everything you set once.");
 
         btnStart = Primary(railBar, "Start", Accent, AccentHi, delegate {
+            // ONE start at a time, and a Stop ends the one under way: every click queued its own StartBot + StartBrain - a
+            // double-click (or a click while --start still ran) got past "already running?" twice before either had spawned,
+            // two supervisors and two bodies on one account kicking each other off the server. And a Stop pressed while the
+            // start still waited (for the port, for a model pull) was outlived by it: the brain came up after the Stop.
+            if (Interlocked.Exchange(ref starting, 1) == 1) { Log("Already starting…"); return; }
             SetStop("Stop", Danger); // reset the stop button when (re)starting
-            string m = cbModel.Text.Trim(); RunBg(delegate { StartBot(); StartBrain(m); });
+            string m = cbModel.Text.Trim();
+            int gen = runGen;
+            RunBg(delegate {
+                // (no brain for a bot that did not come up: it ran alone against a dead port, the GPU's model loaded for it)
+                try { if (StartBot(gen) && runGen == gen) StartBrain(m, gen); }
+                finally { Interlocked.Exchange(ref starting, 0); }
+            });
         });
         tips.SetToolTip(btnStart, "Bot + brain run headless — their output lands in the activity log below. "
                                 + "This panel owns them: closing it stops the bot.");
@@ -624,7 +642,7 @@ class Animus : Form
         DarkScroll(liveLog);
 
         tbCmd = MakeInput(cAct, "");
-        SetPlaceholder(tbCmd, "Tell the bot what to do…   e.g. come · follow Steve · gather oak_log 10");
+        SetPlaceholder(tbCmd, CmdHint);
         tbCmd.KeyDown += CmdKeyDown;
         btnSend = Primary(cAct, "Send", Accent, AccentHi, delegate { SendCmd(); });
         ((FlatBtn)btnSend).Glyph = "\uE724";
@@ -1514,7 +1532,10 @@ class Animus : Form
                     if (cfg.ContainsKey("goal") && cfg["goal"] != null)
                     {
                         brainGoal = "" + cfg["goal"];
-                        if (!tbGoal.Focused) tbGoal.Text = brainGoal;
+                        // (only a box still showing what this poll last put there: an edit not yet applied is the
+                        //  operator's - see the model box below)
+                        if (!tbGoal.Focused && tbGoal.Text != brainGoal && (liveGoalShown == null || tbGoal.Text == liveGoalShown)) tbGoal.Text = brainGoal;
+                        liveGoalShown = brainGoal;
                     }
                     // THE MODEL BOX MUST TRACK THE LIVE SETTING (2026-08-26). It was filled once at
                     // startup from LoadModel() and never refreshed, so it showed whatever was last
@@ -1527,7 +1548,12 @@ class Animus : Form
                     if (cfg.ContainsKey("model") && cfg["model"] != null)
                     {
                         string liveModel = "" + cfg["model"];
-                        if (!cbModel.Focused && cbModel.Text != liveModel) cbModel.Text = liveModel;
+                        // ...AND MUST NOT EAT A PICK: a model chosen from the picker's menu never focuses the box, so the
+                        // next poll (4s) put the live model back and "Use / Pull" or Start sent the old one. The box follows
+                        // the live setting only while it still shows what the poll last put there - a pick stands until
+                        // it is applied (the live setting then matches it) or changed back.
+                        if (!cbModel.Focused && cbModel.Text != liveModel && (liveModelShown == null || cbModel.Text == liveModelShown)) cbModel.Text = liveModel;
+                        liveModelShown = liveModel;
                     }
                 }
             }
@@ -1543,7 +1569,8 @@ class Animus : Form
             lvFood.Text = food.ToString("0") + " / 20";
             SetBar(hpFill, hp, 20); SetBar(foodFill, food, 20);
             Dictionary<string, object> pos = Obj(st, "pos");
-            SetVal(lvPos, pos == null ? "—" : ((int)D(pos, "x")) + ", " + ((int)D(pos, "y")) + ", " + ((int)D(pos, "z")));
+            // (floored, as the game's F3 and the Build dialog: a cast cuts toward zero - one block off on every negative axis)
+            SetVal(lvPos, pos == null ? "—" : ((int)Math.Floor(D(pos, "x"))) + ", " + ((int)Math.Floor(D(pos, "y"))) + ", " + ((int)Math.Floor(D(pos, "z"))));
             string biome = S(st, "biome");
             SetVal(lvBiome, biome.Length == 0 ? "—" : biome.Replace('_', ' '));
             bool day = B(st, "isDay");
@@ -1904,7 +1931,7 @@ class Animus : Form
         }
         finally { bmp.UnlockBits(bd); }
 
-        string ps = pos == null ? "—" : ((int)D(pos, "x")) + ", " + ((int)D(pos, "y")) + ", " + ((int)D(pos, "z"));
+        string ps = pos == null ? "—" : ((int)Math.Floor(D(pos, "x"))) + ", " + ((int)Math.Floor(D(pos, "y"))) + ", " + ((int)Math.Floor(D(pos, "z")));
         int yawDeg = (int)Math.Round(yaw * 180.0 / Math.PI);
         double fps = NoteBuild(ageMs);
         info.Hud = ps + "  ·  yaw " + yawDeg + "°  ·  " + Fmt1(fps) + " fps";
@@ -2110,10 +2137,13 @@ class Animus : Form
         }
     }
 
+    const string CmdHint = "Tell the bot what to do…   e.g. come · follow Steve · gather oak_log 10";
     void SendCmd()
     {
         string c = tbCmd.Text.Trim();
-        if (c.Length == 0 || c.StartsWith("command…")) return;
+        // (the hint itself: Send clicked on an empty box - the button takes the focus, the hint is back in the box - posted
+        //  "Tell the bot what to do…" as an operator command. The old test looked for a hint text long gone)
+        if (c.Length == 0 || c == CmdHint.Trim() || tbCmd.ForeColor == Muted) return;
         cmdHistory.Add(c); histPos = -1;
         tbCmd.Text = ""; tbCmd.Focus();
         SendQuick(c);
@@ -2137,6 +2167,7 @@ class Animus : Form
         string body = json.Serialize(new Dictionary<string, object> {
             { "model", cbModel.Text.Trim() }, { "goal", goal }, { "enabled", brainEnabled } });
         string r = WebPost(ApiBase + "/brain", body);
+        if (r != null) { liveModelShown = null; liveGoalShown = null; } // (applied: the boxes follow the live setting again)
         Log(r != null ? ("Brain " + (brainEnabled ? "on" : "paused") + ", goal applied.") : "Could not reach the bot to apply brain settings.");
     }
 
@@ -2285,13 +2316,17 @@ class Animus : Form
         {
             using (ManagementObjectSearcher q = new ManagementObjectSearcher(
                 "SELECT CommandLine FROM Win32_Process WHERE Name = 'node.exe'"))
-                foreach (ManagementObject o in q.Get())
+            using (ManagementObjectCollection found = q.Get()) // (this runs every 2s: the COM objects let go now, not at a finalizer's leisure)
+                foreach (ManagementObject o in found)
                 {
-                    string cl = null;
-                    try { cl = o["CommandLine"] as string; } catch { }
-                    if (string.IsNullOrEmpty(cl)) continue;
-                    if (cl.IndexOf("run.js", StringComparison.OrdinalIgnoreCase) >= 0) bot = true;
-                    else if (cl.IndexOf("brain-llm.js", StringComparison.OrdinalIgnoreCase) >= 0) brain = true;
+                    using (o)
+                    {
+                        string cl = null;
+                        try { cl = o["CommandLine"] as string; } catch { }
+                        if (string.IsNullOrEmpty(cl)) continue;
+                        if (cl.IndexOf("run.js", StringComparison.OrdinalIgnoreCase) >= 0) bot = true;
+                        else if (cl.IndexOf("brain-llm.js", StringComparison.OrdinalIgnoreCase) >= 0) brain = true;
+                    }
                 }
         }
         catch { }
@@ -2491,66 +2526,71 @@ class Animus : Form
         if (!Regex.IsMatch(port, "^\\d+$")) { Log("Port must be a number."); return; }
         if (bedrock.Length > 0 && !Regex.IsMatch(bedrock, "^\\d+$")) { Log("Bedrock port must be a number."); return; }
         if (ctlPort.Length > 0 && !Regex.IsMatch(ctlPort, "^\\d+$")) { Log("Control port must be a number."); return; }
-        // A RUNNING bot applies the change itself (and restarts if asked) via POST /config;
-        // otherwise edit config.json directly for the next start.
-        if (botUp)
-        {
-            Dictionary<string, object> body = new Dictionary<string, object> {
-                { "host", host }, { "port", port }, { "version", ver },
-                { "auth", auth }, { "username", user }, { "operators", ops },
-                { "aliases", aliases }, { "bedrockPort", bedrock }, { "floodgatePrefix", floodgate },
-                { "controlHost", ctlHost }, { "controlPort", ctlPort },
-                { "reconnect", reconnect } };
-            string b = json.Serialize(body);
-            RunBg(delegate {
-                string r = WebPost(ApiBase + "/config", b);
-                Log(r == null ? "Could not reach the bot to save." :
-                    reconnect ? "Saved — bot is reconnecting with the new settings…" : "Saved to the running bot.");
-                BeginInvoke((MethodInvoker)RefreshTarget);
-            });
-            return;
-        }
+        int portN, bedrockN = 0, ctlPortN = 0;
+        if (!int.TryParse(port, out portN) || portN < 1 || portN > 65535) { Log("Port must be 1-65535."); return; }
+        if (bedrock.Length > 0 && (!int.TryParse(bedrock, out bedrockN) || bedrockN < 1 || bedrockN > 65535)) { Log("Bedrock port must be 1-65535."); return; }
+        if (ctlPort.Length > 0 && (!int.TryParse(ctlPort, out ctlPortN) || ctlPortN < 1 || ctlPortN > 65535)) { Log("Control port must be 1-65535."); return; }
+        // THE FILE IS THE SETTINGS, running or not. A running bot used to be sent them over POST /config "to apply itself" -
+        // the old runtime's handler; bot2's keeps nothing of that body but the reconnect flag. So with the bot up, Save
+        // wrote nothing and said "Saved to the running bot", and Save + Reconnect restarted it on the old settings.
+        // Written here always; the bot reads config.json when it starts, and a reconnect is asked for after the write.
+        // (and the keys are SET, not found-and-replaced in the text: a key the file lacked, or a port kept as "25565" in
+        //  quotes, was skipped unsaid - and with no config.json at all, a fresh clone, there was no saving)
+        string api = ApiBase;   // (where the RUNNING bot listens: read before the write may move the control port)
+        string oldCtl = Cfg("controlHost", "127.0.0.1") + ":" + ControlPort;
         try
         {
-            string txt = File.ReadAllText(CfgPath);
-            txt = SetStr(txt, "host", host);
-            txt = SetNum(txt, "port", port);
-            txt = SetStr(txt, "username", user);
-            txt = SetStr(txt, "version", ver);
-            txt = SetStr(txt, "auth", auth);
-            txt = SetArr(txt, "operators", ops);
-            txt = SetArr(txt, "aliases", aliases);
-            if (bedrock.Length > 0) txt = SetNum(txt, "bedrockPort", bedrock);
-            txt = SetStr(txt, "floodgatePrefix", floodgate);
-            if (ctlHost.Length > 0) txt = SetStr(txt, "controlHost", ctlHost);
-            if (ctlPort.Length > 0) txt = SetNum(txt, "controlPort", ctlPort);
-            File.WriteAllText(CfgPath, txt);
+            Dictionary<string, object> cfg = null;
+            if (File.Exists(CfgPath))
+            {
+                try { cfg = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(CfgPath)) as Dictionary<string, object>; } catch { }
+                // (never written over: whatever else the file holds would be lost with it)
+                if (cfg == null) { Log("Could not save: bot2/config.json is not valid JSON - fix it by hand (see config.example.json)."); return; }
+            }
+            else
+            {
+                try { cfg = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(Path.Combine(BotDir, "config.example.json"))) as Dictionary<string, object>; } catch { }
+                if (cfg == null) cfg = new Dictionary<string, object>();
+            }
+            cfg["host"] = host; cfg["port"] = portN; cfg["username"] = user; cfg["version"] = ver; cfg["auth"] = auth;
+            cfg["operators"] = ops; cfg["aliases"] = aliases;
+            if (bedrock.Length > 0) cfg["bedrockPort"] = bedrockN;
+            cfg["floodgatePrefix"] = floodgate;
+            if (ctlHost.Length > 0) cfg["controlHost"] = ctlHost;
+            if (ctlPort.Length > 0) cfg["controlPort"] = ctlPortN;
+            // (whole or not at all: the supervisor restarting the body may read the file at any moment, and half a file
+            //  parses as no config - localhost, offline, no operators)
+            string tmp = CfgPath + ".tmp";
+            File.WriteAllText(tmp, PrettyJson(cfg));
+            if (File.Exists(CfgPath)) File.Replace(tmp, CfgPath, null); else File.Move(tmp, CfgPath);
             RefreshTarget();
-            Log("Saved. Settings apply when you press Start.");
         }
-        catch (Exception e) { Log("Could not save config: " + e.Message); }
+        catch (Exception e) { Log("Could not save config: " + e.Message); return; }
+        bool ctlMoved = (Cfg("controlHost", "127.0.0.1") + ":" + ControlPort) != oldCtl;
+        if (!botUp) { Log("Saved. Settings apply when you press Start."); return; }
+        if (!reconnect) { Log("Saved. The running bot keeps its old settings until it restarts - Save + Reconnect, or Stop and Start."); return; }
+        RunBg(delegate {
+            string r = WebPost(api + "/config", "{\"reconnect\":true}");
+            Log(r == null ? "Saved - but the bot did not answer the restart: press Stop, then Start."
+                : ctlMoved ? "Saved — bot is restarting with the new settings… (the control port moved: Stop and Start once, so the brain follows it)"
+                : "Saved — bot is restarting with the new settings…");
+        });
     }
 
-    static string SetStr(string txt, string key, string val)
+    // One key a line, as config.example.json is written. (the serializer's '-style escapes for ' < > & put back: valid
+    // JSON either way, and Cfg() above reads the file's text as it stands)
+    static string PrettyJson(Dictionary<string, object> d)
     {
-        string pat = "(\"" + Regex.Escape(key) + "\"\\s*:\\s*\")[^\"]*(\")";
-        string rep = JsonEsc(val);
-        return Regex.Replace(txt, pat, delegate(Match m) { return m.Groups[1].Value + rep + m.Groups[2].Value; });
+        JavaScriptSerializer js = new JavaScriptSerializer();
+        StringBuilder sb = new StringBuilder("{\n");
+        int i = 0;
+        foreach (KeyValuePair<string, object> kv in d)
+            sb.Append("  ").Append(js.Serialize(kv.Key)).Append(": ").Append(js.Serialize(kv.Value)).Append(++i < d.Count ? ",\n" : "\n");
+        // (a real escape only - never one whose backslash is itself escaped: that is a backslash and four letters in the text)
+        return Regex.Replace(sb.Append("}\n").ToString(), @"(?<!\\)((?:\\\\)*)\\u00(27|3c|3e|26)", delegate(Match m) {
+            return m.Groups[1].Value + (char)Convert.ToInt32(m.Groups[2].Value, 16);
+        });
     }
-    static string SetNum(string txt, string key, string num)
-    {
-        string pat = "(\"" + Regex.Escape(key) + "\"\\s*:\\s*)\\d+";
-        return Regex.Replace(txt, pat, delegate(Match m) { return m.Groups[1].Value + num; });
-    }
-    static string SetArr(string txt, string key, List<string> items)
-    {
-        string[] q = new string[items.Count];
-        for (int i = 0; i < items.Count; i++) q[i] = "\"" + JsonEsc(items[i]) + "\"";
-        string arr = "[" + string.Join(", ", q) + "]";
-        string pat = "(\"" + Regex.Escape(key) + "\"\\s*:\\s*)\\[[^\\]]*\\]";
-        return Regex.Replace(txt, pat, delegate(Match m) { return m.Groups[1].Value + arr; });
-    }
-    static string JsonEsc(string s) { return s.Replace("\\", "\\\\").Replace("\"", "\\\""); }
 
     // ---- model management --------------------------------------------------
     void RefreshModels()
@@ -2573,18 +2613,32 @@ class Animus : Form
     {
         if (m == null || m.Trim().Length == 0) { Log("Type or pick a model first."); return; }
         m = m.Trim();
+        // (the name goes onto a cmd.exe command line below, and the box it comes from is filled from the bot's /brain
+        //  settings too: a model name is letters, digits and . _ : / - and nothing a shell reads as more than a name)
+        if (!Regex.IsMatch(m, @"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")) { Log("'" + m + "' is not a model name (letters, digits, . _ : / - only)."); return; }
         EnsureOllama();
         string list = RunCapture("ollama", "list");
-        bool installed = list != null && list.IndexOf(m, StringComparison.OrdinalIgnoreCase) >= 0;
+        bool installed = ModelInstalled(list, m);
         if (!installed)
         {
             Log("Pulling " + m + " … (progress shows in the pull window)");
             RunSync("cmd.exe", "/c ollama pull " + m, Root);
             list = RunCapture("ollama", "list");
-            installed = list != null && list.IndexOf(m, StringComparison.OrdinalIgnoreCase) >= 0;
+            installed = ModelInstalled(list, m);
         }
         if (installed) { SaveModel(m); Log("Brain model set to " + m + "."); RefreshModels(); if (botUp) ApplyBrain(); }
         else Log("Pull failed — '" + m + "' is not in 'ollama list'. Keeping " + LoadModel() + ".");
+    }
+
+    // Installed = a NAME in `ollama list`, whole: anywhere in the text, "qwen3" read as installed beside "qwen3:14b" -
+    // saved, and the brain started on a name Ollama resolves to qwen3:latest, which is not there. A bare name is :latest.
+    static bool ModelInstalled(string list, string m)
+    {
+        if (list == null || m == null) return false;
+        string want = m.Trim(); if (want.Length == 0) return false;
+        if (!want.Contains(":")) want += ":latest";
+        foreach (string n in ParseModelNames(list)) if (string.Equals(n, want, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
     }
 
     static List<string> ParseModelNames(string list)
@@ -2627,43 +2681,75 @@ class Animus : Form
     }
 
     // ---- launch actions ----------------------------------------------------
-    void StartBot()
+    bool StartBot(int gen)   // true: the bot is up, or was already
     {
         // (the body too, and the port: a body left alive without its supervisor - a Stop that failed - is a bot still on the
         //  server, and a second one on the same account must not start beside it)
-        if (NodeAlive("run.js") || NodeAlive(BodyNeedle) || ControlPortAnswers()) { Log("Bot already running."); return; }
-        if (!OnPath("node")) { Log("ERROR: 'node' is not on your PATH. Install Node.js and retry."); return; }
+        if (NodeAlive("run.js") || NodeAlive(BodyNeedle) || ControlPortAnswers()) { Log("Bot already running."); return true; }
+        if (!OnPath("node")) { Log("ERROR: 'node' is not on your PATH. Install Node.js and retry."); return false; }
         if (!Directory.Exists(Path.Combine(BotDir, "node_modules")))
         { Log("Installing bot dependencies (first run)…"); RunSync("cmd.exe", "/c npm install", BotDir); }
-        // (the Minecraft 26.2 data the npm releases do not carry yet: without it the bot cannot join a 26.2 server. Asked of
-        //  the data itself on every start, not of the install: a patch that failed once (no git, offline) or an npm install
-        //  by hand that wiped it is made good at the next Start. Its own lines land in the activity log as [setup])
-        if (!File.Exists(Mc262Data))
+        // (the Minecraft 26.2 / 26.3 support the npm releases do not carry yet: data AND edits to the libraries. Run on every
+        //  Start, not asked of one file: the patch grows with each server version - a folder patched for 26.2 has the data
+        //  file and still cannot stay on a 26.3 server - and a patch that failed once (no git, offline) or an npm install by
+        //  hand that wiped it is made good at the next Start. Half a second when there is nothing to do, and silent then
+        //  (--quiet); what it changes lands in the activity log as [setup])
         {
-            Log("Adding the Minecraft 26.2 data…");
-            int rc = RunSync("cmd.exe", "/c node patch-mc262.js", BotDir);
-            if (rc != 0 || !File.Exists(Mc262Data))
-                Log("26.2 data patch FAILED (exit " + rc + ") - the bot cannot join a 26.2 server; it needs git - see the [setup] lines");
+            int rc = RunSync("cmd.exe", "/c node patch-mc262.js --quiet", BotDir);
+            if (rc != 0 || !File.Exists(McData("26.2")) || !File.Exists(McData("26.3")))
+                Log("Minecraft 26.2/26.3 support could NOT be installed (exit " + rc + ") - the bot may not be able to join the server; see the [setup] lines");
         }
         string auth = Cfg("auth", "?");
         Log("Starting bot → " + Cfg("host", "?") + ":" + Cfg("port", "?") + " (auth=" + auth + ")…");
         AppendLog("[gui] starting bot → " + Cfg("host", "?") + ":" + Cfg("port", "?") + " (auth=" + auth + ")");
         if (auth == "microsoft") AppendLog("[gui] first run signs in with a microsoft.com/link code — it appears here.");
+        if (runGen != gen) { Log("Start cancelled by Stop."); return false; } // (the install and the patch above take minutes)
         try { botProc = SpawnNode("bot", "run.js", null); }
-        catch (Exception e) { Log("Could not start the bot: " + e.Message); return; }
-        if (WaitPort(int.Parse(ControlPort), 300)) Log("Bot up — live panel is on.");
-        else Log("Bot didn't come up on :" + ControlPort + " — read the [bot] lines in the activity log.");
+        catch (Exception e) { Log("Could not start the bot: " + e.Message); return false; }
+        // (a Stop that landed between the check above and the spawn made its kill pass before this process was there)
+        //  The supervisor first, waited out, then any body it had already started - Kill takes no children with it
+        if (runGen != gen)
+        {
+            try { botProc.Kill(); botProc.WaitForExit(4000); } catch { }
+            foreach (int pid in NodePidsMatching(BodyNeedle)) { try { Process.GetProcessById(pid).Kill(); } catch { } }
+            Log("Start cancelled by Stop."); return false;
+        }
+        // (a control port that is no number in config.json threw here, unseen - and the brain was never started)
+        int ctl; if (!int.TryParse(ControlPort, out ctl)) ctl = 3001;
+        // (the wait ends when the supervisor itself is gone - it does not come back: five minutes were waited out for a bot
+        //  that had stopped in its first second, the footer still "Starting bot…")
+        //  ...and it goes on for as long as the supervisor lives: the port opens only once the bot is IN the server, and a
+        //  first Microsoft sign-in - a code typed at microsoft.com/link, good for a quarter of an hour - outlasts any deadline;
+        //  given up at five minutes, the brain was never started for a bot that came up at six (audit). Said once, waited on
+        bool up = false, slowSaid = false; fatalSaid = false;
+        DateTime slow = DateTime.UtcNow.AddSeconds(300);
+        while (runGen == gen)
+        {
+            if (PortOpen(ctl)) { up = true; break; }
+            if (!ProcAlive(botProc) && !NodeAlive("run.js")) break;
+            if (!slowSaid && DateTime.UtcNow > slow)
+            {
+                slowSaid = true;
+                Log("Bot not in the server yet — still waiting (a sign-in code, or the server not answering: see the [bot] lines). The brain starts when it is up.");
+            }
+            Thread.Sleep(600);
+        }
+        if (up) { Log("Bot up — live panel is on."); return true; }
+        if (runGen != gen) return false;
+        if (!fatalSaid) Log("Bot stopped before it came up — read the [bot] lines in the activity log.");
+        return false;
     }
 
-    void StartBrain(string model)
+    void StartBrain(string model, int gen)
     {
         if (NodeAlive("brain-llm.js")) { Log("Brain already running."); return; }
         if (model == null || model.Trim().Length == 0) model = LoadModel();
         model = model.Trim();
         EnsureOllama();
         string list = RunCapture("ollama", "list");
-        if (list != null && list.IndexOf(model, StringComparison.OrdinalIgnoreCase) < 0)
+        if (list != null && !ModelInstalled(list, model))
         { Log(model + " isn't pulled yet — pulling it first…"); UseModel(model); }
+        if (runGen != gen) { Log("Start cancelled by Stop."); return; } // (the pull above takes minutes)
         Log("Starting brain (" + model + ")…");
         AppendLog("[gui] starting brain (" + model + ")");
         Dictionary<string, string> env = new Dictionary<string, string>();
@@ -2675,6 +2761,7 @@ class Animus : Form
         Process p;
         try { p = brainProc = SpawnNode("brain", "brain-llm.js", env); }
         catch (Exception e) { Log("Could not start the brain: " + e.Message); return; }
+        if (runGen != gen) { try { p.Kill(); } catch { } Log("Start cancelled by Stop."); return; } // (as the bot's start, above)
         // Close the loop: "Starting brain…" used to stay in the footer for the whole
         // session even with the Brain light green. Report the outcome once it's known -
         // unless Stop (or a restart) replaced this process meanwhile: then that owns the footer.
@@ -2876,7 +2963,8 @@ class Animus : Form
         bCost.Click += delegate {
             string name = pk.Text.Trim();
             if (!pk.Items.Contains(name)) { costSum.ForeColor = Red; costSum.Text = "Pick a blueprint first."; return; }
-            if (Regex.IsMatch(name, @"s")) { costSum.ForeColor = Red; costSum.Text = "The bot can't take names with spaces — rename the file (e.g. my_house)."; return; }
+            // (@"\s", as the Go handler below has it: @"s" refused every name with the LETTER s - castle, house, basilica)
+            if (Regex.IsMatch(name, @"\s")) { costSum.ForeColor = Red; costSum.Text = "The bot can't take names with spaces — rename the file (e.g. my_house)."; return; }
             if (!botUp) { costSum.ForeColor = Red; costSum.Text = "The bot is offline — press Start first."; return; }
             bCost.Enabled = false; costSum.ForeColor = Muted; costSum.Text = "Reading " + name + "… big blueprints take a while.";
             RunBg(delegate {
@@ -3043,7 +3131,9 @@ class Animus : Form
     static bool ControlPortAnswers()
     {
         int status;
-        string body = WebGet("http://127.0.0.1:3001/health", out status);
+        // (the configured control port, as every other call: with controlPort moved off 3001 the "already running" guard and
+        //  Stop's verification asked a port nothing listens on)
+        string body = WebGet(ApiBase + "/health", out status);
         return body != null && status == 200;
     }
 
@@ -3064,10 +3154,11 @@ class Animus : Form
                 string name = m.Groups[1].Value;
                 try
                 {
-                    WebPost("http://127.0.0.1:11434/api/generate",
-                            "{\"model\":\"" + name + "\",\"keep_alive\":0}");
-                    freed++;
-                    Log("Unloaded " + name + " from VRAM.");
+                    // (WebPost swallows its errors and answers null: said unloaded only when Ollama answered)
+                    if (WebPost("http://127.0.0.1:11434/api/generate",
+                            "{\"model\":\"" + name + "\",\"keep_alive\":0}") != null)
+                    { freed++; Log("Unloaded " + name + " from VRAM."); }
+                    else Log("stop: could not unload " + name + " (Ollama did not answer)");
                 }
                 catch (Exception e) { Log("stop: could not unload " + name + " (" + e.Message + ")"); }
             }
@@ -3078,6 +3169,7 @@ class Animus : Form
 
     void StopAll()
     {
+        runGen++; // (a Start still under way spawns nothing after this - the button's own note)
         Log("Stopping bot + brain…");
         // ORDER MATTERS: run.js is a SUPERVISOR - it restarts main.js (the body) within seconds.
         // Killing the body first just gets it resurrected, which is why "stop" appeared
@@ -3239,6 +3331,8 @@ class Animus : Form
         if (t.Length == 0) return;
         if (t.Length > 400) t = t.Substring(0, 399) + "…";
         AppendLog("[" + tag + "] " + t);
+        // (the body's own last word - why it will not run, main.js: the footer says it, not only a line in the scroll)
+        if (tag == "bot" && t.StartsWith("FATAL: ")) { fatalSaid = true; Log("Bot stopped: " + t.Substring(7)); }
         if (t.IndexOf("microsoft.com/link", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             Match m = DeviceCodeRx.Match(t);
@@ -3339,6 +3433,13 @@ class Animus : Form
         catch { return false; }
     }
 
+    // (a Start's wait: over as soon as a Stop moves runGen on)
+    bool WaitPort(int port, int seconds, int gen)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+        while (DateTime.UtcNow < deadline && runGen == gen) { if (PortOpen(port)) return true; Thread.Sleep(600); }
+        return false;
+    }
     static bool WaitPort(int port, int seconds)
     {
         DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);

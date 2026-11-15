@@ -235,6 +235,18 @@ function woodStock (bot, sp) {
   try { n += base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log') } catch {}
   return n
 }
+// THE WOOD A CRAFT CAN REACH: the pack's, and the chests' only when one is within a withdraw's walk (ensure's withdraw opens
+// no chest past WITHDRAW_WALK) and the ensure may withdraw. A species or an item: a _log counts logs, planks or a species
+// planks with their logs. Every bank chest wherever the bot stood read as stock 750 blocks from home (audit F78-1);
+// woodStock keeps the whole bank - a haul landing is measured there.
+function reachableWood (bot, nm0, noBank = false) {
+  const c = inv.counts(bot)
+  const logOnly = /_log$/.test(nm0)
+  const sp = nm0.replace(/_(planks|log)$/, '')
+  let n = logOnly ? (c[sp + '_log'] || 0) : (c[sp + '_planks'] || 0) + 4 * (c[sp + '_log'] || 0)
+  if (!noBank) { try { if (base().chestWithinWalk(bot)) n += logOnly ? base().bankCount(sp + '_log') : base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log') } catch {} }
+  return n
+}
 function reservedSpent (bot, sp) {
   const m = mem.get().reservedSpent || {}; const e = m[sp]
   if (!e) return 0
@@ -293,9 +305,12 @@ function chooseRecipe (bot, itemName, n = 1, stack = null, { noBank = false } = 
   // (ANY gathered ingredient, not only wood: bamboo for sticks was priced as if in hand - the shears' iron trip wanted 14
   //  sticks, chose bamboo with planks in the chest, and explored four minutes for none, 2026-10-03. The same rule: not held
   //  or banked, it costs the walk to it)
+  // (the chests are stock only within a withdraw's walk - reachableWood's rule: 329 banked logs 750 blocks off priced a
+  //  stick's planks at no trip)
+  let bankReach = false; if (!noBank) { try { bankReach = base().chestWithinWalk(bot) } catch {} }
   const gatherTrip = (nm0, short) => {
     const g = GATHER[nm0]; if (!g || !g.blocks) return 0
-    let banked = 0; try { banked = noBank ? 0 : base().bankCount(nm0) } catch {}
+    let banked = 0; try { banked = bankReach ? base().bankCount(nm0) : 0 } catch {}
     if (banked >= short) return 0
     const near = world.findBlocks(bot, g.blocks, { maxDistance: 48, count: 1 })[0]
     return near ? world.dist3(near.position || near, bot.entity.position) / 2 : 120
@@ -308,11 +323,16 @@ function chooseRecipe (bot, itemName, n = 1, stack = null, { noBank = false } = 
     let t = 0
     try {
       if (short === Infinity) return (tripMemo[mk] = nearTrip(sp))
-      const banked = noBank ? 0 : /_log$/.test(nm0) ? base().bankCount(sp + '_log') : base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log')
+      const banked = !bankReach ? 0 : /_log$/.test(nm0) ? base().bankCount(sp + '_log') : base().bankCount(sp + '_planks') + 4 * base().bankCount(sp + '_log')
       if (banked < short) t = nearTrip(sp)
     } catch {}
     return (tripMemo[mk] = t)
   }
+  // THE BUILD'S STOCK a reserved ingredient would draw on: what this craft can reach (reachableWood). Only that is the
+  // build's - a log felled fresh for this craft is new wood, its price the walk (woodTrip) like any wood's. Priced on the whole order, a reserved wood was dear even with none held: away from the
+  // site every species the castle places is reserved, and two sticks went looking for bamboo - 170 blocks back toward home
+  // and down into a cave - with dark oak all round (2026-11-15 14:11)
+  const stockOf = nm0 => /_(planks|log)$/.test(nm0) ? reachableWood(bot, nm0, noBank) : (have[nm0] || 0)
   let best = null; let bestCost = Infinity
   for (const r of rs) {
     // (never a recipe of something already being made up the chain: that is the cycle, not a route)
@@ -333,14 +353,15 @@ function chooseRecipe (bot, itemName, n = 1, stack = null, { noBank = false } = 
       //  tool: <=16 planks) rides the build's own wood trip - three times a plank's price; more than that is a trip of its
       //  own for the build, as dear as a walk to another wood - 146 spruce logs became 33 chests and 288 sticks, 2026-09-28;
       //  was 1e3 a plank, and 4 sticks went 143 blocks by boat for acacia, 2026-10-03; audit C1)
-      if (reservedWood(nm)) cost += per * crafts * 3 * unitCost(nm) + (reservedSpent(bot, nm.replace(/_(planks|log)$/, '')) + per * crafts > RESERVED_RIDE ? woodTrip(nm, Infinity) : 0)
+      // (on the part of the order the build's stock covers - none held or banked: nothing of the build's is spent)
+      if (reservedWood(nm)) { const fs = Math.min(per * crafts, stockOf(nm)); if (fs > 0) cost += fs * 3 * unitCost(nm) + (reservedSpent(bot, nm.replace(/_(planks|log)$/, '')) + fs > RESERVED_RIDE ? woodTrip(nm, Infinity) : 0) }
     }
     if (cost < bestCost) { bestCost = cost; best = r }
   }
   // (the build's wood this choice spends goes on the tally - the choice is the craft: craftItem makes what it chose)
   if (best && reserved) {
     const crafts = Math.ceil(n / ((best.result && best.result.count) || 1))
-    for (const [id, per] of Object.entries(recipeIngredients(best))) { const nm = md.items[id] && md.items[id].name; if (nm && reservedWood(nm)) noteReservedSpent(bot, nm.replace(/_(planks|log)$/, ''), per * crafts * (/_log$/.test(nm) ? 4 : 1)) }
+    for (const [id, per] of Object.entries(recipeIngredients(best))) { const nm = md.items[id] && md.items[id].name; const fs = nm && reservedWood(nm) ? Math.min(per * crafts, stockOf(nm)) : 0; if (fs > 0) noteReservedSpent(bot, nm.replace(/_(planks|log)$/, ''), fs * (/_log$/.test(nm) ? 4 : 1)) }
   }
   return best
 }
@@ -478,23 +499,32 @@ function pickWood (bot, needPlanks, avoid, { noWalk = false } = {}) {
   let best = null; let bn = 0
   for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4; if (n > bn) { bn = n; best = w } }
   if (best && bn >= needPlanks) return best
-  // the bank counts too: a chest of birch beats a walk to find oak
-  const bank = base().bankCounts ? base().bankCounts() : {}
+  // the bank counts too: a chest of birch beats a walk to find oak - a chest in reach (reachableWood's rule: banked birch
+  //  750 blocks off is a walk home, not a craft here)
+  let bank = {}; try { bank = base().chestWithinWalk(bot) && base().bankCounts ? base().bankCounts() : {} } catch {}
   let bestB = null; let bnB = 0
   for (const w of WOODS) { const n = (c[w + '_planks'] || 0) + (c[w + '_log'] || 0) * 4 + (bank[w + '_planks'] || 0) + (bank[w + '_log'] || 0) * 4; if (n > bnB) { bnB = n; bestB = w } }
   if (bestB && bnB >= needPlanks) return bestB
   if (noWalk) return null
+  // (FROM HERE IT IS A WALK TO A TREE: a fresh log of the build's own species spends none of the build's stock. Avoided
+  //  outright, a dark forest had no wood for two sticks and the nearest remembered tree of an unreserved species was the
+  //  walk, 2026-11-15. But a reserved species is a tree to fell only while none of it is in reach - the pack, or a chest a
+  //  withdraw's walk off: with the castle's chests by, an ensure of it takes the banked logs first, untallied - charcoal's
+  //  32 logs, the C1 leak; audit F78-2. Out on a trip none is in reach, and the dark oak beside it is fresh wood)
+  const fresh0 = new Map() // (once a species: the filter runs for every log in a forest - body first; audit 78 LOW 1)
+  const freshOk = w => { if (!avoid.has(w)) return true; if (!fresh0.has(w)) fresh0.set(w, reachableWood(bot, w) === 0); return fresh0.get(w) }
+  const anyWood = WOODS_ALL.filter(freshOk)
   // not quite enough: top up the wood already in hand when it grows in sight or where we saw it - 12 birch planks held,
   // 14 wanted, and the bot dug down through the mountain after a jungle tree below the site (2026-09-27)
   const g0 = require('./gather')
   if (best && (world.findBlocks(bot, new RegExp('^' + best + '_log$'), { maxDistance: 64, count: 1, filter: b => g0.treeOK(b) })[0] || g0.knownResource(best + '_log', bot.entity.position))) return best
   // not enough held: the wood that grows nearest (natural trees, outside protected zones)
-  const t = world.findBlocks(bot, /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/, { maxDistance: 64, count: 8, filter: b => !avoid.has(b.name.replace('_log', '')) && require('./gather').treeOK(b) })[0] // (the orchard's trees count as wood that grows here)
+  const t = world.findBlocks(bot, /^(oak|spruce|birch|jungle|acacia|dark_oak|mangrove|cherry|pale_oak)_log$/, { maxDistance: 64, count: 8, filter: b => freshOk(b.name.replace('_log', '')) && require('./gather').treeOK(b) })[0] // (the orchard's trees count as wood that grows here)
   if (t) return t.name.replace('_log', '')
   // none in sight: the nearest forest we remember (seen on a walk, felled before, or pointed out by the operator)
   const g = require('./gather')
   let near = null
-  for (const w of WOODS) { const k = g.knownResource(w + '_log', bot.entity.position); if (k && (!near || world.dist2(k, bot.entity.position) < world.dist2(near.p, bot.entity.position))) near = { w, p: k } }
+  for (const w of anyWood) { const k = g.knownResource(w + '_log', bot.entity.position); if (k && (!near || world.dist2(k, bot.entity.position) < world.dist2(near.p, bot.entity.position))) near = { w, p: k } }
   if (near) return near.w
   return best || null // (the caller's last resort decides)
 }
@@ -544,7 +574,7 @@ async function craftItem (bot, name, n, ctx) {
           const chosen = ing; ing = w + '_planks'
           // (only when the override changed the wood: chooseRecipe's own choice is on the tally already)
           let res = null; try { res = require('./materials').reservedSpecies(bot) } catch {}
-          if (chosen !== ing && res && res.has(w)) noteReservedSpent(bot, w, Math.max(0, total - inv.count(bot, ing)))
+          if (chosen !== ing && res && res.has(w)) { const fs = Math.min(Math.max(0, total - inv.count(bot, ing)), Math.max(0, reachableWood(bot, w, !!(ctx && ctx.noWithdraw)) - inv.count(bot, ing))); if (fs > 0) noteReservedSpent(bot, w, fs) }
         }
       }
       if (inv.count(bot, ing) < per * crafts) {
@@ -694,6 +724,14 @@ async function craftTimes (bot, name, crafts, { shouldStop } = {}) {
 //  the planks for a log, the log's chop for an axe again: a loop with no wait in it, 66 lines in seconds and the body
 //  starved, 2026-09-29. Nested, it says no: the chop goes on by hand - a log is punched)
 const makingTool = new Set()
+function packMakes (bot, name) {
+  try {
+    const it = world.data(bot).itemsByName[name]
+    if (!it) return false
+    const table = inv.has(bot, 'crafting_table') || !!world.findBlocks(bot, /^crafting_table$/, { maxDistance: 4, count: 1 })[0]
+    return !!bot.recipesFor(it.id, null, 1, table || null)[0]
+  } catch { return false }
+}
 async function keepTool (bot, kind, { minUses = 4, noWithdraw = null, shouldStop, stack = null } = {}) {
   if (inv.bestTool(bot, kind, minUses)) return true
   if (makingTool.has(kind)) return false
@@ -705,7 +743,12 @@ async function keepToolInner (bot, kind, { minUses, noWithdraw, shouldStop, stac
   //  chestplate, and iron is what runs short. The build plan's wanted set can't answer "spare": the armour's iron is
   //  not in it; audit 2026-09-28)
   const want = kind === 'pickaxe' && inv.count(bot, 'iron_ingot') >= 3 ? `iron_${kind}` : inv.count(bot, 'cobblestone') >= 3 ? `stone_${kind}` : `wooden_${kind}`
-  const nw = noWithdraw != null ? noWithdraw : base().distHome(bot) > 64
+  // (MADE WHERE IT IS NEEDED - the pack holds all of one now, a table with it: a craft of a second or two beats any chest
+  //  walk, and that walk is made with the worn-out tool's work undone. At the mine's ore, 20 below the surface with home
+  //  "near" (64b), the chest walk for a banked stone pickaxe climbed 11 andesite by hand at 7.5s a block, timed out at
+  //  the chest, then made one from the pack's cobble and sticks after all, 2026-11-15 01:28-01:30. The bank only for a
+  //  tool the pack can't make - or one that costs iron: near home the bank's tool keeps the armour's ingots; audit F20-1)
+  const nw = (!/^iron_/.test(want) && packMakes(bot, want)) || (noWithdraw != null ? noWithdraw : base().distHome(bot) > 64)
   await ensure(bot, want, inv.count(bot, want) + 1, { noWithdraw: nw, shouldStop, stack }).catch(() => false) // (the chain's own stack: a cycle back to this tool is refused by ensure's one rule; audit)
   const ok = !!inv.bestTool(bot, kind, minUses)
   log('craft', ok ? `the ${kind} wore out - made a ${want}` : `the ${kind} wore out and no ${want} could be made${nw ? ' from the pack' : ''}`)

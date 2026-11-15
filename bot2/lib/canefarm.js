@@ -77,7 +77,9 @@ function freshSpots (bot, { scan = false } = {}) {
   return scanned.list.filter(c => !farm().spots.some(s => key(s) === key(c)))
 }
 // Spots with no cane in them now (cut to the ground, trampled) that can take it again
-function emptySpots (bot) { return farm().spots.filter(s => { const b = world.at(bot, s.x, s.y, s.z); return b && world.isAirish(b) && caneCellOK(bot, s) }) }
+// (cane itself reads "airish" - it has no box: a spot with a stalk standing in it counted as empty, every spot of a planted
+//  farm so, and the planter below "planted" them all again each pass - see plant)
+function emptySpots (bot) { return farm().spots.filter(s => { const b = world.at(bot, s.x, s.y, s.z); return b && b.name !== 'sugar_cane' && world.isAirish(b) && caneCellOK(bot, s) }) }
 // Would plant() put cane in the ground with `cane` to hand? (the director's trigger and the planter one rule)
 function plantable (bot, cane) {
   if (cane <= 0) return false
@@ -91,6 +93,13 @@ async function plant (bot, { shouldStop } = {}) {
   const f = farm()
   const keep = f.spots.filter(s => { const b = world.at(bot, s.x, s.y, s.z); return !b || caneCellOK(bot, s) })
   if (keep.length !== f.spots.length) { log('cane', `forgot ${f.spots.length - keep.length} cane spot(s) - no soil or water there now`); mem.set('caneFarm', { spots: keep }) }
+  // (wild cane already standing in one of the day's spots is the farm's from here on, nothing put in the ground: the planter
+  //  below took it in by "placing" on it - act.place answers done for a cell that holds the block - and counted it planted)
+  for (const c of freshSpots(bot, { scan: true })) {
+    if (farm().spots.length >= CANE_MAX) break
+    const b0 = world.at(bot, c.x, c.y, c.z)
+    if (b0 && b0.name === 'sugar_cane') mem.update(m => { m.caneFarm = m.caneFarm || { spots: [] }; m.caneFarm.spots.push({ x: c.x, y: c.y, z: c.z }) })
+  }
   const todo = emptySpots(bot).concat(freshSpots(bot, { scan: true }).slice(0, Math.max(0, CANE_MAX - farm().spots.length))).slice(0, PER_RUN)
   let planted = 0
   for (const c of todo) {
@@ -98,6 +107,8 @@ async function plant (bot, { shouldStop } = {}) {
     if (!inv.count(bot, 'sugar_cane')) break
     await reflex.waitClear()
     if (!caneCellOK(bot, c)) continue
+    // (a stalk already there is not planted again, nor counted: a task that put nothing in the ground succeeded on every pass)
+    { const b0 = world.at(bot, c.x, c.y, c.z); if (b0 && b0.name === 'sugar_cane') continue }
     if (!await act.place(bot, c, 'sugar_cane', { faceHint: [[0, -1, 0]] })) continue
     await new Promise(r => setTimeout(r, 300))
     const now = world.at(bot, c.x, c.y, c.z)

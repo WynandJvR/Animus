@@ -3,7 +3,7 @@
   "port": 25565,
   "username": "Claudebot",
   "auth": "offline",
-  "version": "26.2",
+  "version": "26.3",
   "bedrockPort": 19132,
   "operators": [],
   "aliases": ["claude"],

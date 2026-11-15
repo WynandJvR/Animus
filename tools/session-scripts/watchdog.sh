@@ -44,11 +44,15 @@ while true; do
   set -- $t; [ -n "$2" ] && [ "$2" != "null" ] && [ "$2" -gt 1200 ] && [ "$1" != "sleep" ] && [ "$1" != "expedition" ] && { echo "ALARM: task $1 running ${2}s"; exit 0; }
   # (a silent loop: one line - timestamps off, coordinates kept - 40+ times in 10 min. The strip loop (637 dead clicks) and
   #  the mine's corridor ping-pong (240 "turning") ran for hours under every other alarm, 2026-09-28)
-  sp=$(recentSinceDeploy 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sort | uniq -c | sort -rn | awk '$1>=40 {print; exit}')
-  [ -n "$sp" ] && { echo "ALARM: log loop: $sp"; exit 0; }
+  # (each loop line alarms ONCE: its text goes to loop.mark (gitignored - live coords) and is skipped after - a known, open
+  #  symptom ("no ring for N cells") stopped the watchdog every restart and nothing else was watched, 2026-11-15. Remove
+  #  loop.mark to re-arm them all)
+  lmark=/c/mc-bot-lab/tools/session-scripts/loop.mark; touch $lmark
+  sp=$(recentSinceDeploy 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sort | uniq -c | sort -rn | awk '$1>=40' | grep -avFf <(sed 's/^/ /' $lmark) | head -1)
+  [ -n "$sp" ] && { echo "$sp" | sed -E 's/^ *[0-9]+ //' >> $lmark; echo "ALARM: log loop: $sp"; exit 0; }
   # (the same kind of line at different cells - "blocked at X", "won't place at Y": numbers normalised, 60+ in 10 min)
-  sk=$(recentSinceDeploy 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sed -E 's/-?[0-9]+(\.[0-9]+)?/#/g' | sort | uniq -c | sort -rn | awk '$1>=60 {print; exit}')
-  [ -n "$sk" ] && { echo "ALARM: log loop (any cell): $sk"; exit 0; }
+  sk=$(recentSinceDeploy 10 | cut -c32- | grep -av "(op) \|(body)\|(vital)" | sed -E 's/-?[0-9]+(\.[0-9]+)?/#/g' | sort | uniq -c | sort -rn | awk '$1>=60' | grep -avFf <(sed 's/^/ /' $lmark) | head -1)
+  [ -n "$sk" ] && { echo "$sk" | sed -E 's/^ *[0-9]+ //' >> $lmark; echo "ALARM: log loop (any cell): $sk"; exit 0; }
   # a throw in the pathfinder's tick (caught: one path reset - patch-mc262.js) or an uncaught crash: the body's faults
   # a gate the path opens refusing its click at one spot, 5+ times in 2 min: the stuck retry (move.js path_use_error)
   pu=$(recent 2 | grep -aoE "path_use_error at [-0-9]+,[-0-9]+,[-0-9]+" | sort | uniq -c | sort -rn | awk '$1>=5 {print; exit}')
@@ -56,6 +60,12 @@ while true; do
   # walks giving up at ONE spot, 5+ in 10 min: trapped (a room, a crawlspace, a pit) - the escape should have fired
   gs=$(recent 10 | grep -aoE "gave up \(stuck x3\) at -?[0-9]+,-?[0-9]+,-?[0-9]+" | sort | uniq -c | sort -rn | awk '$1>=5 {print; exit}')
   [ -n "$gs" ] && { echo "ALARM: trapped - $gs"; exit 0; }
+  # the escape holding a finished cell because the walks fail where the way-out search finds an exit: a walk-model bug,
+  # and a held day by its cost - page at once (run the planner-vs-model diff at that cell first: castlewalktest)
+  # (once per line: a restart after the alarm re-read the same line from the last 5 minutes)
+  md=$(recent 5 | grep -a "the walks and the model disagree" | tail -1 | cut -c2-260)
+  mdmark=/c/mc-bot-lab/tools/session-scripts/disagree.mark
+  [ -n "$md" ] && [ "$md" != "$(cat $mdmark 2>/dev/null)" ] && { echo "$md" > $mdmark; echo "ALARM: walk model disagrees - $md"; exit 0; }
   # (the event loop stalled 2s+ three times in 10 min: the body froze - a deploy's search on the loop, 5-9s each, 3 in 3 min
   #  went unalarmed on 2026-10-02; body-first: a rollback trigger after a deploy)
   # (only stalls after the last deploy say anything of it - the ones before a rollback alarmed again after it)

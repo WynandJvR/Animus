@@ -546,18 +546,30 @@ async function refuelFurnaces (bot, { shouldStop = null } = {}) {
   for (const fb of tour(bot, busyFurnaces(bot))) {
     if (shouldStop && shouldStop()) break
     if (isLit(fb)) continue
-    const f = await openAt(bot, fb)
+    let f = await openAt(bot, fb)
     if (!f) continue
+    let noFuel = false
+    // (shut: noted and closed, once - the finally below finds nothing left to close)
+    const shut = () => { if (!f) return; try { note(fb, f, bot) } catch {} try { f.close() } catch {} f = null }
     try {
       if (f.outputItem()) await f.takeOutput().catch(() => {})
       await clearBucket(bot, f)
       const input = f.inputItem()
       if (input && !f.fuelItem()) {
         const survival = !!inv.COOKED_OF[input.name] // raw food waiting in a cold furnace is a meal, not the build's
-        if (!await pickFuel(bot, input.count, { survival })) { log('smelt', 'no fuel for the cold furnaces'); break }
-        if (await putFuel(bot, f, input.count, { survival })) fed++
+        const n = input.count
+        // THE FUEL IS FETCHED WITH THE FURNACE SHUT: pickFuel goes to the chests for coal (and opens them) whenever the pack
+        // is short - with this window still open, the chest took its place and closed, and putFuel then clicked the furnace's
+        // slot numbers on the pack's own window: the fuel into the 2x2 crafting grid or a throw, the furnace counted fed and
+        // still cold. Shut, fetched, opened again
+        shut()
+        if (!await pickFuel(bot, n, { survival })) { log('smelt', 'no fuel for the cold furnaces'); noFuel = true } else {
+          f = await openAt(bot, fb)
+          if (f && !f.fuelItem() && await putFuel(bot, f, n, { survival })) fed++
+        }
       }
-    } catch (e) { log('smelt', `refuel failed: ${e.message}`) } finally { try { note(fb, f, bot) } catch {} try { f.close() } catch {} }
+    } catch (e) { log('smelt', `refuel failed: ${e.message}`) } finally { shut() }
+    if (noFuel) break
   }
   if (fed) log('smelt', `refuelled ${fed} cold furnace${fed > 1 ? 's' : ''}`)
   return fed

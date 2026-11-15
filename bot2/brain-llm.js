@@ -112,7 +112,9 @@ async function fetchT (url, opts = {}, ms = 30000) {
 // they're left out / coarsely bucketed to avoid waking the LLM on every step.
 function signature (state) {
   if (!state) return 'none'
-  const players = (state.players || []).map(p => p.name).sort().join(',')
+  // (/state lists players as plain names: read as objects every one was `undefined`, and a player leaving as another
+  //  joined - the same count - changed nothing here)
+  const players = (state.players || []).map(p => (p && typeof p === 'object' ? p.name : p)).sort().join(',')
   // Threat: only its TYPE and whether it's CLOSE (melee range) are salient. Bucketing
   // by exact distance made a mob merely wandering nearby flip the signature every step,
   // waking the LLM constantly (wasted inference) and spawning repeat threat-chatter.

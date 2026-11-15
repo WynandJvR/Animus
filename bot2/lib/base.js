@@ -233,7 +233,11 @@ function indoorCount (bot, kind) { let n = 0; for (const p of indoorChests(bot))
 // what the safehouse's stock still lacks of `name`'s kind (0: full, or no chest inside)
 function safeShort (bot, name) { const k = safeKind(name); return k && indoorChests(bot).length ? Math.max(0, SAFE_STOCK[k] - indoorCount(bot, k)) : 0 }
 // (`only(p)`: the chests the caller may walk to - the hideout's indoor chests while mobs are about; the rest are skipped unopened)
-async function withdraw (bot, name, n, { maxWalk = 64, only = null } = {}) {
+// (THE WITHDRAW'S WALK: the chests it opens are those within this of where I stand - one number, the withdraws' and
+//  chestWithinWalk's, the director's "home first" for the window; audit F36-1)
+const WITHDRAW_WALK = 64
+function chestWithinWalk (bot) { const me = bot.entity && bot.entity.position; return !!me && knownChests(bot).some(p => world.dist3(p, me) <= WITHDRAW_WALK) }
+async function withdraw (bot, name, n, { maxWalk = WITHDRAW_WALK, only = null, needRoom = false } = {}) {
   if (n <= 0) return 0
   if (BANK_RESERVE[name] && inv.count(bot, name) > 0) n = Math.min(n, Math.max(0, bankCount(name) - BANK_RESERVE[name]))
   if (n <= 0) return 0
@@ -244,7 +248,12 @@ async function withdraw (bot, name, n, { maxWalk = 64, only = null } = {}) {
   //  once and stopped. Each chest was opened in turn, "inventory is full" fifteen times over in 30s, and the trip after it
   //  went mining with no room to pick up the cobble its next pickaxe needed, 2026-10-02)
   const room = () => inv.freeSlots(bot) > 0 || inv.items(bot).some(i => i.name === name && i.count < (i.stackSize || 64))
-  if (!room()) { await tossJunk(bot).catch(() => {}); if (!room()) { log('base', `the pack is full - no ${name} taken`); return 0 } }
+  // (`needRoom`: the caller's item is a NEED, not a fill - a slot is made for it as a player puts a stack back to take what
+  //  he came for: makeRoom, the haul first, then the window's blocks (they come back with the next withdraw), the kit kept.
+  //  4602 wheat_seeds in the chests and the farm's 49 cells bare - "the pack is full - no wheat_seeds taken", the bread
+  //  harvested and never replanted, 2026-11-15 08:44-08:46. The window's own fills never ask it: making room for one window
+  //  block puts another back - churn)
+  if (!room()) { await tossJunk(bot).catch(() => {}); if (!room() && needRoom && bankCount(name) > 0) await makeRoom(bot, 1).catch(() => false); if (!room()) { log('base', `the pack is full - no ${name} taken`); return 0 } }
   let got = 0; let full = false
   // (the safehouse's stock is drawn on last - the kit's arrows or bread from the nearest chest emptied it first; audit)
   const order = safeKind(name) && !only ? knownChests(bot).sort((a, b) => (move.insideHut(a) ? 1 : 0) - (move.insideHut(b) ? 1 : 0)) : knownChests(bot)
@@ -317,7 +326,7 @@ function roomPlan ({ names, needs, y, lowHead, slotsOf, keep, free, room }) {
   for (const nm of band) { if (free >= room) break; const s = slotsOf(nm) - (back.has(nm) ? slotsOf(nm) - 1 : 0); if (s > 0) { back.set(nm, keep(nm)); free += s } }
   return { back, noRetake }
 }
-async function withdrawMany (bot, list, { keepFree = 2, maxWalk = 64 } = {}) {
+async function withdrawMany (bot, list, { keepFree = 2, maxWalk = WITHDRAW_WALK } = {}) {
   const want = new Map(); for (const [nm, n] of list) if (n > 0) want.set(nm, (want.get(nm) || 0) + n)
   const goal = new Map(want); const start = {}; for (const nm of want.keys()) start[nm] = inv.count(bot, nm)
   const got = {}; let opened = 0
@@ -654,4 +663,4 @@ async function roomToCraft (bot, keep = new Set()) {
   return inv.freeSlots(bot) > 0
 }
 
-module.exports = { SPARE_KIT, buildNeedOf, toolsKept, depositByWear, withdrawPlan, roomPlan, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }
+module.exports = { WITHDRAW_WALK, chestWithinWalk, SPARE_KIT, buildNeedOf, toolsKept, depositByWear, withdrawPlan, roomPlan, home, setHome, distHome, withdraw, withdrawMany, depositItem, depositAll, setDepositKeep, depositKeepOf, depositHaul, goHome, tossJunk, makeRoom, roomToCraft, bankCount, bankCounts, knownChests, placeChest, notePlacedChest, ourChest, openChest, keepCount }

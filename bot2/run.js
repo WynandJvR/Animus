@@ -27,14 +27,22 @@ let killedBySupervisor = false
 let nudgeTimer = null
 
 // ---- probe target: mirror index.js's control-API + heartbeat-file resolution ------
-let cfg = {}
-try { cfg = require('./config.json') } catch { cfg = {} }
-const host = process.env.CONTROL_HOST || cfg.controlHost || '127.0.0.1'
-const port = parseInt(process.env.CONTROL_PORT || cfg.controlPort || 3001, 10)
+// (read again at every (re)start, as main.js reads it: a "Save + Reconnect" that moved the control port restarted the body
+//  on the new one while this probe still asked the old - three silent polls, and the supervisor killed a healthy bot)
+let host = '127.0.0.1'
+let port = 3001
+function readTarget () {
+  let cfg = {}
+  try { cfg = JSON.parse(require('fs').readFileSync(path.join(__dirname, 'config.json'), 'utf8')) } catch { cfg = {} }
+  host = process.env.CONTROL_HOST || cfg.controlHost || '127.0.0.1'
+  port = parseInt(process.env.CONTROL_PORT || cfg.controlPort || 3001, 10)
+}
+readTarget()
 const HB_FILE = process.env.HEARTBEAT_FILE || path.join(__dirname, 'heartbeat.json') // IDENTICAL to index.js HEARTBEAT_FILE
 
 function start () {
   lastStart = Date.now()
+  readTarget()
   // Re-arm the grace window on every (re)start, but PRESERVE the kill rate-limit across a
   // supervisor-kill restart (else kill -> restart -> grace-ends -> kill would loop at
   // grace-speed).
@@ -52,6 +60,8 @@ function start () {
     if (!killedBySupervisor) st.lastKillAt = 0
     killedBySupervisor = false
     if (stopping) return
+    // (78: the body says a restart cannot help - the server on another Minecraft version, main.js. Its own line says why)
+    if (code === 78) { console.log('[run] the bot stopped for a reason a restart cannot fix (the FATAL line above) - not restarting'); process.exit(78) }
     const ranMs = Date.now() - lastStart
     if (ranMs < 4000) quickCrashes++; else quickCrashes = 0
     // exit(0) = intentional restart (reconnect) -> come back fast; crashes back off
@@ -59,14 +69,18 @@ function start () {
     console.log(`[run] bot exited (code ${code}${signal ? ', ' + signal : ''}); restarting in ${delay}ms...`)
     setTimeout(start, delay)
   })
-  const stop = () => { stopping = true; try { child.kill() } catch {}; process.exit(0) }
-  process.on('SIGINT', stop)
-  process.on('SIGTERM', stop)
 }
+// (registered ONCE, on the child of the moment: inside start() every restart added another pair - eleven restarts in and
+//  Node warned of a listener leak, each old one still holding its closure)
+const stop = () => { stopping = true; try { child && child.kill() } catch {}; process.exit(0) }
+process.on('SIGINT', stop)
+process.on('SIGTERM', stop)
 
 // ---- the liveness poll (only armed when SUPERVISE) ---------------------------------
 async function pollTick () {
-  if (stopping || !child || child.exitCode != null) return // no live child - nothing to supervise
+  // (signalCode too: a child the supervisor killed exits with a signal and NO exit code - in the gap before its restart
+  //  the next poll judged the dead child's stale heartbeat and logged a kill-suppressed for a process already gone)
+  if (stopping || !child || child.exitCode != null || child.signalCode != null) return // no live child - nothing to supervise
   const hb = supervise.readHeartbeat(HB_FILE)
   const probe = await supervise.probeHealth(host, port, supervise.T.PROBE_TIMEOUT_MS)
   const r = supervise.decide(hb, probe, Date.now(), st)

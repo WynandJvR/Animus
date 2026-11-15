@@ -31,13 +31,14 @@ function ourGround (p) {
 function install (bot) {
   botRef = bot
   let blast = null // { at, c, r, cells }
+  let timer = null // (ONE clock, the latest blast's: the first blast's 1.5s, left running, closed the second's record early - two creepers a second apart, and the second's holes were never listed)
   bot._client.on('explosion', p => {
     const c = p.center || (p.x != null ? { x: p.x, y: p.y, z: p.z } : null)
     if (!c || !ourGround(c)) return
     try { if (!world.openSky(bot, { x: Math.floor(c.x), y: Math.floor(c.y) + 1, z: Math.floor(c.z) })) return } catch {}
     if (blast) finish()
     blast = { at: Date.now(), c, r: (p.radius || 3) + 1.5, cells: [] }
-    setTimeout(finish, 1500)
+    clearTimeout(timer); timer = setTimeout(finish, 1500)
   })
   bot.on('blockUpdate', (oldB, newB) => {
     if (!blast || !oldB || !newB || !oldB.position) return

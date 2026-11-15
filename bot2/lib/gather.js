@@ -392,7 +392,8 @@ function landingFall (bot, p, leavesAir) {
 }
 // (`onLevel()`: the caller's work at each level before the block under the feet goes - the litter's column beside the tower,
 //  taken as the body comes down past it)
-async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48, force = false, leavesAir = false, onLevel = null } = {}) {
+// (`own`: the builder's own pillar standing in a cell of the build - act.dig's opt-out, its caller's guards keep finished cells)
+async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max = 48, force = false, own = false, leavesAir = false, onLevel = null } = {}) {
   let n = 0; lastDownWhy = null
   for (let guard = 0; guard < max; guard++) {
     await landed(bot)
@@ -400,7 +401,7 @@ async function climbDownPillar (bot, ours, { allowZones = [], onDug = null, max 
     const under = standingOn(bot).find(c => ours(c))
     if (!under) break
     { const fall = landingFall(bot, under, leavesAir); const bl = world.at(bot, under.x, under.y - 1, under.z); if (fall > world.SAFE_DROP || !bl || world.isLavaBlock(bl) || world.isWaterBlock(bl)) { lastDownWhy = `a ${fall}-block drop${leavesAir ? ' (rotting leaves read as air)' : ''} (or lava/water) under ${under.x},${under.y},${under.z}`; break } }
-    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones, force }).catch(() => false)) { lastDownWhy = `${(world.at(bot, under.x, under.y, under.z) || {}).name || '?'} at ${under.x},${under.y},${under.z} would not dig: ${act.lastDigWhy() || '?'}`; break }
+    if (!await act.dig(bot, new Vec3(under.x, under.y, under.z), { noWalk: true, timeoutMs: 6000, allowZones, force, own }).catch(() => false)) { lastDownWhy = `${(world.at(bot, under.x, under.y, under.z) || {}).name || '?'} at ${under.x},${under.y},${under.z} would not dig: ${act.lastDigWhy() || '?'}`; break }
     // (the drop waited for by height, not the ground flag - read the tick after a dig it is still the old block's)
     { const t0 = Date.now(); while (Math.floor(bot.entity.position.y + 0.01) > under.y && Date.now() - t0 < 1500) await move.sleep(50) }
     n++; if (onDug) onDug(under)
@@ -564,12 +565,24 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     // (the cell the block goes into - the column's own, at y0 - is checked before the jump: between the jump's apex and the
     //  place no time is to spare)
     const cellB = world.at(bot, x0, y0, z0); const zn = move.inZone({ x: x0, y: y0, z: z0 })
-    if (!builder && cellB && move.isProtected(cellB, 'fill')) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); return false }
+    // (SURVIVAL'S TOWER - protectedOk - may put its filler into a cell of the build still unbuilt: the climb out of a pocket
+    //  sealed in the castle's roof rose from an unbuilt jukebox cell (none in stock), and "no tower - a cell of the build"
+    //  kept the bot there; 2026-11-15 03:31. Litter till it comes down (below), and the builder reads the cell undone, digs
+    //  the filler and places its block. Only a job's cell, open - never a hole's last face or a placed block's cell)
+    const unbuiltCell = () => { try { const jb = require('./build').getJob(); const c = jb && jb.index && jb.index.get(`${x0},${y0},${z0}`); return !!c && !c.clear && !!cellB && world.isAirish(cellB) && !require('./build').holeFaceAt({ x: x0, y: y0, z: z0 }) } catch { return false } }
+    if (!builder && cellB && move.isProtected(cellB, 'fill') && !(protectedOk && unbuiltCell())) { log('gather', `no tower at ${x0},${y0},${z0} - a cell of the build`); return false }
     // (the builder's towers never in the finished build's walking space - its stairs, ladders, corridors: designwalk.js; an
     //  escape's tower is survival's - and only then: protectedOk, move's climb-out when escapeUrgent and the surfacing climb;
     //  every other tower - a calm escape, the forager's, the litter climb - is refused it; audit 2026-10-07)
     if (builder || !protectedOk) { let wp = false; try { wp = require('./build').walkProtected({ x: x0, y: y0, z: z0 }) } catch {} if (wp) { towerWhy = 'the castle\'s own walking space'; return false } }
     if (zn && !allowZones.includes('*') && !allowZones.includes(zn.label)) { log('gather', `no tower at ${x0},${y0},${z0} - inside the ${zn.label}`); return false }
+    // (A BLOCK THAT IS USED WHEN CLICKED under the column - a trapdoor, a door, a chest (act.USE_REF_RE, the placing's own
+    //  list): the tower's click on it from a body standing USES it, vanilla's use before place - the castle roof's finished
+    //  trapdoor floor under a sealed pocket swung open at the first tower jump and the body dropped through it, 2026-11-15
+    //  03:49:35; audit F28-5. Sneaking, the block goes in on it: the crouch down and held before the jump (act.sneakDown -
+    //  the server's word, two ticks), let go after the place)
+    const usedOnClick = (() => { try { const bl = bot.blockAt(new Vec3(x0, y0 - 1, z0)); return !!bl && act.USE_REF_RE.test(bl.name) } catch { return false } })()
+    if (usedOnClick && !await act.sneakDown(bot)) { bot.setControlState('sneak', false); towerWhy = 'could not crouch for a place on a block that opens when clicked'; return false }
     await bot.look(bot.entity.yaw, -Math.PI / 2, true)
     bot.setControlState('jump', true)
     // THE PLACE GOES IN ON THE WAY UP, the tick the feet clear the cell: the server refuses a block into a cell the body is
@@ -583,12 +596,13 @@ async function towerUp (bot, { allowZones = [], onPlaced = null, builder = false
     bot.setControlState('jump', false) // (take-off is past; held through the place's reply it jumped again off the new block)
     // (drifted off the column mid-jump: no place onto a column it is not over - a backstop only: a body whose centre is
     //  past the edge comes down in the next column whatever we do; the settle above is what keeps it over its own)
-    if (Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) { towerWhy = 'drifted off the column in the jump'; await move.sleep(300); return false }
+    if (Math.floor(bot.entity.position.x) !== x0 || Math.floor(bot.entity.position.z) !== z0) { if (usedOnClick) bot.setControlState('sneak', false); towerWhy = 'drifted off the column in the jump'; await move.sleep(300); return false }
     const below = bot.blockAt(new Vec3(x0, y0 - 1, z0))
     let placeErr = null
     // (forceLook: the look straight down is already set - an unforced look waits a tick for the server, a tick of the fall)
     if (below && yAt > y0 + 1.0) await bot._placeBlockWithOptions(below, new Vec3(0, 1, 0), { swingArm: 'right', forceLook: true }).catch(e => { placeErr = e && e.message })
     else if (below) placeErr = 'the jump never cleared the cell'
+    if (usedOnClick) bot.setControlState('sneak', false)
     const jumpNote = `jump: onGround ${g0}, placed at y${yAt.toFixed(2)} vy ${vyAt.toFixed(2)}, peak y${yMax.toFixed(2)} in ${Date.now() - t0}ms`
     // LANDED, then read: "up" is a body STANDING a block up (act.grounded), never one still in the jump - read at a fixed
     // 300ms, the jump's apex (y0+1.2) passed for a tower whose block never went in, and a felling counted a pillar block
@@ -660,10 +674,9 @@ const SPECIES_BIOMES = {
 const CHOP_TICKS = 2400 // (two minutes at the trees: a trip's worth)
 const BIOME_SPOTS = 8 // per biome: the nearest to home kept
 let biomesAt = null
-function noteBiomes (bot) {
+// the biome at the ground every 32 blocks out to sight (loaded columns only): [[name, Vec3 over the ground]]
+function sampleBiomes (bot) {
   const me = bot.entity.position
-  if (me.y < 55 || (biomesAt && world.dist2(biomesAt, me) < 48)) return // (underground: cave biomes; unmoved: nothing new)
-  biomesAt = { x: me.x, z: me.z }
   const reg = bot.registry; const R = Math.min(world.sightReach(bot) || 96, 192)
   const seen = []
   for (let dx = -R; dx <= R; dx += 32) {
@@ -678,6 +691,13 @@ function noteBiomes (bot) {
       if (b && b.name) seen.push([b.name.replace(/^minecraft:/, ''), p])
     }
   }
+  return seen
+}
+function noteBiomes (bot) {
+  const me = bot.entity.position
+  if (me.y < 55 || (biomesAt && world.dist2(biomesAt, me) < 48)) return // (underground: cave biomes; unmoved: nothing new)
+  biomesAt = { x: me.x, z: me.z }
+  const seen = sampleBiomes(bot)
   const has = mem.get().biomes || {}; const home = mem.get().home
   // (new to the list, and one a full list would keep - else it goes straight out again, and the whole memory file is
   //  written on the event loop for nothing, every leg of a long walk)
@@ -893,6 +913,9 @@ async function mine (bot, itemName, g, n, ctx = {}) {
 // ctx.filter(b): which of the plants to take (a ripe cocoa pod, a cactus's top segment); ctx.force: a plant the dig's
 // natural list lacks (cocoa, sea pickles, azaleas) - still never in a zone (outOfZones) nor a finished build cell (act.dig)
 const PLANT_FROM_HOME = 1200 // (the plants' remembered patches: as far as their lands go - forage.LAND_FAR)
+// A SHOOTER ON US: no voluntary walk then - the meadow's pillager camp took hp 20 -> 17 before any hop (audit 67(a)). One
+// test for the land's hops (forage.landTrip) and the walk over to a plant in sight
+function shooterOnUs () { return reflex.hostiles(24).some(x => reflex.RANGED.has(x.e.name) && reflex.canSee(x.e)) }
 async function pickPlants (bot, re, itemName, n, ctx = {}) {
   const label = typeof itemName === 'string' ? itemName : ctx.label || (re.source.replace(/^\^\(?|\)?\$$/g, '').split('|')[0] + ' and the like')
   // (the red flowers' spots were stored as 'red flowers' before the label came from the pattern: still read, 2026-09-27)
@@ -903,19 +926,37 @@ async function pickPlants (bot, re, itemName, n, ctx = {}) {
   const skip = new Set()
   let justForgot = false // (a spot just forgotten: the next remembered one is walked to this same trip; audit)
   let wentTo = null // (the remembered spot walked to: none there now - picked out - is forgotten, so the next nearest is the next lead)
+  let farFails = 0 // (walks over to a plant in sight that failed: two, and the rest of this look is the 48 ring; audit 79 LOW 1)
   while (inv.count(bot, itemName) < target) {
     await new Promise(r => setImmediate(r)) // yield: never spin on resolved promises
     if (ctx.shouldStop && ctx.shouldStop()) return false
     await reflex.waitClear()
     // (liquid water only: a waterlogged plant is a plant - every wild sea pickle is waterlogged, and the old test hid them
     //  all, 2026-09-27)
-    const b = world.findBlocks(bot, re, { maxDistance: 48, count: 24, filter: x => outOfZones(x) && !skip.has(x.position.toString()) && !world.isLiquidWater(x) && take(x) })[0]
+    // (ctx.sight - A LAND LOOKED ROUND TAKES IN ALL IT SEES: the far land's look searched 48 blocks round each stop while the
+    //  chunks stood loaded three times that far - two meadows walked 600 and 776 blocks for, "no allium" from a 48-block
+    //  ring each, 2026-11-15. Out to what is loaded (128 at most), in slices - body first. Past 24 (the walk-over) only a plant
+    //  under the open sky (trees aside) is "in sight": the sphere runs through stone, and a walk to a cave's plant is a fall
+    //  into the cave (the 14:11 bamboo hunt; audit F79-2). One past a short walk is walked to first - the dig's own 20s
+    //  reach walk is for the plant beside us)
+    const pf = x => outOfZones(x) && !skip.has(x.position.toString()) && !world.isLiquidWater(x) && take(x)
+    const R = ctx.sight && farFails < 2 ? Math.max(48, Math.min(world.sightReach(bot) || 48, 128)) : 48
+    const me0 = bot.entity.position
+    const pfFar = x => pf(x) && (world.dist3(x.position, me0) <= 24 || world.openSky(bot, x.position, { throughTrees: true }))
+    const b = (R > 48 ? await world.scanBlocks(bot, re, { maxDistance: R, count: 24, filter: pfFar }) : world.findBlocks(bot, re, { maxDistance: 48, count: 24, filter: pf }))[0]
+    if (b && R > 48 && world.dist3(b.position, bot.entity.position) > 24) {
+      // (no voluntary walk with a shooter on us - the hops' rule, here too: meadow 2 lies 30b from a pillager camp; audit F79-1)
+      if (shooterOnUs()) { log('gather', `${label} in sight at ${move.fmt(b.position)} - a shooter in sight, no walk over`); return false }
+      log('gather', `${label} in sight ${Math.round(world.dist3(b.position, bot.entity.position))}b off at ${move.fmt(b.position)} - walking over`)
+      const tw = await move.travel(bot, b.position, { range: 3, shouldStop: ctx.shouldStop, label: 'to the ' + label, anyY: true })
+      if (!tw || !tw.ok) { skip.add(b.position.toString()); farFails++; continue }
+    }
     if (!b) {
       // (a remembered patch arrived at with none left to pick is forgotten: the nearest picked-out spot round home was walked to
       //  again and again while a sunflower plain's patch 270b out waited, 2026-10-04)
       // (only when none of the kind stands there at all - a regrowing plant not takeable yet, a cocoa pod unripe, keeps its spot; audit)
       if (wentTo && world.dist2(wentTo, bot.entity.position) < 24 && !world.findBlocks(bot, re, { maxDistance: 24, count: 1, point: new Vec3(wentTo.x, bot.entity.position.y, wentTo.z) }).length) { forgetResource(label, wentTo); if (legacy) forgetResource(legacy, wentTo); log('gather', `no ${label} left at ${wentTo.x},${wentTo.z} - forgotten`); wentTo = null; justForgot = true }
-      if (++empty > 3 || ctx.noExplore) { log('gather', `no ${label} to pick around here`); return false } // (noExplore: a trip to a far land - its rings round home are no search of it)
+      if (++empty > 3 || ctx.noExplore) { log('gather', `no ${label} to pick around here${ctx.sight ? ` (looked ${R}b round, ${skip.size} passed over)` : ''}`); return false } // (noExplore: a trip to a far land - its rings round home are no search of it)
       // (a patch found in its own land, past 200b - the bluets of a sunflower plain 270b out - is still the patch to go back to:
       //  forgotten at 200, every next trip searched the picked-out ground round home and came back empty, 2026-10-04; the
       //  director's day fit prices the same spot, PLANT_FROM_HOME)
@@ -1053,4 +1094,4 @@ async function findMatching (bot, match, accept) {
   return null
 }
 
-module.exports = { trunkBase, isNaturalTree, towerWhy: () => towerWhy, fellMega, megaTop, keepAxe, climbDownPillar, standingOn, landed, downWhy: () => lastDownWhy, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }
+module.exports = { shooterOnUs, sampleBiomes, trunkBase, isNaturalTree, towerWhy: () => towerWhy, fellMega, megaTop, keepAxe, climbDownPillar, standingOn, landed, downWhy: () => lastDownWhy, noteBiomes, speciesLand, climateLead, SPECIES_BIOMES, onGrounds, treeOK, wildTree, lastChopOutcome, outOfZones, chop, mine, explore, towerUp, noteResource, noteResources, forgetResource, knownResource, fellTree, pickPlants, survey, takeable }

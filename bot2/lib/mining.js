@@ -657,11 +657,46 @@ async function takeKnownOre (bot, itemName, target, ctx = {}) {
 // (reviewer 2026-09-30). A level not yet begun has its first cell in solid rock: opened by the mine's own guarded step
 // (fluid, lava, floor), never the planner's. Returns { ok, why } - why 'stopped', 'blocked' (a verdict: the caller counts
 // it as a trip that could not reach the face) or 'gone' (the level given up).
+// A FLIGHT WALKED DOWN ITS OWN STEPS, in legs: one walk to a foot 90 below left the planner to cut it short, and its best
+// partial node was the open hillside straight over the foot - nearer by its count than the stairs' top - so the walk went
+// down the outside, stuck on the grass 54 over y15 three trips running, and a finished 91-deep flight was thrown away for a
+// new mine, 2026-11-15 08:58-09:02. Each leg is FLIGHT_LEG steps down the flight's own line (the step's feet read there),
+// a search the planner finishes; off the line, its top first. Short or bent flights: the one walk, as ever.
+const FLIGHT_LEG = 12
+function stepFeet (bot, x, z, yGuess) {
+  const air = (y) => { const b = world.at(bot, x, y, z); return !!b && world.isAirish(b) && !world.isWaterBlock(b) && !world.isLavaBlock(b) }
+  for (let y = yGuess + 2; y >= yGuess - 3; y--) { const fl = world.at(bot, x, y - 1, z); if (air(y) && air(y + 1) && fl && world.isSolid(fl)) return y }
+  return null
+}
+async function walkFlight (bot, top, end, goal, walkTo, stop) {
+  const one = q => move.goTo(bot, new goals.GoalBlock(q.x, q.y, q.z), walkTo(q))
+  const dx = Math.sign(end.x - top.x); const dz = Math.sign(end.z - top.z)
+  const n = Math.max(Math.abs(end.x - top.x), Math.abs(end.z - top.z))
+  const me = world.feetPos(bot)
+  // (legs only for a long way down: a body at or near the foot's level, off the line - on the level's own floor - takes the
+  //  one walk as ever, never up the whole flight and back; audit F55-1)
+  if ((dx && dz) || n < FLIGHT_LEG * 2 || me.y - end.y < FLIGHT_LEG * 2) return one(goal)
+  const yAt = k => top.y + Math.round((end.y - top.y) * k / n)
+  const along = dx ? (me.x - top.x) * dx : (me.z - top.z) * dz
+  const aside = dx ? Math.abs(me.z - top.z) : Math.abs(me.x - top.x)
+  let k0 = along >= 0 && along <= n && aside <= 1 && Math.abs(me.y - yAt(along)) <= 2 ? along : null
+  if (k0 == null) { const r = await one(top); if (!r.ok) return r; k0 = 0 }
+  for (let k = k0 + FLIGHT_LEG; k < n - 2; k += FLIGHT_LEG) {
+    if (stop && stop()) return { ok: false, why: 'stopped' }
+    const x = top.x + dx * k; const z = top.z + dz * k
+    const y = stepFeet(bot, x, z, yAt(k))
+    if (y == null) break // (a step it cannot read - a cave across the flight: the rest in one walk from here)
+    log('mine', `flight leg ${k}/${n} at ${move.fmt({ x, y, z })}`)
+    const r = await one({ x, y, z })
+    if (!r.ok) return r
+  }
+  return one(goal)
+}
 // A PIT IN THE STAIRS, mended as a player would: one block into it. Every flight walk is walked, never dug or placed - a
 // step that falls away more than a safe drop (a floor dug out from under it) blocked the mine's stairs for good: "the stairs
 // to y21 are blocked (timeout)" three trips running, the mine and its y21 level - the cobweb trip's - about to be thrown
 // away, 2026-10-04 (a 4-deep pit at the flight's fifth step). The flight walked down from its top, step by step: where the
-// next step's floor lies more than SAFE_DROP under this one, a filler block goes in a step below this one's feet, clicked on
+// next step's floor lies more than one under this one, a filler block goes in a step below this one's feet, clicked on
 // this step's own column. A straight flight only; anything it cannot read or reach, it leaves as it was.
 async function mendFlight (bot, top, end, ctx = {}) {
   const dx = Math.sign(end.x - top.x); const dz = Math.sign(end.z - top.z)
@@ -679,7 +714,13 @@ async function mendFlight (bot, top, end, ctx = {}) {
     // the step above (openCell: natural ground and filler only, never fluid or a structure), then read on
     {
       const ey = Math.max(prev.y - 1, end.y)
-      const cut = [ey + 2, ey + 1, ey].map(y => ({ x, y, z })).filter(c => !air(c.x, c.y, c.z))
+      // (the flight's own three cells here - `whole` - and those of them that hold a block - `cut`, what is dug. The plugs
+      //  after read the WHOLE: given only the dug cell, "the cell over the column's top" was the stairwell's own head room
+      //  and the wall-up went into it - the step at y16 mended, cobblestone set at y17 over it, "walled up 2 cave openings",
+      //  and the mine's stairs blocked a step from their foot: no iron, no cobblestone, the scaffold's stock run dry,
+      //  2026-11-14 21:07. The next walk down finds that block as a filled step and takes it out again)
+      const whole = [ey + 2, ey + 1, ey].map(y => ({ x, y, z }))
+      const cut = whole.filter(c => !air(c.x, c.y, c.z))
       const fl = world.at(bot, x, ey - 1, z)
       if (cut.length && fl && world.isSolid(fl)) {
         const r = world.dist3(world.feetPos(bot), prev) < 0.5 ? { ok: true } : await move.goTo(bot, new goals.GoalBlock(prev.x, prev.y, prev.z), { timeoutMs: 60000, stuckMs: 12000, dig: false, place: false, label: 'to the filled step', shouldStop: ctx.shouldStop })
@@ -690,7 +731,7 @@ async function mendFlight (bot, top, end, ctx = {}) {
         if (wet) { log('mine', `${wet} beside the filled step at ${move.fmt({ x, y: ey, z })} - left as it is`); break }
         let opened = true
         for (const c of cut) if (!await openCell(bot, c)) { opened = false; break }
-        if (opened) { await plugWater(bot, cut).catch(() => {}); await plugOpenings(bot, cut, { x: dx, z: dz }).catch(() => {}) }
+        if (opened) { await plugWater(bot, whole).catch(() => {}); await plugOpenings(bot, whole, { x: dx, z: dz }).catch(() => {}) }
         if (!opened) { log('mine', `the filled step at ${move.fmt({ x, y: ey, z })} would not open`); break }
         log('mine', `mended a filled step in the stairs at ${move.fmt({ x, y: ey, z })} (${cut.length} block${cut.length > 1 ? 's' : ''} dug)`)
         mended++
@@ -698,7 +739,12 @@ async function mendFlight (bot, top, end, ctx = {}) {
     }
     const fy = feetAt(x, z, prev.y)
     if (fy == null) break // (a step it cannot read: left as it is)
-    if (prev.y - fy > world.SAFE_DROP) {
+    // (a pit is ANY step lower than one down: the flight is cut 1:1, and its walk (walkFlight's legs) reads it so. A 3-deep
+    //  cave hole under a step was read as a walkable drop and the mend read on from the cave's floor - the next five REAL
+    //  steps "filled" 3 over that line, their floors dug out (-2336,68..64 "mended a filled step (2 blocks dug)"), the
+    //  stairs left with a dip and a walk down them stuck off the line, 2026-11-15 10:39-10:40. The step's own floor filled
+    //  instead; the dip it dug is mended the same way, a block a step)
+    if (prev.y - fy > 1) {
       // (never under the flight's own foot: the stair ends at its level - a cave under the last steps took three blocks at
       //  y18-20 and the walk stuck at the foot, 2026-10-04)
       const nf = Math.max(prev.y - 1, end.y)
@@ -736,12 +782,13 @@ async function downTheMine (bot, m, ctx = {}) {
         if (world.dist3(world.feetPos(bot), foot) >= 0.5 || !await digStep(bot, m, foot, t)) { log('mine', `the stairs to y${Ls[i].level} are blocked at ${move.fmt(t)} (the first step would not open)`); return { ok: false, why: 'blocked' } }
         continue
       }
-      let r = await move.goTo(bot, new goals.GoalBlock(p.x, p.y, p.z), walkTo(p))
+      const viaFlight = () => p === foot && P.stairTop && P.stairsEnd ? walkFlight(bot, P.stairTop, P.stairsEnd, p, walkTo, ctx.shouldStop) : move.goTo(bot, new goals.GoalBlock(p.x, p.y, p.z), walkTo(p))
+      let r = await viaFlight()
       // (blocked on the way to an upper level's foot: that flight mended from its top, and the walk once more - the active
       //  flight's own rule, below)
       if (!r.ok && move.isVerdict(r) && p === foot && P.stairTop && P.stairsEnd) {
         if (world.dist3(world.feetPos(bot), P.stairTop) > 2) await move.goTo(bot, new goals.GoalBlock(P.stairTop.x, P.stairTop.y, P.stairTop.z), walkTo(P.stairTop)).catch(() => null)
-        if (world.dist3(world.feetPos(bot), P.stairTop) <= 2 && await mendFlight(bot, P.stairTop, P.stairsEnd, ctx) > 0) r = await move.goTo(bot, new goals.GoalBlock(p.x, p.y, p.z), walkTo(p))
+        if (world.dist3(world.feetPos(bot), P.stairTop) <= 2 && await mendFlight(bot, P.stairTop, P.stairsEnd, ctx) > 0) r = await viaFlight()
       }
       if (!r.ok) {
         if (!move.isVerdict(r)) return { ok: false, why: r.why }
@@ -756,11 +803,12 @@ async function downTheMine (bot, m, ctx = {}) {
   const A = Ls[m.active || 0]
   if (A && A.stairsDone && A.stairsEnd && Math.floor(bot.entity.position.y) > A.stairsEnd.y && world.dist3(world.feetPos(bot), A.stairsEnd) >= 0.5) {
     if (ctx.shouldStop && ctx.shouldStop()) return { ok: false, why: 'stopped' }
-    let r = await move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walkTo(A.stairsEnd))
+    const viaFlight = () => A.stairTop ? walkFlight(bot, A.stairTop, A.stairsEnd, A.stairsEnd, walkTo, ctx.shouldStop) : move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walkTo(A.stairsEnd))
+    let r = await viaFlight()
     // (blocked: the flight walked from its top for a pit in it, and the walk once more if one was mended)
     if (!r.ok && move.isVerdict(r) && A.stairTop) {
       if (world.dist3(world.feetPos(bot), A.stairTop) > 2) await move.goTo(bot, new goals.GoalBlock(A.stairTop.x, A.stairTop.y, A.stairTop.z), walkTo(A.stairTop)).catch(() => null)
-      if (world.dist3(world.feetPos(bot), A.stairTop) <= 2 && await mendFlight(bot, A.stairTop, A.stairsEnd, ctx) > 0) r = await move.goTo(bot, new goals.GoalBlock(A.stairsEnd.x, A.stairsEnd.y, A.stairsEnd.z), walkTo(A.stairsEnd))
+      if (world.dist3(world.feetPos(bot), A.stairTop) <= 2 && await mendFlight(bot, A.stairTop, A.stairsEnd, ctx) > 0) r = await viaFlight()
     }
     if (!r.ok) {
       if (!move.isVerdict(r)) return { ok: false, why: r.why }
@@ -987,17 +1035,22 @@ async function sealBehind (bot, m) {
   const me = world.feetPos(bot)
   const back = { x: me.x - m.dir.x, z: me.z - m.dir.z }
   const up = m.stairsDone ? 0 : 1 // on the stairs the cell behind is one step up
-  const filler = () => fillerItem(bot)
-  let placed = 0
-  for (const dy of [0, 1, 2]) {
-    const p = { x: back.x, y: me.y + up + dy - (up ? 0 : 0), z: back.z }
-    if (!m.stairsDone && dy === 2) continue
-    if (m.stairsDone && dy === 2) continue
+  // THE WHOLE PASSAGE, NOT ITS MIDDLE: the tunnel is three wide and three high since openTunnelCell takes the side columns
+  // (below) - the plug stayed the two blocks of the one-wide days, feet and head of the middle column, and whatever came
+  // down the stairs walked past it through either side. In the tunnel every open cell of the 3x3 behind is filled (the
+  // middle column first: with filler short, the most shut that can be); on the stairs - one wide - the two as before.
+  const side = { x: -m.dir.z, z: m.dir.x }
+  const cells = []
+  if (m.stairsDone) { for (const k of [0, 1, -1]) for (const dy of [0, 1, 2]) cells.push({ x: back.x + side.x * k, y: me.y + dy, z: back.z + side.z * k }) } else for (const dy of [0, 1]) cells.push({ x: back.x, y: me.y + up + dy, z: back.z })
+  let placed = 0; let open = 0
+  for (const p of cells) {
     const c = world.at(bot, p.x, p.y, p.z)
-    const f = filler()
-    if (c && world.isAirish(c) && f && await act.place(bot, p, f.name)) placed++
+    if (!c || !world.isAirish(c)) continue
+    const f = fillerItem(bot)
+    if (f && await act.place(bot, p, f.name)) placed++; else open++
   }
-  if (placed) log('mine', `sealed the passage behind me (${placed} blocks)`)
+  // (what happened, not what was meant: a plug with cells still open is said so)
+  if (placed || open) log('mine', `sealed the passage behind me (${placed} blocks${open ? `, ${open} cell(s) still open - ${fillerItem(bot) ? 'would not place' : 'out of filler'}` : ''})`)
 }
 
 // A tunnel that breaks into a cave is a door for every mob in that cave (a zombie and a skeleton came in
@@ -1055,8 +1108,14 @@ async function plugWater (bot, cells) {
 // (and the ground under the build, the one rule of move.underBuild - its footprint +8: the mine's own stairs and face kept
 //  only +2 off it, a cursor could tunnel inside the margin under the castle; the audit, 2026-09-27. A column with no y is
 //  judged below the build's floor, where the mine always is)
+// (the castle and the base at any depth, as ever; the zones on the ground - the orchard's saplings, the farm, the pen - only
+//  near their floor: 53 sapling boxes over the hill refused the new mine's stairs at y45-49, 65 blocks under the saplings,
+//  and two levels were given up for it, 2026-11-15 09:03. A column with no y is the mine's depth, as above)
+const DEEP_ZONES = new Set(['build', 'base'])
+const ZONE_UNDER = 6
 function underOwnZone (p) {
-  return move.zones.some(z => p.x >= z.x1 - 2 && p.x <= z.x2 + 2 && p.z >= z.z1 - 2 && p.z <= z.z2 + 2) || move.underBuild({ x: p.x, y: p.y != null ? p.y : -64, z: p.z })
+  const y = p.y != null ? p.y : -64
+  return move.zones.some(z => p.x >= z.x1 - 2 && p.x <= z.x2 + 2 && p.z >= z.z1 - 2 && p.z <= z.z2 + 2 && (DEEP_ZONES.has(z.label) || z.y1 == null || y >= z.y1 - ZONE_UNDER)) || move.underBuild({ x: p.x, y, z: p.z })
 }
 
 // ONE STAIR STEP from c into q (three high), the stairs' guarded dig: never under a build, never beside fluid, never onto

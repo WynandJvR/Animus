@@ -40,6 +40,15 @@ bot.loadPlugin(pathfinder)
 
 const body = require(path.join(BOT_DIR, 'body.js'))
 try { body.setNoteSink && body.setNoteSink(m => log('body', m)); body.install(bot) } catch (e) { log('boot', 'body.install failed: ' + e.message) }
+try { const os = require(path.join(BOT_DIR, 'offset-shapes.js')).install(bot); log('boot', 'offset shapes ' + JSON.stringify(os)) } catch (e) { log('boot', 'offset shapes failed: ' + e.message) }
+// (THE SERVER'S HAND CHANGES, said as they come - before the library applies them, so "I had" is the client's slot before:
+//  evidence for the held slot out of step with the server's; places that put a filler block in where a slab was equipped,
+//  2026-11-15; audit hypothesis (d). Rare: the join, a respawn, a server correction)
+// (PACKETS THE LIBRARY COULD NOT READ WHOLE: protodef drops a partial read with only a console line (stdout - never this log)
+//  and passes a short read on with one. A window_items or set_slot lost so is a pack the client believes it holds; the 26.3
+//  component table is home-made past id 40 - audit (b'). Said here, cut short, 20 a minute at most: evidence)
+{ const c0 = console.log; let n = 0; let t = 0; console.log = function (...a) { try { const s = String(a[0] || ''); if (/^(Chunk size is|PartialReadError)/.test(s)) { const now = Date.now(); if (now - t > 60000) { t = now; n = 0 } if (++n <= 20) log('wire', s.replace(/; buffer :[0-9a-f]+/, '').slice(0, 300)) } } catch {} return c0.apply(this, a) } }
+try { bot._client.prependListener('held_item_slot', p => log('inv', `the server set my hand to hotbar ${p && p.slot} (I had ${bot.quickBarSlot})`)) } catch {}
 // PINNED for good: the server moves us back every tick (body.pinned) because the client's copy of the world there
 // is wrong - 2026-09-23 a glass pane connected to its new log neighbour round the bot's hitbox and the server
 // corrected it 0.06b a tick for ten minutes; every walk out failed, a relog (fresh chunks) walked out in seconds.
@@ -259,9 +268,24 @@ bot.on('chat', async (from, message) => {
   bot.chat(String(out).slice(0, 200))
 })
 
-bot.on('kicked', r => log('conn', 'kicked: ' + (typeof r === 'string' ? r : JSON.stringify(r)).slice(0, 300)))
-bot.on('error', e => log('conn', 'error: ' + e.message))
-bot.on('end', r => { log('conn', 'disconnected: ' + r + ' - exiting so the supervisor restarts us'); setTimeout(() => process.exit(0), 1000) })
+// A SERVER ON ANOTHER MINECRAFT VERSION IS NO RECONNECT: the server moved to a newer release and every login was the same
+// kick ("Outdated client!") - the supervisor brought the body back for the next one every 12 seconds, for as long as it
+// was left, and nothing said why to whoever pressed Start (2026-11-14). Said once, in a line the panel shows, and out with
+// the code the supervisor does not restart on (run.js)
+const WRONG_VERSION_EXIT = 78
+let wrongVersion = null
+bot.on('kicked', r => { const s = (typeof r === 'string' ? r : JSON.stringify(r)).slice(0, 300); log('conn', 'kicked: ' + s); if (/outdated (client|server)/i.test(s)) wrongVersion = wrongVersion || s })
+bot.on('error', e => { log('conn', 'error: ' + e.message); if (/this server is version|outdated (client|server)/i.test(e.message || '')) wrongVersion = e.message })
+bot.on('end', r => {
+  if (wrongVersion || r === 'differentVersionError') {
+    const why = `the server runs another Minecraft version than this bot is set to (${version}): ${String(wrongVersion || r).replace(/, please specify.*$/, '')} - set Version in Setup to the server's and press Start; not retrying`
+    log('conn', why)
+    try { console.error('FATAL: ' + why) } catch {}
+    setTimeout(() => process.exit(WRONG_VERSION_EXIT), 1000)
+    return
+  }
+  log('conn', 'disconnected: ' + r + ' - exiting so the supervisor restarts us'); setTimeout(() => process.exit(0), 1000)
+})
 
 // event-loop lag: a stall here is a disconnect waiting to happen (keep-alives stop) - make it loud
 // ...and say WHAT stalled it: the heavy synchronous calls, timed (an async one up to its first await - the part that

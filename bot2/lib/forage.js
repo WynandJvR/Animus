@@ -162,6 +162,7 @@ async function gatherRaw (bot, raw, n, ctx = {}) {
     // (searched out round home is not the end of a plant: it grows in its own country - a trip there, as a player would)
     const L = s.kind === 'plant' ? landLead(raw) : null
     if (!L) { log('forage', `${raw}: searched out round this home - not going again until one is seen`); return false }
+    if (L.overnight) { log('forage', `${raw}: its land, the ${L.biome} ${Math.round(L.d)}b off, is past a day's walk there and back - an expedition's (the far trip)`); return false }
     return landTrip(bot, raw, s, n, L, ctx)
   }
   const count = counter(s)
@@ -208,42 +209,119 @@ const PLANT_BIOMES = {
   peony: /^(flower_forest|forest|birch_forest)$/
 }
 const LAND_NEAR = 80; const LAND_FAR = 1200
-function landLead (raw, from = null) {
+// (AN EXPEDITION'S REACH: a land whose walk there is up to a day and a half of daylight - an expedition camps on the way and
+//  walks home after its nights. LAND_FAR held it to 1200 blocks: eight meadows within it searched empty for the allium, the
+//  flower forests the map knows 2630-3025 blocks out, "no more land of allium known", 2026-11-15 15:16)
+// (tied to the director's MAX_NIGHTS 3: a day and a half each way and a day's look round is about the nights it allows; the
+//  director's expedition start says so when a land's round trip runs past them - audit 81(b))
+const EXPEDITION_WALK = 18000
+const NIGHT_TICKS = 12000 // (a night camped out: a day of the build's daylight lost - the land rank's price of one)
+const LAND_HOPS = 3; const LAND_HOP = 40 // (the land looked round: three more looks, each 40 from the last - see landTrip)
+// (ROUND THIS LAND, not to the next: a look's spot within LAND_SPAN of where the land was reached - the 776b meadow's first
+//  look found none, and its nearest other sample of meadow was 202b back east, the meadow given up twice by a pillager camp:
+//  the "look round" walked off to it, 2026-11-15 13:39. Another land is the expedition's next land, or another day's)
+const LAND_SPAN = 96
+// (not: lands to pass over besides the given-up ones - an expedition's own, searched this trip: landLead)
+function landLead (raw, from = null, not = []) {
   const s = spec(raw); if (!s || s.kind !== 'plant') return null
   const names = Object.keys(PLANT_BIOMES).filter(p => s.blocks.test(p)); if (!names.length) return null
   const at = from || home(); if (!at) return null
   const tried = ((mem.get().plantLandTried || {})[raw]) || []
+  // (WHAT EACH KIND OF LAND HAS GIVEN THIS PLANT: its empty visits, by biome - the land's own record (t.biome), or for one
+  //  written before it kept one, the biome the map knows there. A biome all empty visits is a thin land for it: ten empty
+  //  visits to meadows (a flower's gradient leaves most of a meadow grass) and the next meadow was still the nearest lead,
+  //  the flower forest - a flower at every spot - never one, 2026-11-15. Ranked by the walk times one more than its empty
+  //  visits: the nearest first while nothing is known, the record deciding once it has spoken)
+  const biomesMap = mem.get().biomes || {}
+  const biomeOf = t => { if (t.biome) return t.biome; let bn = null; let bd = 64; for (const [n0, l] of Object.entries(biomesMap)) for (const q of l) { const dd = world.dist2(q, t); if (dd < bd) { bd = dd; bn = n0 } } return bn } // (the nearest sample's)
+  const empties = {}
+  const h0 = home()
+  for (const t of tried) { const b = biomeOf(t); if (b) empties[b] = (empties[b] || 0) + (t.n || 1) }
   let best = null
-  for (const [n, list] of Object.entries(mem.get().biomes || {})) {
+  for (const [n, list] of Object.entries(biomesMap)) {
     if (!names.some(p => PLANT_BIOMES[p].test(n))) continue
     for (const q of list) {
       const d = world.dist2(q, at)
-      if (d < LAND_NEAR || d > LAND_FAR || tried.some(t => world.dist2(t, q) < 64 && (t.n || 1) >= 2)) continue // (a land is given up after two empty visits: flowers grow in patches; audit)
+      // (a day trip's lands within LAND_FAR; past it, an expedition's within its walk - EXPEDITION_WALK - from here AND from
+      //  home: an expedition's next land, asked from where it stands, never leads it on past a walk home it can make)
+      if (d < LAND_NEAR || (d > LAND_FAR && world.walkTicks(at, { x: q.x, y: at.y, z: q.z }) > EXPEDITION_WALK) || (h0 && world.walkTicks(h0, { x: q.x, y: h0.y, z: q.z }) > EXPEDITION_WALK) || tried.some(t => world.dist2(t, q) < 64 && (t.n || 1) >= 2) || not.some(t => world.dist2(t, q) < LAND_SPAN + 16)) continue // (a land searched this trip is all its look covered: the span round the arrival, the arrival within 16 of it; audit F76-1) // (a land is given up after two empty visits: flowers grow in patches; audit)
       const p = { x: q.x, y: at.y, z: q.z } // (a height for the walk's own estimate: the home's)
-      if (world.walkTicks(at, p) * 2 + 1200 + world.HOME_MARGIN > 12000) continue // (never a land no whole day reaches and returns from; audit)
-      if (!best || d < best.d) best = { x: q.x, y: at.y, z: q.z, biome: n, d }
+      // (A LAND NO DAY REACHES AND RETURNS FROM IS AN EXPEDITION'S, not no land: dropped here, the allium's one meadow in a
+      //  day's reach given up after two empty looks, the next one 776b off read as no land at all - and the castle's 11 allium
+      //  became a plant nothing could fetch, the round still told "11 allium first", 2026-11-15 13:22. Flagged: the day trip
+      //  never takes it (gatherRaw), the director's far trip sets out on an expedition for it, nights camped)
+      const overnight = d > LAND_FAR || world.walkTicks(at, p) * 2 + 1200 + world.HOME_MARGIN > 12000
+      // (IN WALK TIME, THE NIGHTS PRICED: a day trip and an expedition are not two distances - a 500b meadow tried twice would
+      //  have lost to a 1400b forest and its nights camped; a night out is a day of the build lost; audit F81-2)
+      const round = 2 * world.walkTicks(at, p); const nights = overnight ? Math.ceil(round / 12000) : 0
+      const rank = (round + nights * NIGHT_TICKS) * (1 + (empties[n] || 0))
+      if (!best || rank < best.rank) best = { x: q.x, y: at.y, z: q.z, biome: n, d, overnight, rank, empties: empties[n] || 0 }
     }
   }
   return best
 }
-async function landTrip (bot, raw, s, n, L, ctx) {
+// (overnight: an expedition's look round its land - the walk home is the expedition's, days off; each hop only asks for
+//  the daylight to get there, the night rules camp wherever it finds the bot)
+async function landTrip (bot, raw, s, n, L, ctx, { overnight = false } = {}) {
   const me = bot.entity.position; const h = home() || me
   const trip = world.walkTicks(me, L) + world.walkTicks(L, h) + 1200 + world.HOME_MARGIN
-  if (trip > world.ticksUntilNight(bot)) { log('forage', `${raw}: the ${L.biome} ${Math.round(L.d)}b off is too far for the daylight left`); lastCut = { raw, at: Date.now() }; return false }
+  if (!overnight && trip > world.ticksUntilNight(bot)) { log('forage', `${raw}: the ${L.biome} ${Math.round(L.d)}b off is too far for the daylight left`); lastCut = { raw, at: Date.now() }; return false }
   log('forage', `${raw}: searched out round home - to the ${L.biome} ${Math.round(L.d)}b off, where it grows`)
   const r = await move.travel(bot, { x: L.x, y: Math.floor(me.y), z: L.z }, { range: 16, shouldStop: ctx.shouldStop, label: 'to the ' + L.biome, anyY: true })
   if (!r.ok) { lastCut = { raw, at: Date.now() }; return false } // (the walk failed or was stopped: no search of the land)
   const count = counter(s); const before = count(bot)
-  await gather().pickPlants(bot, s.blocks, s.drops, n, Object.assign({}, ctx, { noExplore: true, filter: s.filter ? b => s.filter(bot, b) : null, force: !!s.force })).catch(() => false)
+  const pick = () => gather().pickPlants(bot, s.blocks, s.drops, n, Object.assign({}, ctx, { noExplore: true, sight: true, filter: s.filter ? b => s.filter(bot, b) : null, force: !!s.force })).catch(() => false)
+  await pick()
+  // (a FULL first look - not cut by a call, the night, a hurt: only then is an empty land an empty visit; audit 76 LOW)
+  const looked0 = !stopped(ctx)
+  // (THE LAND WALKED, not one look from where the walk ended: a meadow is hundreds of blocks of grass with a patch of a
+  //  flower here and there, and one look - 48 blocks round the arrival - found no allium, the day's 600-block walk for
+  //  nothing and the land half given up, 2026-11-15 11:29. A player looks round the land: up to LAND_HOPS more spots OF ITS
+  //  OWN BIOME in sight, LAND_HOP apart and from the spots already looked at, the nearest first - each only while the day
+  //  still covers the walk there and the walk home from it)
+  const grows = nm => Object.keys(PLANT_BIOMES).some(p => s.blocks.test(p) && PLANT_BIOMES[p].test(nm)) // (any land the plant grows in)
+  const looked = [{ x: bot.entity.position.x, z: bot.entity.position.z }]
+  const arrived = looked[0]
+  // (and never a land already given up - two empty visits: landLead's own rule)
+  const givenUp = () => (((mem.get().plantLandTried || {})[raw]) || []).filter(t => (t.n || 1) >= 2)
+  for (let hop = 0; hop < LAND_HOPS && count(bot) - before < n; hop++) {
+    if (stopped(ctx)) break
+    // (no voluntary walk with a shooter on us: the meadow's pillager camp took hp 20 -> 17 before any hop, 11:29; audit 67(a))
+    if (gather().shooterOnUs()) { log('forage', `${raw}: a shooter in sight - no more looking round the ${L.biome}`); break }
+    let spots = []; try { spots = gather().sampleBiomes(bot).filter(([nm]) => grows(nm)).map(([, p]) => p) } catch {}
+    const me2 = bot.entity.position
+    // (never into someone's camp for a flower; audit F67-1)
+    const gu = givenUp()
+    const next = spots.filter(p => !move.inForeign(p) && world.dist2(arrived, p) <= LAND_SPAN && !gu.some(t => world.dist2(t, p) < 64) && looked.every(q => world.dist2(q, p) >= LAND_HOP)).sort((a, b) => world.dist2(a, me2) - world.dist2(b, me2))[0]
+    // (each stop said: the 13:14 meadow ended its look with no line - no spot, or no daylight, or none of its land in sight;
+    //  2026-11-15. Evidence only)
+    if (!next) { log('forage', `${raw}: no more of the ${L.biome} in sight to look round (${spots.length} of its spots sampled, ${looked.length} looked at, ${spots.filter(p => world.dist2(arrived, p) > LAND_SPAN).length} past ${LAND_SPAN} of the arrival, ${spots.filter(p => gu.some(t => world.dist2(t, p) < 64)).length} in a land given up)`); break }
+    if (world.walkTicks(me2, next) + (overnight ? 0 : world.walkTicks(next, h) + world.HOME_MARGIN) > world.ticksUntilNight(bot)) { log('forage', `${raw}: more of the ${L.biome} at ${Math.round(next.x)},${Math.round(next.z)} - no daylight for it and the walk home`); break }
+    looked.push({ x: next.x, z: next.z })
+    log('forage', `${raw}: none in sight here - on to more of the ${L.biome} at ${Math.round(next.x)},${Math.round(next.z)} (look ${hop + 2} of ${LAND_HOPS + 1})`)
+    const r2 = await move.travel(bot, next, { range: 8, shouldStop: ctx.shouldStop, label: 'round the ' + L.biome, anyY: true })
+    if (!r2.ok) break
+    await pick()
+  }
   const got = count(bot) - before
   if (got > 0) { noteTrip(raw, got, null, { searched: true }); log('forage', `${raw}: +${got} in the ${L.biome}`); return true }
+  // (A LOOK CUT SHORT IS NO VISIT: the record is the land's for good - two empty visits give it up - and a call two seconds
+  //  into the first look counted as one; the hops after a full first look still count (a dusk that ends them))
+  if (!looked0) { log('forage', `${raw}: the look round the ${L.biome} at ${L.x},${L.z} was cut short - not counted as a visit`); return false }
   let n2 = 1
-  mem.update(m => { m.plantLandTried = m.plantLandTried || {}; const list = m.plantLandTried[raw] = m.plantLandTried[raw] || []; const t = list.find(q => world.dist2(q, L) < 64); if (t) { t.n = (t.n || 1) + 1; n2 = t.n } else list.push({ x: L.x, z: L.z, n: 1 }) })
+  mem.update(m => { m.plantLandTried = m.plantLandTried || {}; const list = m.plantLandTried[raw] = m.plantLandTried[raw] || []; const t = list.find(q => world.dist2(q, L) < 64); if (t) { t.n = (t.n || 1) + 1; n2 = t.n; if (!t.biome && L.biome) t.biome = L.biome } else list.push({ x: L.x, z: L.z, n: 1, biome: L.biome || null }) })
   log('forage', `${raw}: none in the ${L.biome} at ${L.x},${L.z}${n2 >= 2 ? ' - not this land again' : ' - once more another day'}`)
   return false
 }
 
 // ---- tools -------------------------------------------------------------------------------------------------
+// THE EXPEDITION'S LOOK ROUND A PLANT'S LAND (director's expedition task): landTrip from where the bot stands, overnight
+function landSearch (bot, raw, n, L, ctx = {}) {
+  const s = spec(raw); if (!s || s.kind !== 'plant') return Promise.resolve(false)
+  const at = bot.entity.position
+  return landTrip(bot, raw, s, n, Object.assign({}, L, { d: world.dist2(at, L) }), ctx, { overnight: true })
+}
+
 function shearsHeld (bot) { return inv.items(bot).find(i => i.name === 'shears' && inv.durabilityLeft(bot, i) > 2) || null }
 // shears: two iron ingots (the bank's first) - the one tool every job here but digging needs
 async function ensureShears (bot, ctx, pairs = 1) {
@@ -289,8 +367,18 @@ async function shearBlock (bot, b) {
 }
 // A leaf a player standing on the ground can reach: ground to stand on within a step of its column, up to four below it
 // (the crown of a tall tree is not walked at - the pathfinder climbed toward it and gave up, 20s a leaf)
+// (FROM THE GROUND, not from the crown: a stand on a leaf is the tree's own canopy, a floor no walk gets up onto - an acacia's
+//  flat crown read every leaf of it as one a step from a stand, and the shear trip walked at them one by one: twelve look-at
+//  walks of ~10s each, standing still under the canopy, 2 minutes of a 5-minute trip, 2026-11-15 13:28-13:31. The crown's
+//  leaves are the crown climb's and the station's - shearCrown, shearStation)
 function fromGround (bot, p) {
-  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (let dy = 0; dy <= 4; dy++) if (world.standable(bot, p.x + dx, p.y - dy, p.z + dz)) return true
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (let dy = 0; dy <= 4; dy++) {
+    const x = p.x + dx; const y = p.y - dy; const z = p.z + dz
+    if (!world.standable(bot, x, y, z)) continue
+    const f = world.at(bot, x, y - 1, z)
+    if (f && /_leaves$/.test(f.name)) continue
+    return true
+  }
   return false
 }
 // THE CROWN, A PLAYER'S WAY: leaves are mostly out of reach from the ground - a crown is 40-60 leaves and the ground sees
@@ -368,7 +456,102 @@ async function shearCrown (bot, basePos, s, target, ctx = {}) {
   log('forage', `sheared the crown of the tree at ${move.fmt(basePos)}: +${got} ${s.drops}`)
   return got
 }
+// A STATION UNDER THE CROWN, WHATEVER THE TREE'S SHAPE: the trunk climb reads a crown only over the trunk's straight top -
+// an acacia's bends off it, a dark oak's and a jungle tree's spread past it - and every acacia trip was the ground's few
+// low leaves: 22 acacia_leaves in three hours of trips toward the castle's 425, no crown ever climbed, 2026-11-15. A player
+// stands a pillar up under the canopy, shears what the arm reaches and comes down: a ground column (the real ground -
+// groundY reads through leaves and logs) beside or under the crown's leaves, open to the top (air, or a leaf of the kind -
+// sheared on the way up), its top the height whose eye reaches the most leaves for the fewest blocks of tower. Wild leaves
+// only, outside the zones; a dozen in reach or no station
+const STATION_REACH = 4.4; const STATION_RISE = 10; const STATION_MIN = 12
+let stationMs = 0 // (the last crownStation's time: the station line says it - body first; audit 74(e))
+function crownStation (bot, s, skip) {
+  const t0 = Date.now()
+  try { return crownStationInner(bot, s, skip) } finally { stationMs = Date.now() - t0; if (stationMs > 20) log('forage', `crown station search: ${stationMs}ms`) }
+}
+function crownStationInner (bot, s, skip) {
+  const me = bot.entity.position
+  const leaves = world.findBlocks(bot, s.blocks, { maxDistance: 24, count: 160, filter: b => !persistent(b) && gather().outOfZones(b) }).map(b => b.position)
+  if (leaves.length < STATION_MIN) return null
+  const cols = new Map()
+  for (const q of leaves) for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) { const x = q.x + dx; const z = q.z + dz; const k = x + ',' + z; if (!cols.has(k) && !skip.has(k)) cols.set(k, { x, z }) }
+  const near = [...cols.values()].sort((a, b) => Math.hypot(a.x - me.x, a.z - me.z) - Math.hypot(b.x - me.x, b.z - me.z)).slice(0, 60)
+  const open = (x, y, z) => { const b = world.at(bot, x, y, z); return !!b && (world.isAirish(b) || (s.blocks.test(b.name) && !persistent(b))) }
+  let best = null
+  for (const c of near) {
+    const gy = world.groundY(bot, c.x, c.z, Math.floor(me.y) + 16)
+    if (gy == null || Math.abs(gy + 1 - me.y) > 12) continue
+    const g = world.at(bot, c.x, gy, c.z); if (!g || !world.isSolid(g) || world.isWaterBlock(g)) continue
+    // (the column itself out of the zones and anyone's camp: a wild tree stands beside a base or a farm, and a leaf outside it
+    //  says nothing of the column a block over; audit F74-1)
+    const foot = new Vec3(c.x, gy + 1, c.z)
+    if (move.inForeign(foot) || !gather().outOfZones({ position: foot })) continue
+    if (!open(c.x, gy + 1, c.z) || !open(c.x, gy + 2, c.z)) continue
+    for (let t = gy + 1; t <= gy + 1 + STATION_RISE; t++) {
+      if (!open(c.x, t + 2, c.z)) break // (the jump's room over the head at this top: up to here the column is open)
+      const ex = c.x + 0.5; const ey = t + 1.62; const ez = c.z + 0.5
+      let n = 0; for (const q of leaves) if ((q.x + 0.5 - ex) ** 2 + (q.y + 0.5 - ey) ** 2 + (q.z + 0.5 - ez) ** 2 <= STATION_REACH * STATION_REACH) n++
+      const score = n - (t - gy - 1) * 1.5
+      if (n >= STATION_MIN && (!best || score > best.score)) best = { x: c.x, z: c.z, y: gy + 1, top: t, n, score }
+    }
+  }
+  return best
+}
+// Up the station's column, the crown sheared from its top, and down our own pillar (shearCrown's descent). Returns the
+// leaves got, or -1 when the column's foot could not be got to
+async function shearStation (bot, st, s, target, ctx = {}) {
+  const before = inv.count(bot, s.drops)
+  const r = await move.goTo(bot, new goals.GoalBlock(st.x, st.y, st.z), { timeoutMs: 30000, place: false, dig: false, label: 'to a station under the crown', shouldStop: ctx.shouldStop }) // (the foot is a stand read off the world: no dug way through the leaves we came for or a wall by the tree; audit F74-2)
+  const f0 = bot.entity.position.floored()
+  if (!r.ok && !(f0.x === st.x && f0.z === st.z)) return -1
+  const eye = () => bot.entity.position.offset(0, 1.62, 0)
+  const threat = () => reflex.hostiles(12).some(h => h.e.name !== 'bat')
+  let fled = false
+  const shearHere = async () => {
+    const here = world.findBlocks(bot, s.blocks, { maxDistance: STATION_REACH + 0.1, count: 80, point: eye(), filter: b => !persistent(b) && gather().outOfZones(b) })
+    for (const b of here) {
+      if (inv.count(bot, s.drops) >= target || stopped(ctx) || inv.freeSlots(bot) < 1) return // (a full pack: the leaves would fall)
+      // (a hostile come up while the crown is sheared - the long part, the body still and high on a one-block column: down
+      //  at once; audit F74-3)
+      if (threat()) { fled = true; return }
+      if (act.reach(bot, b.position, 4.5)) await shearBlock(bot, b)
+    }
+  }
+  const pillar = []
+  for (let i = 0; i < STATION_RISE + 1 && Math.floor(bot.entity.position.y + 0.01) < st.top && inv.count(bot, s.drops) < target && !stopped(ctx); i++) {
+    if (threat()) { fled = true; break } // (aloft in an open column is no place to meet one)
+    const y0 = Math.floor(bot.entity.position.y + 0.01)
+    for (const dy of [1, 2]) { const h = world.at(bot, st.x, y0 + dy, st.z); if (h && s.blocks.test(h.name) && !persistent(h)) await shearBlock(bot, h) } // (the column's own leaves: the way up)
+    if (!await gather().towerUp(bot, { onPlaced: c => pillar.push(c) })) break
+  }
+  if (!fled) await shearHere()
+  const ours = c => pillar.some(q => q.x === c.x && q.y === c.y && q.z === c.z)
+  if (pillar.length) await gather().climbDownPillar(bot, ours, { max: STATION_RISE + 4, onDug: c => { const pi = pillar.findIndex(q => q.x === c.x && q.y === c.y && q.z === c.z); if (pi >= 0) pillar.splice(pi, 1) } })
+  if (pillar.length) log('forage', `${pillar.length} pillar block(s) left in the station column at ${st.x},${st.z}${gather().downWhy() ? ' - ' + gather().downWhy() : ''}`)
+  await gather().landed(bot)
+  await act.collectDrops(bot, { radius: 7, maxMs: 8000 })
+  const got = inv.count(bot, s.drops) - before
+  log('forage', `sheared from a station under the crown at ${st.x},${st.y},${st.z} (top y${st.top}, ${st.n} leaves in its reach, found in ${stationMs}ms${fled ? ', down early - a hostile near' : ''}): +${got} ${s.drops}`)
+  return got
+}
 // The nearest wild tree of the leaves' kind with a crown worth the climb (a dozen of its leaves round the trunk's top)
+// A lead with nothing of its kind left round it, read from where we stand: every corner of its 16-block ground loaded (an
+// unloaded chunk reads null), and no block of the kind in it - any at all, unfiltered (a crown's leaves high over a stand
+// still mean the tree is there; the trip's own filter judges them on arrival)
+const LEAD_LOOK = 16
+function leadGoneFromHere (bot, s, p) {
+  for (const [dx, dz] of [[0, 0], [LEAD_LOOK, LEAD_LOOK], [-LEAD_LOOK, LEAD_LOOK], [LEAD_LOOK, -LEAD_LOOK], [-LEAD_LOOK, -LEAD_LOOK]]) if (!world.at(bot, p.x + dx, p.y, p.z + dz)) return false
+  try { return !world.findBlocks(bot, s.blocks, { maxDistance: LEAD_LOOK, count: 1, point: new Vec3(p.x, p.y, p.z) }).length } catch { return false }
+}
+// FORGET A DEAD LEAD - the one rule, from here and on arrival: the leaves' memory goes; the WOOD's only when no log of its
+// tree is within LEAD_LOOK either - a crown the trip itself sheared bare leaves its trunk standing, still the wood's lead
+// (the lead may be the log memory's own: the fallback above; audit F48-1)
+function forgetLead (bot, s, label, p) {
+  gather().forgetResource(label, p)
+  if (!s.leaves) return
+  let logs = true; try { logs = world.findBlocks(bot, logReFor(s), { maxDistance: LEAD_LOOK, count: 1, point: new Vec3(p.x, p.y, p.z) }).length > 0 } catch {}
+  if (!logs) gather().forgetResource(logNameFor(s), p)
+}
 function crownTree (bot, s, skip) {
   const logRe = logReFor(s)
   const me = bot.entity.position; const seen = new Set()
@@ -418,6 +601,7 @@ async function shearTrip (bot, s, n, ctx = {}) {
   const skip = new Set()
   const t0 = Date.now(); let empty = 0; let lastKnown = null
   const crownSkip = new Set() // (trees climbed, or that could not be got to: once a trip)
+  const stationSkip = new Set() // (station columns stood on, or not got to: once a trip)
   let noCrown = false
   let forgot = 0 // (dead spots forgotten this trip: each is the search making progress, not an empty look)
   const ok = b => gather().outOfZones(b) && !skip.has(key(b.position)) && !world.isWaterBlock(world.at(bot, b.position.x, b.position.y + 1, b.position.z)) && (!s.leaves || (!persistent(b) && fromGround(bot, b.position)))
@@ -435,6 +619,9 @@ async function shearTrip (bot, s, n, ctx = {}) {
     if (!shearsHeld(bot) && !await ensureShears(bot, ctx, s.leaves ? Math.max(1, Math.min(3, Math.ceil((target - inv.count(bot, s.drops)) / 230))) : 1)) return inv.count(bot, s.drops) >= target || 'cut'
     if (s.leaves && !noCrown) {
       const tree = crownTree(bot, s, crownSkip)
+      // (no crown over a straight trunk: a station under whatever crown is in sight - crownStation)
+      const st = tree ? null : crownStation(bot, s, stationSkip)
+      if (st) { stationSkip.add(st.x + ',' + st.z); empty = 0; if (await shearStation(bot, st, s, target, ctx) > 0) gather().noteResource(label, new Vec3(st.x, st.y, st.z)); continue }
       if (!tree) noCrown = true // (the scan is dear: once none, the ground's way for the rest of the trip; audit B5)
       else { crownSkip.add(key(tree)); empty = 0; if (await shearCrown(bot, tree, s, target, ctx) > 0) gather().noteResource(label, tree); continue } // (a grove that gave leaves: the next trip's lead)
     }
@@ -451,12 +638,22 @@ async function shearTrip (bot, s, n, ctx = {}) {
       const known = gather().knownResource(label, me0, { filter: away }) || (s.leaves ? gather().knownResource(logNameFor(s), me0, { filter: p => away(p) && !move.inZone(p, 2) }) : null) // (never the orchard's: the crown climb leaves zone trees alone; audit)
       if (known && known !== lastKnown && world.dist2(known, bot.entity.position) > 40) {
         lastKnown = known
+        // (READ FROM HERE FIRST: a lead in the chunks already loaded is looked at before it is walked to - nothing of the kind
+        //  within 16 of it is the arrival's own verdict, given now. Both evening leaf trips walked 65b to -2194,80,-538 - grass,
+        //  the leaves gone - and stalled out the dusk there; the forget on arrival never came, the walk never arrived,
+        //  2026-11-15 07:25/07:34; audit. Only with all of that ground loaded: a radius half in unloaded chunks counts short)
+        if (leadGoneFromHere(bot, s, known)) {
+          forgetLead(bot, s, label, known)
+          log('forage', `nothing to shear at the ${label} spot ${move.fmt(known)} any more (seen from ${Math.round(world.dist2(known, bot.entity.position))}b) - forgotten, no walk`)
+          forgot++; empty--
+          continue
+        }
         const r = await move.travel(bot, known, { range: 8, shouldStop: ctx.shouldStop, label: 'to ' + label })
         // (THERE, and nothing: a spot that was - a few leaves sheared once by the farm - forgotten, or the next trip walks to it
         //  again; two such near home sent a leaves trip back and forth between them for nothing, the forest 116b north,
         //  2026-10-04. A tree spot the same: its tree is gone)
         if (r && r.ok && !world.findBlocks(bot, s.blocks, { maxDistance: 16, count: 1, filter: ok }).length && !(s.leaves && crownTree(bot, s, crownSkip))) {
-          gather().forgetResource(label, known); if (s.leaves) gather().forgetResource(logNameFor(s), known)
+          forgetLead(bot, s, label, known)
           log('forage', `nothing to shear at the ${label} spot ${move.fmt(known)} any more - forgotten`)
           // (not an empty look: counted as one, three dead spots ended the trip before the forest was tried and the trip
           //  counted "for nothing" - two such and the leaves would be shut as searched out, 2026-10-04)
@@ -1035,4 +1232,4 @@ async function process (bot, by, node, n, opts = {}) {
   try { return await work(bot, node, n, opts) } catch (e) { log('forage', `${by} ${node} threw: ${e.message}`); return 0 }
 }
 
-module.exports = { landLead, tripWasCut, stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, shearsHeld, benchSpot, shoreAt, SEARCH_TRIPS }
+module.exports = { EXPEDITION_WALK, landLead, landSearch, tripWasCut, stoppedWork, lavaFuel, lavaSites, lavaSource, lavaStands, lavaKnown, bucketsAvailable, handles, spec, gather: gatherRaw, process, exhausted, exhaustedKinds, generation, seen, watch, sightMobs, noteTrip, strip, carve, harden, compost, shearBlock, ensureShears, shearsHeld, benchSpot, shoreAt, SEARCH_TRIPS }

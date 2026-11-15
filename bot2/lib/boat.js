@@ -118,7 +118,32 @@ function openCell (bot, x, z, refY) {
   }
   return { x, y: gy, z }
 }
-function chooseLaunch (bot, target, radius = 8) {
+// THE BOAT'S BOX CLEARS OURS: the server sets the boat down at the look's hit on the water and refuses it - the item kept,
+// "no boat appeared" - when its box (1.375 wide) meets a body's (0.6 wide): apart by less than 0.6875 + 0.3 on BOTH level
+// axes. The pick below keeps 1.5 off at the choosing; the walk to the edge (GoalNear 2) and the shallows' drift then stood the
+// bot within a block of the cell - one launch in four failed, each the moment's retry from the new spot launching,
+// 2026-11-15; audit R2. A margin for the hit falling short of the aim (0.85, under the water's 8/9 top) and the body's drift
+const BOAT_CLEAR = 0.6875 + 0.3 + 0.1
+function clearOfUs (me, c) { return Math.max(Math.abs(c.x + 0.5 - me.x), Math.abs(c.z + 0.5 - me.z)) >= BOAT_CLEAR }
+function sepOf (me, c) { return `${Math.abs(c.x + 0.5 - me.x).toFixed(2)}/${Math.abs(c.z + 0.5 - me.z).toFixed(2)}` } // (level x/z apart, for the log)
+// THE LOOK TO THE WATER PASSES NOTHING: the server's ray for the boat stops on a block's OUTLINE, not its collision - sugar
+// cane, grass, a flower - and sets the boat there, against our own box: refused, the item kept. Six in a row from inside a
+// cane column at -2291,63,-463, the look right and the cell 2.00 clear, 2026-11-15 18:43 (the client's own ray saw the
+// sand past it); audit F85-A. Walked eye to aim in tenths: anything but air or water before the cell itself (an unloaded
+// block too) is in the way
+const RAY_PASS_RE = /^(air|cave_air|void_air|light)$/
+function rayPass (b) { return !!b && (RAY_PASS_RE.test(b.name) || world.isWaterBlock(b)) }
+function rayBlock (bot, from, to, c) {
+  const n = Math.max(1, Math.ceil(from.distanceTo(to) / 0.1))
+  for (let i = 0; i <= n; i++) {
+    const x = Math.floor(from.x + (to.x - from.x) * i / n); const y = Math.floor(from.y + (to.y - from.y) * i / n); const z = Math.floor(from.z + (to.z - from.z) * i / n)
+    if (x === c.x && y === c.y && z === c.z) return null
+    const b = world.at(bot, x, y, z)
+    if (!rayPass(b)) return b || { name: 'an unloaded block', position: new Vec3(x, y, z) }
+  }
+  return null
+}
+function chooseLaunch (bot, target, radius = 8, ok = null) {
   const me = bot.entity.position
   const refY = Math.floor(me.y) + 6
   const direct = world.dist2(me, target)
@@ -128,7 +153,8 @@ function chooseLaunch (bot, target, radius = 8) {
     const c = openCell(bot, x, z, refY)
     if (!c) continue
     const p = { x: x + 0.5, z: z + 0.5 }
-    if (world.dist2(me, p) < 1.5) continue // (not on top of ourselves: the boat would land on our head)
+    if (world.dist2(me, p) < 1.5 || !clearOfUs(me, { x, z })) continue // (not on top of ourselves: the server refuses a boat in our box)
+    if (ok && !ok(c)) continue // (the launch's own test from where it stands: in reach, clear of us, the look to it open)
     const s = world.dist2(me, p) * 1.3 - (direct - world.dist2(p, target))
     if (s < bs) { bs = s; best = c }
   }
@@ -276,23 +302,89 @@ async function launch (bot, target, { shouldStop } = {}) {
   const it = boatItem(bot)
   if (!it) return null
   const before = new Set(Object.values(bot.entities).filter(e => e && BOAT_ENTITY_RE.test(e.name || '')).map(e => e.id))
+  const n0 = inv.count(bot, it.name) // (the item before the use: kept means the server refused it - the failure line's evidence)
   try { await bot.equip(it, 'hand') } catch (e) { log('move', `boat: couldn't hold the ${it.name}: ${e.message}`); return null }
   move.stopMoving(bot)
+  // (THE CELL FITS WHERE WE STAND NOW - after the walk to the edge, or a drift in the shallows: in reach, clear of our box,
+  //  the look to it open; else the nearest from here that fits. Standing in the plant that blocks every look - a cane
+  //  column - a step out of it first, onto a free cell beside)
+  const eye = () => bot.entity.position.offset(0, 1.62, 0)
+  const aimOf = cc => new Vec3(cc.x + 0.5, cc.y + 0.85, cc.z + 0.5)
+  const whyNot = cc => {
+    if (!clearOfUs(bot.entity.position, cc)) return `too close under me (${sepOf(bot.entity.position, cc)} apart, ${BOAT_CLEAR.toFixed(2)} wanted)`
+    if (eye().distanceTo(aimOf(cc)) > 4) return 'out of reach'
+    const b = rayBlock(bot, eye(), aimOf(cc), cc); return b ? `the look to it meets the ${b.name} at ${fmt(b.position)}` : null
+  }
+  const why0 = whyNot(c)
+  if (why0) {
+    const was = c; const fits = cc => !whyNot(cc)
+    let c2 = chooseLaunch(bot, target, 4, fits)
+    if (!c2) {
+      const me = bot.entity.position; const fx = Math.floor(me.x); const fy = Math.floor(me.y); const fz = Math.floor(me.z)
+      if (!rayPass(world.at(bot, fx, fy, fz)) || !rayPass(world.at(bot, fx, fy + 1, fz))) {
+        let st = null; let sd = Infinity
+        for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (const y of [fy, fy + 1, fy - 1]) {
+          if (!dx && !dz) continue
+          const x = fx + dx; const z = fz + dz
+          if (!world.standable(bot, x, y, z) || !rayPass(world.at(bot, x, y, z)) || !rayPass(world.at(bot, x, y + 1, z))) continue
+          const d = world.dist2({ x: x + 0.5, z: z + 0.5 }, target); if (d < sd) { sd = d; st = { x, y, z } }
+        }
+        if (st) {
+          { const hb = world.at(bot, fx, fy + 1, fz); const fb = world.at(bot, fx, fy, fz); const inB = !rayPass(hb) ? hb : fb; log('move', `boat: standing in the ${(inB && inB.name) || '?'} - a step out of it to ${fmt(st)}`) }
+          await move.goTo(bot, new goals.GoalBlock(st.x, st.y, st.z), { timeoutMs: 6000, stuckMs: 3000, dig: false, place: false, label: 'out of the plant', shouldStop })
+          move.stopMoving(bot)
+          c2 = chooseLaunch(bot, target, 4, fits)
+        }
+      }
+    }
+    if (!c2) { log('move', `boat: the water at ${fmt(was)}: ${why0} - and no other fits from here, not set down`); return null }
+    c = c2
+    log('move', `boat: the water at ${fmt(was)}: ${why0} - setting it down at ${fmt(c)} instead`)
+  }
   await bot.lookAt(aim(), true).catch(() => {})
   await sleep(150) // (the look goes out on the next physics tick; use_item carries it too, belt and braces)
   bot.activateItem()
+  const atUse = { p: bot.entity.position.clone(), yaw: bot.entity.yaw, pitch: bot.entity.pitch, g: bot.entity.onGround, w: bot.entity.isInWater } // (the body AT the use - the wait below is 2.5s)
   let e = null
   for (let k = 0; k < 25 && !e; k++) { await sleep(100); e = boatNear(bot, aim(), 3, before) }
   try { bot.deactivateItem() } catch {}
-  if (!e) { log('move', `boat: placed the ${it.name} at ${fmt(c)} but no boat appeared`); return null }
+  // (EVIDENCE: one launch in four made no boat - 20 against 58 launched on 2026-11-15, three in a row in the water after a
+  //  fall ending the flower forest expedition at 15:47. Where the body stood, the eye against the water's top, what the look
+  //  hits first, the look sent against the one wanted, the item kept or spent, a boat spawned off the aim - the cause from
+  //  the next failures, not a guess; audit R2)
+  if (!e) {
+    let why = ''
+    try {
+      const me = atUse.p; const feet = world.at(bot, Math.floor(me.x), Math.floor(me.y), Math.floor(me.z))
+      const head = world.at(bot, Math.floor(me.x), Math.floor(me.y + 1.62), Math.floor(me.z))
+      const hit = bot.blockAtCursor ? bot.blockAtCursor(5) : null
+      const want = aim().minus(me.offset(0, 1.62, 0)); const wYaw = Math.atan2(-want.x, -want.z); const wPitch = Math.atan2(want.y, Math.hypot(want.x, want.z))
+      const boats = Object.values(bot.entities).filter(x => x && x.position && BOAT_ENTITY_RE.test(x.name || '') && !before.has(x.id) && x.position.distanceTo(me) < 8).map(x => `${x.name} ${x.position.distanceTo(aim()).toFixed(1)}b from the aim`)
+      why = ` (at the use: me ${fmt(me)} ${sepOf(me, c)} apart from the cell${atUse.w ? ' in water' : ''}${atUse.g ? ' on ground' : ''}, feet ${feet ? feet.name : '?'}, head ${head ? head.name : '?'}, eye ${(me.y + 1.62 - (c.y + 0.89)).toFixed(2)} over the water's top, ${me.offset(0, 1.62, 0).distanceTo(aim()).toFixed(2)}b to it, the look now hits ${hit ? hit.name + '@' + fmt(hit.position) : 'nothing solid'}, yaw/pitch ${atUse.yaw.toFixed(2)}/${atUse.pitch.toFixed(2)} for ${wYaw.toFixed(2)}/${wPitch.toFixed(2)} (now ${bot.entity.yaw.toFixed(2)}/${bot.entity.pitch.toFixed(2)}), ${it.name} ${n0} -> ${inv.count(bot, it.name)}${boats.length ? ', new boats near: ' + boats.join('; ') : ', no new boat within 8'})`
+    } catch {}
+    log('move', `boat: placed the ${it.name} at ${fmt(c)} but no boat appeared${why}`); return null
+  }
   await sleep(400) // (let it settle on the surface before stepping in)
   if (!await mount(bot, e)) { log('move', `boat: couldn't get into the boat at ${fmt(e.position)}`); await pickUp(bot, e); return null }
-  log('move', `boat: launched at ${fmt(e.position)} (${Math.round(world.dist2(e.position, target))}b to ${fmt(target)})`)
+  log('move', `boat: launched at ${fmt(e.position)} (${Math.round(world.dist2(e.position, target))}b to ${fmt(target)}; ${sepOf(atUse.p, c)} apart at the use)`)
   return e
 }
 
 // ---- the ride ------------------------------------------------------------------------------------
+// (26.3: a server counts the client's movement by CLIENT TICK - a second position between two tick_ends is a kick - and
+//  this ride has its own 50ms clock, which a slow turn of the event loop runs twice inside one tick. So on 26.3 the ride's
+//  latest state waits for the tick ('clientTick', the patched physics' hook) and goes out once inside it, as a player's
+//  client sends it; older servers get it at once, as before; audit)
+let rideDue = null; let rideHook = null
 function sendRide (bot, pos, yaw, v) {
+  if (!bot._client.__mc263compat) return writeRide(bot, pos, yaw, v)
+  rideDue = { x: pos.x, y: pos.y, z: pos.z, yaw, v }
+  if (rideHook !== bot) {
+    rideHook = bot
+    bot.on('clientTick', () => { const r = rideDue; rideDue = null; if (r && bot.vehicle) writeRide(bot, r, r.yaw, r.v) })
+  }
+}
+function writeRide (bot, pos, yaw, v) {
   const conv = require('mineflayer/lib/conversions')
   const y = conv.toNotchianYaw(yaw)
   try {
